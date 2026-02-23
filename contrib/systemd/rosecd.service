@@ -1,0 +1,34 @@
+[Unit]
+Description=rosec - read-only Secret Service daemon
+Documentation=https://github.com/jmylchreest/rosec
+# Start after the D-Bus session bus is available
+After=dbus.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.secrets
+ExecStart=%h/.cargo/bin/rosecd
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+
+# Allow network access (needed for Bitwarden API)
+PrivateNetwork=no
+
+# Environment
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

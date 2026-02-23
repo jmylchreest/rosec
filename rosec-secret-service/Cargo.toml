@@ -1,0 +1,21 @@
+[package]
+name = "rosec-secret-service"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+rosec-core = { path = "../rosec-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+tokio = { workspace = true }
+zbus = "4.4.0"
+zvariant = "4.2.0"
+uuid = { version = "1.16.0", features = ["v4"] }

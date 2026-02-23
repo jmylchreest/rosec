@@ -1,0 +1,46 @@
+# rosec configuration
+#
+# Place this file at $XDG_CONFIG_HOME/rosec/config.toml
+# (usually ~/.config/rosec/config.toml), or pass --config <path> to rosecd.
+
+[service]
+dedup_strategy = "newest"       # "newest" (default) or "priority"
+dedup_time_fallback = "created" # "created" (default) or "none"
+refresh_interval_secs = 60      # background sync interval (default: 60)
+
+[autolock]
+on_logout = true
+on_session_lock = true
+idle_timeout_minutes = 15       # lock after N minutes idle (omit to disable)
+max_unlocked_minutes = 240      # lock after N minutes unlocked (omit to disable)
+
+[prompt]
+backend = "builtin"             # "builtin" uses rosec-prompt; or path to custom binary
+# args = ["--hint=Backend: {{backend}}"]
+
+[prompt.theme]
+# Colors are 8-digit hex (#RRGGBBAA). Short aliases shown in comments.
+background = "#1e1e2ecc"        # alias: bg
+foreground = "#cdd6f4ff"        # alias: fg
+label_color = "#a6adc8ff"       # alias: lc
+accent_color = "#7aa2f7ff"      # alias: ac
+input_background = "#181825ff"  # alias: ibg
+input_text = "#cdd6f4ff"        # alias: it
+border_color = "#89b4faff"      # alias: bd
+border_width = 2                # alias: bw
+font_family = "monospace"       # alias: font
+font_size = 14                  # alias: size
+# confirm_background = ""       # alias: ybg  (empty = use accent_color)
+# confirm_text = ""             # alias: yt   (empty = use foreground)
+# cancel_background = ""        # alias: nbg  (empty = use background)
+# cancel_text = ""              # alias: nt   (empty = use foreground)
+
+# Backend configuration
+[[backend]]
+id = "bitwarden"
+type = "bitwarden"
+
+[backend.options]
+email = "user@example.com"
+# base_url = "https://vault.bitwarden.com"  # omit for official US cloud
+# base_url = "https://your-vaultwarden.example.com"  # for self-hosted
