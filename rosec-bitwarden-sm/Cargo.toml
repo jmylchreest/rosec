@@ -1,0 +1,29 @@
+[package]
+name = "rosec-bitwarden-sm"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+# This crate is intentionally licensed separately from the rest of the workspace.
+# The Bitwarden SDK is distributed under the Bitwarden SDK License Agreement v1,
+# which is not OSI-approved.  Distro packagers can exclude this crate by not
+# enabling the "bitwarden-sm" workspace feature.
+license = "LicenseRef-Bitwarden-SDK"
+repository = { workspace = true }
+description = "Bitwarden Secrets Manager backend for rosec (uses proprietary Bitwarden SDK)"
+
+[dependencies]
+rosec-core = { path = "../rosec-core" }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+async-trait = { workspace = true }
+zeroize   = { workspace = true }
+tokio     = { workspace = true }
+hkdf      = { workspace = true }
+sha2      = { workspace = true }
+
+# The Bitwarden Secrets Manager SDK — proprietary license (see crate license field).
+bitwarden = { version = "2", features = ["secrets"] }
+uuid      = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

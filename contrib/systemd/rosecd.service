@@ -1,14 +1,20 @@
 [Unit]
 Description=rosec - read-only Secret Service daemon
 Documentation=https://github.com/jmylchreest/rosec
-# Start after the D-Bus session bus is available
-After=dbus.service
+# Start after the D-Bus session bus is available.
+# graphical-session.target ensures the Wayland compositor is running first,
+# which is required for the unlock prompt GUI.
+After=dbus.service graphical-session.target
 Requires=dbus.service
+PartOf=graphical-session.target
 
 [Service]
 Type=dbus
 BusName=org.freedesktop.secrets
-ExecStart=%h/.cargo/bin/rosecd
+# Adjust ExecStart to match your install location:
+#   /usr/local/bin/rosecd   — system-wide install (sudo install)
+#   %h/.cargo/bin/rosecd    — cargo install (development)
+ExecStart=/usr/local/bin/rosecd
 Restart=on-failure
 RestartSec=5
 

@@ -109,13 +109,79 @@ impl Default for PromptTheme {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A backend configuration entry.
+///
+/// `Debug` is manually implemented to redact known sensitive option keys
+/// (passwords, tokens, secrets) so they don't appear in logs.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BackendEntry {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
     pub options: HashMap<String, serde_json::Value>,
+
+    /// Ordered list of glob patterns selecting which sensitive attribute(s) to
+    /// return as the "secret" for standard Secret Service `GetSecret` calls.
+    ///
+    /// The service iterates these patterns in order and returns the first
+    /// sensitive attribute whose name matches.  Examples:
+    ///
+    /// ```toml
+    /// return_attr = ["password", "totp", "number", "private_key", "notes"]
+    /// ```
+    ///
+    /// If `None`, a sensible default is used:
+    /// `["password", "number", "private_key", "notes"]`.
+    #[serde(default)]
+    pub return_attr: Option<Vec<String>>,
+
+    /// Glob patterns controlling which attributes are used for item matching
+    /// and search filtering.
+    ///
+    /// Reserved for future use.  When implemented, only attributes whose names
+    /// match at least one pattern will participate in `SearchItems` filtering.
+    #[serde(default)]
+    pub match_attr: Option<Vec<String>>,
+}
+
+/// Option keys whose values must never appear in logs or debug output.
+const SENSITIVE_OPTION_KEYS: &[&str] = &[
+    "password",
+    "token",
+    "access_token",
+    "client_secret",
+    "api_key",
+    "secret",
+    "private_key",
+    "passphrase",
+];
+
+impl std::fmt::Debug for BackendEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted: HashMap<&str, &str> = self
+            .options
+            .keys()
+            .map(|k| {
+                let v = if SENSITIVE_OPTION_KEYS
+                    .iter()
+                    .any(|s| k.to_lowercase().contains(s))
+                {
+                    "[redacted]"
+                } else {
+                    "[present]"
+                };
+                (k.as_str(), v)
+            })
+            .collect();
+        f.debug_struct("BackendEntry")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("options", &redacted)
+            .field("return_attr", &self.return_attr)
+            .field("match_attr", &self.match_attr)
+            .finish()
+    }
 }
 
 impl Default for AutoLockPolicy {
@@ -348,6 +414,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_bitwarden_sm_backend_entry() {
+        let toml_str = r#"
+            [[backend]]
+            id = "my-sm"
+            type = "bitwarden-sm"
+
+            [backend.options]
+            access_token    = "0.uuid.secret:key"
+            organization_id = "00000000-0000-0000-0000-000000000000"
+            server_url      = "https://vault.example.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.backend.len(), 1);
+        let entry = &cfg.backend[0];
+        assert_eq!(entry.id, "my-sm");
+        assert_eq!(entry.kind, "bitwarden-sm");
+        assert_eq!(
+            entry.options.get("access_token").and_then(|v| v.as_str()),
+            Some("0.uuid.secret:key")
+        );
+        assert_eq!(
+            entry
+                .options
+                .get("organization_id")
+                .and_then(|v| v.as_str()),
+            Some("00000000-0000-0000-0000-000000000000")
+        );
+        assert_eq!(
+            entry.options.get("server_url").and_then(|v| v.as_str()),
+            Some("https://vault.example.com")
+        );
+        // Confirm that Debug output redacts access_token
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("0.uuid.secret:key"));
+    }
+
+    #[test]
     fn autolock_custom_values() {
         let toml_str = r#"
             [autolock]
@@ -360,5 +464,45 @@ mod tests {
         assert!(!cfg.autolock.on_session_lock);
         assert_eq!(cfg.autolock.idle_timeout_minutes, Some(30));
         // max_unlocked_minutes not set — depends on Default impl
+    }
+
+    #[test]
+    fn parse_return_attr_and_match_attr() {
+        let toml_str = r#"
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+            return_attr = ["password", "totp", "number", "notes"]
+            match_attr = ["username", "uri"]
+
+            [backend.options]
+            email = "test@example.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let entry = &cfg.backend[0];
+        assert_eq!(
+            entry.return_attr.as_deref(),
+            Some(&["password", "totp", "number", "notes"][..])
+                .map(|s| s.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+                .as_deref()
+        );
+        assert_eq!(
+            entry.match_attr.as_deref(),
+            Some(&["username", "uri"][..])
+                .map(|s| s.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+                .as_deref()
+        );
+    }
+
+    #[test]
+    fn return_attr_defaults_to_none() {
+        let toml_str = r#"
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.backend[0].return_attr.is_none());
+        assert!(cfg.backend[0].match_attr.is_none());
     }
 }

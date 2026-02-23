@@ -9,7 +9,8 @@ use zbus::interface;
 pub struct CollectionState {
     pub label: String,
     pub items: Arc<Mutex<HashMap<String, VaultItemMeta>>>,
-    pub backend: Arc<dyn VaultBackend>,
+    /// All backends backing this collection, in configured order.
+    pub backends: Vec<Arc<dyn VaultBackend>>,
 }
 
 pub struct SecretCollection {
@@ -29,14 +30,16 @@ impl SecretCollection {
         self.state.label.clone()
     }
 
+    /// The collection is considered unlocked if *any* backend is unlocked.
     #[zbus(property)]
     async fn locked(&self) -> bool {
-        self.state
-            .backend
-            .status()
-            .await
-            .map(|s| s.locked)
-            .unwrap_or(true)
+        for backend in &self.state.backends {
+            match backend.status().await {
+                Ok(s) if !s.locked => return false,
+                _ => {}
+            }
+        }
+        true
     }
 
     #[zbus(property)]

@@ -11,6 +11,12 @@ pub enum BitwardenError {
     #[error("two-factor authentication required")]
     TwoFactorRequired { providers: Vec<u8> },
 
+    /// Server rejected login because this device UUID is not yet registered.
+    /// The user must run `rosec backend register <id>` with their personal
+    /// API key to register the device, then retry authentication.
+    #[error("new device verification required — run `rosec backend register <id>` first")]
+    DeviceVerificationRequired,
+
     #[error("crypto error: {0}")]
     Crypto(String),
 
@@ -38,6 +44,7 @@ impl From<BitwardenError> for rosec_core::BackendError {
             BitwardenError::TwoFactorRequired { .. } => {
                 Self::Unavailable("two-factor authentication required".to_string())
             }
+            BitwardenError::DeviceVerificationRequired => Self::RegistrationRequired,
             other => Self::Other(anyhow::anyhow!("{other}")),
         }
     }

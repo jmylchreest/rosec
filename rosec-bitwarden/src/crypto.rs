@@ -8,12 +8,8 @@ use aes::Aes256;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use block_padding::Pkcs7;
-#[cfg(test)]
-use cbc::cipher::BlockEncryptMut;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use cbc::Decryptor;
-#[cfg(test)]
-use cbc::Encryptor;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -22,12 +18,6 @@ use crate::error::BitwardenError;
 
 type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcDec = Decryptor<Aes256>;
-#[cfg(test)]
-type Aes256CbcEnc = Encryptor<Aes256>;
-
-/// AES-CBC encryption result: (IV, ciphertext, MAC).
-#[cfg(test)]
-pub(crate) type EncryptResult = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// A 64-byte key pair: 32 bytes encryption key + 32 bytes MAC key.
 #[derive(Clone)]
@@ -185,18 +175,27 @@ pub fn decrypt_symmetric(
     Ok(Zeroizing::new(plaintext.to_vec()))
 }
 
+/// AES-CBC encryption result: (IV, ciphertext, MAC).  Test-only.
+#[cfg(test)]
+type EncryptResult = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Encrypt data using AES-256-CBC + HMAC-SHA256.
+///
+/// Only used in tests; production encryption is handled by `rosec-core::credential`.
 #[cfg(test)]
 pub(crate) fn encrypt_symmetric(
     keys: &Keys,
     plaintext: &[u8],
 ) -> Result<EncryptResult, BitwardenError> {
+    use cbc::cipher::BlockEncryptMut;
+    use cbc::Encryptor;
     use rand::RngCore;
+
+    type Aes256CbcEnc = Encryptor<Aes256>;
 
     let mut iv = vec![0u8; 16];
     rand::rng().fill_bytes(&mut iv);
 
-    // Pad and encrypt
     let pad_len = 16 - (plaintext.len() % 16);
     let mut buf = vec![0u8; plaintext.len() + pad_len];
     buf[..plaintext.len()].copy_from_slice(plaintext);
@@ -208,7 +207,6 @@ pub(crate) fn encrypt_symmetric(
         .map_err(|e| BitwardenError::Crypto(format!("aes encrypt: {e}")))?
         .to_vec();
 
-    // Compute MAC
     let mut hmac = HmacSha256::new_from_slice(keys.mac_key())
         .map_err(|e| BitwardenError::Crypto(format!("hmac init: {e}")))?;
     hmac.update(&iv);

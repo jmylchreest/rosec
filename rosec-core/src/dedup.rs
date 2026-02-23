@@ -79,8 +79,25 @@ fn select_by_newest(
 ) -> VaultItemMeta {
     // Callers always pass non-empty slices (grouped from a non-empty HashMap entry).
     debug_assert!(!candidates.is_empty(), "candidates must be non-empty");
-    let mut winner = candidates[0].clone();
-    for candidate in &candidates[1..] {
+    // Use iterator destructuring so there is no index-based access.
+    let (first, rest) = match candidates.split_first() {
+        Some(pair) => pair,
+        // Empty slice: debug_assert above catches this in test builds;
+        // in release builds return a zero-value item rather than panic.
+        None => {
+            return VaultItemMeta {
+                id: String::new(),
+                backend_id: String::new(),
+                label: String::new(),
+                attributes: crate::Attributes::new(),
+                created: None,
+                modified: None,
+                locked: true,
+            }
+        }
+    };
+    let mut winner = first.clone();
+    for candidate in rest {
         let candidate_time = timestamp(candidate, fallback);
         let winner_time = timestamp(&winner, fallback);
         if candidate_time > winner_time {

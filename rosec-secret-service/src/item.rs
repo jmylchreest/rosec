@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rosec_core::{VaultBackend, VaultItemMeta};
+use rosec_core::{BackendError, VaultBackend, VaultItemMeta};
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 
-use crate::service::{build_secret_value, map_backend_error};
+use crate::service::build_secret_value;
+use crate::state::map_backend_error;
 use crate::session::SessionManager;
 
 #[derive(Clone)]
@@ -15,6 +16,12 @@ pub struct ItemState {
     pub path: String,
     pub backend: Arc<dyn VaultBackend>,
     pub sessions: Arc<SessionManager>,
+    /// Ordered glob patterns for selecting which sensitive attribute to return
+    /// from `GetSecret`.  Derived from the backend's `return_attr` config.
+    pub return_attr_patterns: Vec<String>,
+    /// Tokio runtime handle — required to bridge zbus's async-io executor with
+    /// backend futures that depend on the Tokio reactor (e.g. reqwest).
+    pub tokio_handle: tokio::runtime::Handle,
 }
 
 pub struct SecretItem {
@@ -66,18 +73,53 @@ impl SecretItem {
             .unwrap_or(0)
     }
 
-    async fn get_secret(&self, session: &str) -> Result<zvariant::Value<'_>, FdoError> {
+    async fn get_secret(&self, session: &str) -> Result<zvariant::Value<'static>, FdoError> {
+        use wildmatch::WildMatch;
+
         ensure_session(&self.state.sessions, session)?;
         if self.state.meta.locked {
             return Err(FdoError::Failed("locked".to_string()));
         }
+        let aes_key = self
+            .state
+            .sessions
+            .get_session_key(session)
+            .map_err(map_backend_error)?;
+
+        let backend = Arc::clone(&self.state.backend);
+        let item_id = self.state.meta.id.clone();
+        let patterns = self.state.return_attr_patterns.clone();
+
         let secret = self
             .state
-            .backend
-            .get_secret(&self.state.meta.id)
+            .tokio_handle
+            .spawn(async move {
+                // Try return_attr resolution first.
+                match backend.get_item_attributes(&item_id).await {
+                    Ok(ia) => {
+                        for pattern in &patterns {
+                            let wm = WildMatch::new(pattern);
+                            if let Some(matched) = ia.secret_names.iter().find(|n| wm.matches(n)) {
+                                match backend.get_secret_attr(&item_id, matched).await {
+                                    Ok(s) => return Ok(s),
+                                    Err(BackendError::NotFound) => continue,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                        // No pattern matched — fall back.
+                        backend.get_secret(&item_id).await
+                    }
+                    // Backend doesn't support attribute model — use legacy path.
+                    Err(BackendError::NotSupported) => backend.get_secret(&item_id).await,
+                    Err(e) => Err(e),
+                }
+            })
             .await
+            .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?
             .map_err(map_backend_error)?;
-        build_secret_value(session, &secret)
+
+        build_secret_value(session, &secret, aes_key.as_deref())
     }
 
     fn set_secret(&self, _secret: zvariant::Value) -> Result<(), FdoError> {
@@ -110,6 +152,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "Mock"
+        }
+
+        fn kind(&self) -> &str {
+            "mock"
         }
 
         async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -146,6 +192,14 @@ mod tests {
         async fn search(&self, _attrs: &Attributes) -> Result<Vec<VaultItemMeta>, BackendError> {
             Ok(Vec::new())
         }
+
+        // Return NotSupported so the get_secret fallback path is exercised.
+        async fn get_item_attributes(
+            &self,
+            _id: &str,
+        ) -> Result<rosec_core::ItemAttributes, BackendError> {
+            Err(BackendError::NotSupported)
+        }
     }
 
     fn meta(locked: bool) -> VaultItemMeta {
@@ -169,13 +223,15 @@ mod tests {
             path: "/org/freedesktop/secrets/item/mock/one".to_string(),
             backend,
             sessions: sessions.clone(),
+            return_attr_patterns: vec![],
+            tokio_handle: tokio::runtime::Handle::current(),
         };
         let item = SecretItem::new(state);
 
         let invalid = item.get_secret("invalid").await;
         assert!(invalid.is_err());
 
-        let session = match sessions.open_session("plain") {
+        let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
@@ -192,10 +248,12 @@ mod tests {
             path: "/org/freedesktop/secrets/item/mock/two".to_string(),
             backend,
             sessions: sessions.clone(),
+            return_attr_patterns: vec![],
+            tokio_handle: tokio::runtime::Handle::current(),
         };
         let item = SecretItem::new(state);
 
-        let session = match sessions.open_session("plain") {
+        let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };

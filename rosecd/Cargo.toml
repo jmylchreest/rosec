@@ -6,11 +6,21 @@ rust-version = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 
+[features]
+## Enable the Bitwarden Secrets Manager backend.
+##
+## WARNING: This feature depends on rosec-bitwarden-sm, which uses the
+## Bitwarden SDK License Agreement v1 — a proprietary, non-OSI license.
+## Distro packagers who cannot ship proprietary software should omit this
+## feature.
+bitwarden-sm = ["dep:rosec-bitwarden-sm"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 rosec-core = { path = "../rosec-core" }
 rosec-bitwarden = { path = "../rosec-bitwarden" }
+rosec-bitwarden-sm = { path = "../rosec-bitwarden-sm", optional = true }
 rosec-secret-service = { path = "../rosec-secret-service" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,4 +28,8 @@ tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }
 zbus = "4.4.0"
+futures-util = "0.3"
+notify = "7"
+libc = { workspace = true }

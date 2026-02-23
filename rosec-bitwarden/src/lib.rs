@@ -19,8 +19,12 @@
 //! use rosec_core::{UnlockInput, VaultBackend};
 //!
 //! let config = BitwardenConfig {
-//!     server_url: None, // official US cloud
+//!     id: "personal".to_string(),
 //!     email: "user@example.com".to_string(),
+//!     region: None,    // default: official US cloud
+//!     base_url: None,
+//!     api_url: None,
+//!     identity_url: None,
 //! };
 //!
 //! let backend = BitwardenBackend::new(config)?;
@@ -34,7 +38,8 @@ pub mod backend;
 pub mod cipher;
 pub mod crypto;
 pub mod error;
+pub mod oauth_cred;
 pub mod vault;
 
-pub use backend::{BitwardenBackend, BitwardenConfig};
+pub use backend::{BitwardenBackend, BitwardenConfig, BitwardenRegion};
 pub use error::BitwardenError;

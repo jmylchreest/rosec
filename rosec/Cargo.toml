@@ -11,3 +11,12 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 zbus = "4.4.0"
 zvariant = "4.2.0"
+libc = { workspace = true }
+rosec-core = { path = "../rosec-core" }
+toml_edit = { workspace = true }
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+wildmatch = { workspace = true }

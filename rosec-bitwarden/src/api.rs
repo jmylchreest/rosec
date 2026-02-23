@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 use crate::crypto::{self, KdfParams};
 use crate::error::BitwardenError;
@@ -158,15 +159,22 @@ impl ApiClient {
         let body = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            // Check for 2FA required
-            if let Ok(err_resp) = serde_json::from_str::<LoginErrorResponse>(&body)
-                && err_resp
+            if let Ok(err_resp) = serde_json::from_str::<LoginErrorResponse>(&body) {
+                // Device not registered — server requires new-device verification.
+                // User must run `rosec backend register <id>` to register this
+                // device UUID via the personal API key (client_credentials grant).
+                if err_resp.error.as_deref() == Some("device_error") {
+                    return Err(BitwardenError::DeviceVerificationRequired);
+                }
+                // 2FA required (TOTP, email, Yubikey, etc.)
+                if err_resp
                     .error_description
                     .as_deref()
                     .is_some_and(|d| d.contains("Two factor required"))
-            {
-                let providers = err_resp.two_factor_providers.unwrap_or_default();
-                return Err(BitwardenError::TwoFactorRequired { providers });
+                {
+                    let providers = err_resp.two_factor_providers.unwrap_or_default();
+                    return Err(BitwardenError::TwoFactorRequired { providers });
+                }
             }
             return Err(BitwardenError::Auth(format!(
                 "login failed ({status}): {body}"
@@ -178,6 +186,66 @@ impl ApiClient {
 
         debug!("login successful");
         Ok(login)
+    }
+
+    /// Register this device with Bitwarden using the personal API key.
+    ///
+    /// Bitwarden's new-device verification blocks `grant_type=password` login
+    /// from unrecognised device UUIDs.  The fix is a one-time call with
+    /// `grant_type=client_credentials` using the user's personal API key
+    /// (`client_id` + `client_secret` from the Bitwarden web vault →
+    /// Account Settings → Security → Keys → API Key).
+    ///
+    /// The token response is intentionally discarded — the sole purpose is to
+    /// register the device UUID with the server so subsequent password logins
+    /// succeed.
+    ///
+    /// This mirrors the behaviour of `rbw register`.
+    pub async fn register_device(
+        &self,
+        email: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<(), BitwardenError> {
+        let url = format!("{}/connect/token", self.urls.identity_url);
+
+        let auth_email = crypto::b64_url_encode(email.as_bytes());
+
+        let mut form = HashMap::new();
+        form.insert("grant_type", "client_credentials".to_string());
+        // scope must be "api" only — NOT "api offline_access" — for the
+        // personal API key grant.  This is what rbw uses.
+        form.insert("scope", "api".to_string());
+        form.insert("client_id", client_id.to_string());
+        form.insert("client_secret", client_secret.to_string());
+        form.insert("username", email.to_string());
+        form.insert("deviceType", "8".to_string());
+        form.insert("deviceIdentifier", self.device_id.clone());
+        form.insert("deviceName", "rosec".to_string());
+
+        debug!(email, "register_device request");
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Bitwarden-Client-Name", "cli")
+            .header("Device-Type", "8")
+            .header("auth-email", auth_email)
+            .form(&form)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BitwardenError::Auth(format!(
+                "device registration failed ({status}): {body}"
+            )));
+        }
+
+        // Discard the token — we only needed to register the device UUID.
+        debug!("device registered successfully");
+        Ok(())
     }
 
     /// Refresh the access token using a refresh token.
@@ -329,7 +397,11 @@ pub struct TwoFactorSubmission {
     pub provider: u8,
 }
 
-/// Two-factor provider types.
+/// Two-factor provider type constants.
+///
+/// Currently only used in test assertions. Exposed behind `#[cfg(test)]` until
+/// 2FA interactive flow is implemented (DO-AUTOLOCK-LOGIND backlog item).
+#[cfg(test)]
 pub mod two_factor_provider {
     pub const AUTHENTICATOR: u8 = 0;
     pub const EMAIL: u8 = 1;
@@ -338,26 +410,77 @@ pub mod two_factor_provider {
     pub const WEBAUTHN: u8 = 7;
 }
 
-#[derive(Debug, Deserialize)]
+/// Deserialize a `String` field directly into a `Zeroizing<String>`.
+fn deser_zeroizing_string<'de, D>(de: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(de)?;
+    Ok(Zeroizing::new(s))
+}
+
+/// Deserialize an `Option<String>` field directly into an `Option<Zeroizing<String>>`.
+fn deser_opt_zeroizing_string<'de, D>(de: D) -> Result<Option<Zeroizing<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(de)?;
+    Ok(opt.map(Zeroizing::new))
+}
+
+/// Login response — tokens and the protected vault key are all sensitive.
+///
+/// All three fields use `Zeroizing<String>` so the values are scrubbed from
+/// memory as soon as the struct is dropped (after the auth flow completes).
+/// `derive(Debug)` is intentionally omitted; use the manual impl below.
+#[derive(Deserialize)]
 pub struct LoginResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    #[serde(alias = "Key")]
-    pub key: Option<String>,
+    #[serde(deserialize_with = "deser_zeroizing_string")]
+    pub access_token: Zeroizing<String>,
+    #[serde(default, deserialize_with = "deser_opt_zeroizing_string")]
+    pub refresh_token: Option<Zeroizing<String>>,
+    /// The user's protected symmetric vault key, returned by the server on login.
+    #[serde(alias = "Key", default, deserialize_with = "deser_opt_zeroizing_string")]
+    pub key: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[redacted]"))
+            .field("key", &self.key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct LoginErrorResponse {
+    /// Top-level OAuth error code, e.g. `"invalid_grant"`, `"device_error"`.
+    #[serde(alias = "error")]
+    error: Option<String>,
     #[serde(alias = "error_description")]
     error_description: Option<String>,
     #[serde(alias = "TwoFactorProviders")]
     two_factor_providers: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Refresh response — tokens are sensitive.
+#[derive(Deserialize)]
 pub struct RefreshResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
+    #[serde(deserialize_with = "deser_zeroizing_string")]
+    pub access_token: Zeroizing<String>,
+    #[serde(default, deserialize_with = "deser_opt_zeroizing_string")]
+    pub refresh_token: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for RefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshResponse")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,7 +497,7 @@ pub struct SyncResponse {
 pub struct SyncProfile {
     #[serde(alias = "Key")]
     pub key: Option<String>,
-    #[serde(alias = "PrivateKey")]
+    #[serde(alias = "PrivateKey", alias = "privateKey")]
     pub private_key: Option<String>,
     #[serde(alias = "Organizations", default)]
     pub organizations: Vec<SyncOrganization>,
@@ -400,11 +523,11 @@ pub struct SyncFolder {
 pub struct SyncCipher {
     #[serde(alias = "Id")]
     pub id: Option<String>,
-    #[serde(alias = "FolderId")]
+    #[serde(alias = "FolderId", alias = "folderId")]
     pub folder_id: Option<String>,
-    #[serde(alias = "OrganizationId")]
+    #[serde(alias = "OrganizationId", alias = "organizationId")]
     pub organization_id: Option<String>,
-    #[serde(alias = "Type")]
+    #[serde(alias = "Type", alias = "type")]
     pub cipher_type: Option<u8>,
     #[serde(alias = "Name")]
     pub name: Option<String>,
@@ -414,11 +537,11 @@ pub struct SyncCipher {
     pub key: Option<String>,
     #[serde(alias = "Reprompt")]
     pub reprompt: Option<u8>,
-    #[serde(alias = "DeletedDate")]
+    #[serde(alias = "DeletedDate", alias = "deletedDate")]
     pub deleted_date: Option<String>,
-    #[serde(alias = "RevisionDate")]
+    #[serde(alias = "RevisionDate", alias = "revisionDate")]
     pub revision_date: Option<String>,
-    #[serde(alias = "CreationDate")]
+    #[serde(alias = "CreationDate", alias = "creationDate")]
     pub creation_date: Option<String>,
     #[serde(alias = "Login")]
     pub login: Option<SyncLogin>,
@@ -426,9 +549,9 @@ pub struct SyncCipher {
     pub card: Option<SyncCard>,
     #[serde(alias = "Identity")]
     pub identity: Option<SyncIdentity>,
-    #[serde(alias = "SecureNote")]
+    #[serde(alias = "SecureNote", alias = "secureNote")]
     pub secure_note: Option<serde_json::Value>,
-    #[serde(alias = "SshKey")]
+    #[serde(alias = "SshKey", alias = "sshKey")]
     pub ssh_key: Option<SyncSshKey>,
     #[serde(alias = "Fields", default)]
     pub fields: Option<Vec<SyncField>>,
@@ -450,21 +573,21 @@ pub struct SyncLogin {
 pub struct SyncUri {
     #[serde(alias = "Uri")]
     pub uri: Option<String>,
-    #[serde(alias = "Match")]
+    #[serde(alias = "Match", alias = "match")]
     pub match_type: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SyncCard {
-    #[serde(alias = "CardholderName")]
+    #[serde(alias = "CardholderName", alias = "cardholderName")]
     pub cardholder_name: Option<String>,
     #[serde(alias = "Number")]
     pub number: Option<String>,
     #[serde(alias = "Brand")]
     pub brand: Option<String>,
-    #[serde(alias = "ExpMonth")]
+    #[serde(alias = "ExpMonth", alias = "expMonth")]
     pub exp_month: Option<String>,
-    #[serde(alias = "ExpYear")]
+    #[serde(alias = "ExpYear", alias = "expYear")]
     pub exp_year: Option<String>,
     #[serde(alias = "Code")]
     pub code: Option<String>,
@@ -474,23 +597,47 @@ pub struct SyncCard {
 pub struct SyncIdentity {
     #[serde(alias = "Title")]
     pub title: Option<String>,
-    #[serde(alias = "FirstName")]
+    #[serde(alias = "FirstName", alias = "firstName")]
     pub first_name: Option<String>,
-    #[serde(alias = "LastName")]
+    #[serde(alias = "MiddleName", alias = "middleName")]
+    pub middle_name: Option<String>,
+    #[serde(alias = "LastName", alias = "lastName")]
     pub last_name: Option<String>,
+    #[serde(alias = "Username")]
+    pub username: Option<String>,
+    #[serde(alias = "Company")]
+    pub company: Option<String>,
+    #[serde(alias = "Ssn")]
+    pub ssn: Option<String>,
+    #[serde(alias = "PassportNumber", alias = "passportNumber")]
+    pub passport_number: Option<String>,
+    #[serde(alias = "LicenseNumber", alias = "licenseNumber")]
+    pub license_number: Option<String>,
     #[serde(alias = "Email")]
     pub email: Option<String>,
     #[serde(alias = "Phone")]
     pub phone: Option<String>,
-    #[serde(alias = "Username")]
-    pub username: Option<String>,
+    #[serde(alias = "Address1", alias = "address1")]
+    pub address1: Option<String>,
+    #[serde(alias = "Address2", alias = "address2")]
+    pub address2: Option<String>,
+    #[serde(alias = "Address3", alias = "address3")]
+    pub address3: Option<String>,
+    #[serde(alias = "City")]
+    pub city: Option<String>,
+    #[serde(alias = "State")]
+    pub state: Option<String>,
+    #[serde(alias = "PostalCode", alias = "postalCode")]
+    pub postal_code: Option<String>,
+    #[serde(alias = "Country")]
+    pub country: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SyncSshKey {
-    #[serde(alias = "PrivateKey")]
+    #[serde(alias = "PrivateKey", alias = "privateKey")]
     pub private_key: Option<String>,
-    #[serde(alias = "PublicKey")]
+    #[serde(alias = "PublicKey", alias = "publicKey")]
     pub public_key: Option<String>,
     #[serde(alias = "Fingerprint", alias = "keyFingerprint")]
     pub fingerprint: Option<String>,
@@ -498,7 +645,7 @@ pub struct SyncSshKey {
 
 #[derive(Debug, Deserialize)]
 pub struct SyncField {
-    #[serde(alias = "Type")]
+    #[serde(alias = "Type", alias = "type")]
     pub field_type: Option<u8>,
     #[serde(alias = "Name")]
     pub name: Option<String>,
@@ -583,18 +730,28 @@ mod tests {
             "Key": "2.encryptedKey"
         }"#;
         let resp: LoginResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "eyJhbGc...");
-        assert_eq!(resp.refresh_token, Some("refresh123".to_string()));
-        assert_eq!(resp.key, Some("2.encryptedKey".to_string()));
+        assert_eq!(resp.access_token.as_str(), "eyJhbGc...");
+        assert_eq!(resp.refresh_token.as_deref().map(|s| s.as_str()), Some("refresh123"));
+        assert_eq!(resp.key.as_deref().map(|s| s.as_str()), Some("2.encryptedKey"));
     }
 
     #[test]
     fn login_response_deserialize_no_optional_fields() {
         let json = r#"{"access_token": "tok"}"#;
         let resp: LoginResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "tok");
+        assert_eq!(resp.access_token.as_str(), "tok");
         assert!(resp.refresh_token.is_none());
         assert!(resp.key.is_none());
+    }
+
+    #[test]
+    fn login_response_debug_redacts() {
+        let json = r#"{"access_token": "super-secret-jwt", "refresh_token": "secret-rt"}"#;
+        let resp: LoginResponse = serde_json::from_str(json).unwrap();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("super-secret-jwt"));
+        assert!(!debug.contains("secret-rt"));
     }
 
     #[test]
@@ -604,15 +761,15 @@ mod tests {
             "refresh_token": "new-refresh"
         }"#;
         let resp: RefreshResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "new-access");
-        assert_eq!(resp.refresh_token, Some("new-refresh".to_string()));
+        assert_eq!(resp.access_token.as_str(), "new-access");
+        assert_eq!(resp.refresh_token.as_deref().map(|s| s.as_str()), Some("new-refresh"));
     }
 
     #[test]
     fn refresh_response_deserialize_no_rotated_token() {
         let json = r#"{"access_token": "new-access"}"#;
         let resp: RefreshResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "new-access");
+        assert_eq!(resp.access_token.as_str(), "new-access");
         assert!(resp.refresh_token.is_none());
     }
 }

@@ -12,7 +12,7 @@ use crate::crypto::Keys;
 use crate::error::BitwardenError;
 
 /// Decrypted vault item.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DecryptedCipher {
     pub id: String,
     pub name: String,
@@ -27,6 +27,26 @@ pub struct DecryptedCipher {
     pub creation_date: Option<String>,
     pub revision_date: Option<String>,
     pub organization_id: Option<String>,
+}
+
+impl std::fmt::Debug for DecryptedCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedCipher")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("cipher_type", &self.cipher_type)
+            .field("folder_name", &self.folder_name)
+            .field("notes", &self.notes.as_ref().map(|_| "[redacted]"))
+            .field("login", &self.login)
+            .field("card", &self.card)
+            .field("identity", &self.identity)
+            .field("ssh_key", &self.ssh_key)
+            .field("fields", &self.fields.len())
+            .field("creation_date", &self.creation_date)
+            .field("revision_date", &self.revision_date)
+            .field("organization_id", &self.organization_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,47 +83,137 @@ impl CipherType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DecryptedLogin {
-    pub username: Option<String>,
+    /// Username is PII — zeroized on drop.
+    pub username: Option<Zeroizing<String>>,
     pub password: Option<Zeroizing<String>>,
     pub totp: Option<Zeroizing<String>>,
     pub uris: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for DecryptedLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedLogin")
+            .field("username", &self.username.as_ref().map(|_| "[redacted]"))
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .field("totp", &self.totp.as_ref().map(|_| "[redacted]"))
+            .field("uris", &self.uris)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct DecryptedCard {
-    pub cardholder_name: Option<String>,
+    /// Cardholder name is PII — zeroized on drop.
+    pub cardholder_name: Option<Zeroizing<String>>,
     pub number: Option<Zeroizing<String>>,
     pub brand: Option<String>,
-    pub exp_month: Option<String>,
-    pub exp_year: Option<String>,
+    /// Expiry month is card metadata — zeroized on drop.
+    pub exp_month: Option<Zeroizing<String>>,
+    /// Expiry year is card metadata — zeroized on drop.
+    pub exp_year: Option<Zeroizing<String>>,
     pub code: Option<Zeroizing<String>>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for DecryptedCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedCard")
+            .field("cardholder_name", &self.cardholder_name.as_ref().map(|_| "[redacted]"))
+            .field("number", &self.number.as_ref().map(|_| "[redacted]"))
+            .field("brand", &self.brand)
+            .field("exp_month", &self.exp_month.as_ref().map(|_| "[redacted]"))
+            .field("exp_year", &self.exp_year.as_ref().map(|_| "[redacted]"))
+            .field("code", &self.code.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct DecryptedSshKey {
     pub private_key: Option<Zeroizing<String>>,
     pub public_key: Option<String>,
     pub fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DecryptedIdentity {
-    pub title: Option<String>,
-    pub first_name: Option<String>,
-    pub last_name: Option<String>,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    pub username: Option<String>,
+impl std::fmt::Debug for DecryptedSshKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedSshKey")
+            .field("private_key", &self.private_key.as_ref().map(|_| "[redacted]"))
+            .field("public_key", &self.public_key)
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+pub struct DecryptedIdentity {
+    /// All identity fields are PII — zeroized on drop.
+    pub title: Option<Zeroizing<String>>,
+    pub first_name: Option<Zeroizing<String>>,
+    pub middle_name: Option<Zeroizing<String>>,
+    pub last_name: Option<Zeroizing<String>>,
+    pub username: Option<Zeroizing<String>>,
+    pub company: Option<Zeroizing<String>>,
+    pub ssn: Option<Zeroizing<String>>,
+    pub passport_number: Option<Zeroizing<String>>,
+    pub license_number: Option<Zeroizing<String>>,
+    pub email: Option<Zeroizing<String>>,
+    pub phone: Option<Zeroizing<String>>,
+    pub address1: Option<Zeroizing<String>>,
+    pub address2: Option<Zeroizing<String>>,
+    pub address3: Option<Zeroizing<String>>,
+    pub city: Option<Zeroizing<String>>,
+    pub state: Option<Zeroizing<String>>,
+    pub postal_code: Option<Zeroizing<String>>,
+    pub country: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for DecryptedIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Helper: redact if Some, show None otherwise.
+        fn r(opt: &Option<Zeroizing<String>>) -> &str {
+            if opt.is_some() { "[redacted]" } else { "<none>" }
+        }
+        f.debug_struct("DecryptedIdentity")
+            .field("title", &r(&self.title))
+            .field("first_name", &r(&self.first_name))
+            .field("middle_name", &r(&self.middle_name))
+            .field("last_name", &r(&self.last_name))
+            .field("username", &r(&self.username))
+            .field("company", &r(&self.company))
+            .field("ssn", &r(&self.ssn))
+            .field("passport_number", &r(&self.passport_number))
+            .field("license_number", &r(&self.license_number))
+            .field("email", &r(&self.email))
+            .field("phone", &r(&self.phone))
+            .field("address1", &r(&self.address1))
+            .field("address2", &r(&self.address2))
+            .field("address3", &r(&self.address3))
+            .field("city", &r(&self.city))
+            .field("state", &r(&self.state))
+            .field("postal_code", &r(&self.postal_code))
+            .field("country", &r(&self.country))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct DecryptedField {
     pub name: Option<String>,
     /// Value is wrapped in `Zeroizing` because hidden fields (type 1) contain secrets.
     pub value: Option<Zeroizing<String>>,
     pub field_type: u8, // 0=Text, 1=Hidden, 2=Boolean, 3=Linked
+}
+
+impl std::fmt::Debug for DecryptedField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedField")
+            .field("name", &self.name)
+            .field("value", &self.value.as_ref().map(|_| "[redacted]"))
+            .field("field_type", &self.field_type)
+            .finish()
+    }
 }
 
 /// Holds the unlocked vault state: keys + decrypted ciphers.
@@ -156,29 +266,33 @@ impl VaultState {
         // Decrypt organization keys
         self.org_keys.clear();
         for org in &sync.profile.organizations {
-            if let Some(key_str) = &org.key
-                && let Some(pk) = &self.private_key
-            {
-                match CipherString::parse(key_str) {
-                    Ok(cs) => match cs.decrypt_asymmetric(pk) {
-                        Ok(org_key_bytes) => {
-                            match Keys::from_bytes(&org_key_bytes) {
-                                Ok(keys) => {
-                                    debug!(org_id = %org.id, "decrypted org key");
-                                    self.org_keys.insert(org.id.clone(), keys);
-                                }
-                                Err(e) => {
-                                    warn!(org_id = %org.id, error = %e, "invalid org key length");
-                                }
+            let Some(key_str) = &org.key else {
+                debug!(org_id = %org.id, "org has no key field; skipping");
+                continue;
+            };
+            let Some(pk) = &self.private_key else {
+                warn!(org_id = %org.id, "cannot decrypt org key: private key was not available");
+                continue;
+            };
+            match CipherString::parse(key_str) {
+                Ok(cs) => match cs.decrypt_asymmetric(pk) {
+                    Ok(org_key_bytes) => {
+                        match Keys::from_bytes(&org_key_bytes) {
+                            Ok(keys) => {
+                                debug!(org_id = %org.id, "decrypted org key");
+                                self.org_keys.insert(org.id.clone(), keys);
+                            }
+                            Err(e) => {
+                                warn!(org_id = %org.id, error = %e, "invalid org key length");
                             }
                         }
-                        Err(e) => {
-                            warn!(org_id = %org.id, error = %e, "failed to decrypt org key");
-                        }
-                    },
-                    Err(e) => {
-                        warn!(org_id = %org.id, error = %e, "failed to parse org key cipher");
                     }
+                    Err(e) => {
+                        warn!(org_id = %org.id, error = %e, "failed to decrypt org key");
+                    }
+                },
+                Err(e) => {
+                    warn!(org_id = %org.id, error = %e, "failed to parse org key cipher");
                 }
             }
         }
@@ -219,7 +333,11 @@ impl VaultState {
                 }
                 Err(e) => {
                     let id = sync_cipher.id.as_deref().unwrap_or("unknown");
-                    warn!(cipher_id = id, error = %e, "failed to decrypt cipher");
+                    // org key unavailable is expected (e.g. org key decryption
+                    // failed); log at debug so it doesn't pollute normal output.
+                    // Genuine decryption failures (wrong password, corrupted
+                    // data) will surface during unlock, not here.
+                    debug!(cipher_id = id, error = %e, "skipped cipher");
                     skip_count += 1;
                 }
             }
@@ -244,9 +362,16 @@ impl VaultState {
 
         let cipher_type = CipherType::from_u8(sc.cipher_type.unwrap_or(0));
 
-        // Select the right keys: org keys for org ciphers, vault keys otherwise
+        // Select the right keys: org keys for org ciphers, vault keys otherwise.
+        // If a cipher belongs to an org whose key we couldn't decrypt, skip it
+        // with a clear error rather than silently trying (and failing MAC) with
+        // the wrong key.
         let base_keys = match &sc.organization_id {
-            Some(org_id) => self.org_keys.get(org_id).unwrap_or(&self.vault_keys),
+            Some(org_id) => self.org_keys.get(org_id).ok_or_else(|| {
+                BitwardenError::Other(anyhow::anyhow!(
+                    "org key unavailable for org {org_id}"
+                ))
+            })?,
             None => &self.vault_keys,
         };
 
@@ -325,7 +450,8 @@ impl VaultState {
         login: &crate::api::SyncLogin,
         keys: &Keys,
     ) -> Result<DecryptedLogin, BitwardenError> {
-        let username = cipher::decrypt_field(&login.username, keys, None)?;
+        // Username is PII — use sensitive variant so it's zeroized on drop
+        let username = cipher::decrypt_field_sensitive(&login.username, keys, None)?;
         let password = cipher::decrypt_field_sensitive(&login.password, keys, None)?;
         let totp = cipher::decrypt_field_sensitive(&login.totp, keys, None)?;
 
@@ -352,11 +478,12 @@ impl VaultState {
         keys: &Keys,
     ) -> Result<DecryptedCard, BitwardenError> {
         Ok(DecryptedCard {
-            cardholder_name: cipher::decrypt_field(&card.cardholder_name, keys, None)?,
+            // Cardholder name, expiry month/year are PII — use sensitive variant
+            cardholder_name: cipher::decrypt_field_sensitive(&card.cardholder_name, keys, None)?,
             number: cipher::decrypt_field_sensitive(&card.number, keys, None)?,
             brand: cipher::decrypt_field(&card.brand, keys, None)?,
-            exp_month: cipher::decrypt_field(&card.exp_month, keys, None)?,
-            exp_year: cipher::decrypt_field(&card.exp_year, keys, None)?,
+            exp_month: cipher::decrypt_field_sensitive(&card.exp_month, keys, None)?,
+            exp_year: cipher::decrypt_field_sensitive(&card.exp_year, keys, None)?,
             code: cipher::decrypt_field_sensitive(&card.code, keys, None)?,
         })
     }
@@ -366,13 +493,26 @@ impl VaultState {
         ident: &crate::api::SyncIdentity,
         keys: &Keys,
     ) -> Result<DecryptedIdentity, BitwardenError> {
+        // All identity fields are PII — use sensitive variant so they're zeroized on drop
         Ok(DecryptedIdentity {
-            title: cipher::decrypt_field(&ident.title, keys, None)?,
-            first_name: cipher::decrypt_field(&ident.first_name, keys, None)?,
-            last_name: cipher::decrypt_field(&ident.last_name, keys, None)?,
-            email: cipher::decrypt_field(&ident.email, keys, None)?,
-            phone: cipher::decrypt_field(&ident.phone, keys, None)?,
-            username: cipher::decrypt_field(&ident.username, keys, None)?,
+            title: cipher::decrypt_field_sensitive(&ident.title, keys, None)?,
+            first_name: cipher::decrypt_field_sensitive(&ident.first_name, keys, None)?,
+            middle_name: cipher::decrypt_field_sensitive(&ident.middle_name, keys, None)?,
+            last_name: cipher::decrypt_field_sensitive(&ident.last_name, keys, None)?,
+            username: cipher::decrypt_field_sensitive(&ident.username, keys, None)?,
+            company: cipher::decrypt_field_sensitive(&ident.company, keys, None)?,
+            ssn: cipher::decrypt_field_sensitive(&ident.ssn, keys, None)?,
+            passport_number: cipher::decrypt_field_sensitive(&ident.passport_number, keys, None)?,
+            license_number: cipher::decrypt_field_sensitive(&ident.license_number, keys, None)?,
+            email: cipher::decrypt_field_sensitive(&ident.email, keys, None)?,
+            phone: cipher::decrypt_field_sensitive(&ident.phone, keys, None)?,
+            address1: cipher::decrypt_field_sensitive(&ident.address1, keys, None)?,
+            address2: cipher::decrypt_field_sensitive(&ident.address2, keys, None)?,
+            address3: cipher::decrypt_field_sensitive(&ident.address3, keys, None)?,
+            city: cipher::decrypt_field_sensitive(&ident.city, keys, None)?,
+            state: cipher::decrypt_field_sensitive(&ident.state, keys, None)?,
+            postal_code: cipher::decrypt_field_sensitive(&ident.postal_code, keys, None)?,
+            country: cipher::decrypt_field_sensitive(&ident.country, keys, None)?,
         })
     }
 

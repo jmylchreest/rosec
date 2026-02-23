@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=rosec Secret Service
+Comment=Read-only Secret Service daemon with Bitwarden backend
+Exec=rosecd
+# Run on any desktop that supports XDG autostart (Hyprland, Sway, etc.)
+# Remove this line if you are not using GNOME/Unity/MATE/Cinnamon and want
+# rosecd to start on all desktops unconditionally.
+NotShowIn=GNOME;Unity;MATE;Cinnamon;
+X-GNOME-Autostart-Phase=PreDisplayServer
+X-GNOME-AutoRestart=false
+X-GNOME-Autostart-Notify=false

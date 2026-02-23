@@ -1,0 +1,13 @@
+# This file masks the system-level gnome-keyring D-Bus activation entry
+# for the org.gnome.keyring name, preventing it from auto-starting when
+# rosecd already owns org.freedesktop.secrets.
+#
+# Install to: ~/.local/share/dbus-1/services/org.gnome.keyring.service
+# (user-level service files take precedence over /usr/share/dbus-1/services/)
+#
+# The Exec=/bin/false means any attempt to auto-activate org.gnome.keyring
+# will fail immediately rather than launching gnome-keyring-daemon.
+
+[D-BUS Service]
+Name=org.gnome.keyring
+Exec=/bin/false

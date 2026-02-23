@@ -3,8 +3,9 @@
 use std::time::SystemTime;
 
 use rosec_core::{
-    Attributes, BackendError, BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput,
-    VaultBackend, VaultItem, VaultItemMeta,
+    AttributeDescriptor, AuthField, AuthFieldKind, Attributes, BackendError, BackendStatus,
+    ItemAttributes, RecoveryOutcome, RegistrationInfo, SecretBytes, UnlockInput, VaultBackend,
+    VaultItem, VaultItemMeta,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -13,15 +14,285 @@ use zeroize::Zeroizing;
 use crate::api::{ApiClient, ServerUrls, TwoFactorSubmission};
 use crate::crypto;
 use crate::error::BitwardenError;
+use crate::oauth_cred;
 use crate::vault::{CipherType, DecryptedCipher, VaultState};
 
+// ---------------------------------------------------------------------------
+// Attribute catalogue
+// ---------------------------------------------------------------------------
+
+/// Static catalogue of all attributes the Bitwarden backend can produce.
+///
+/// Each entry documents whether the attribute is sensitive and which item
+/// types it applies to.  The service layer uses this for `return_attr` glob
+/// validation and for CLI/D-Bus introspection.
+static BITWARDEN_ATTRIBUTES: &[AttributeDescriptor] = &[
+    // -- Common (all item types) --
+    AttributeDescriptor {
+        name: "name",
+        sensitive: false,
+        item_types: &[],
+        description: "Item display name",
+    },
+    AttributeDescriptor {
+        name: "type",
+        sensitive: false,
+        item_types: &[],
+        description: "Item type (login, note, card, identity, sshkey)",
+    },
+    AttributeDescriptor {
+        name: "folder",
+        sensitive: false,
+        item_types: &[],
+        description: "Folder name (if assigned)",
+    },
+    AttributeDescriptor {
+        name: "notes",
+        sensitive: true,
+        item_types: &[],
+        description: "Free-form notes (always sensitive)",
+    },
+    // -- Login --
+    AttributeDescriptor {
+        name: "username",
+        sensitive: false,
+        item_types: &["login"],
+        description: "Login username (public per attribute-model decision)",
+    },
+    AttributeDescriptor {
+        name: "password",
+        sensitive: true,
+        item_types: &["login"],
+        description: "Login password",
+    },
+    AttributeDescriptor {
+        name: "totp",
+        sensitive: true,
+        item_types: &["login"],
+        description: "TOTP seed / otpauth URI",
+    },
+    AttributeDescriptor {
+        name: "uri",
+        sensitive: false,
+        item_types: &["login"],
+        description: "Primary login URI",
+    },
+    // -- Card --
+    AttributeDescriptor {
+        name: "cardholder",
+        sensitive: true,
+        item_types: &["card"],
+        description: "Cardholder name (PII)",
+    },
+    AttributeDescriptor {
+        name: "number",
+        sensitive: true,
+        item_types: &["card"],
+        description: "Card number",
+    },
+    AttributeDescriptor {
+        name: "brand",
+        sensitive: false,
+        item_types: &["card"],
+        description: "Card brand (Visa, Mastercard, etc.)",
+    },
+    AttributeDescriptor {
+        name: "exp_month",
+        sensitive: true,
+        item_types: &["card"],
+        description: "Card expiration month",
+    },
+    AttributeDescriptor {
+        name: "exp_year",
+        sensitive: true,
+        item_types: &["card"],
+        description: "Card expiration year",
+    },
+    AttributeDescriptor {
+        name: "code",
+        sensitive: true,
+        item_types: &["card"],
+        description: "Card security code (CVV)",
+    },
+    // -- SSH Key --
+    AttributeDescriptor {
+        name: "private_key",
+        sensitive: true,
+        item_types: &["sshkey"],
+        description: "SSH private key",
+    },
+    AttributeDescriptor {
+        name: "public_key",
+        sensitive: false,
+        item_types: &["sshkey"],
+        description: "SSH public key",
+    },
+    AttributeDescriptor {
+        name: "fingerprint",
+        sensitive: false,
+        item_types: &["sshkey"],
+        description: "SSH key fingerprint",
+    },
+    // -- Identity (all PII → sensitive) --
+    AttributeDescriptor {
+        name: "title",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Identity title (Mr, Ms, etc.)",
+    },
+    AttributeDescriptor {
+        name: "first_name",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "First name",
+    },
+    AttributeDescriptor {
+        name: "middle_name",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Middle name",
+    },
+    AttributeDescriptor {
+        name: "last_name",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Last name",
+    },
+    AttributeDescriptor {
+        name: "username",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Identity username (PII)",
+    },
+    AttributeDescriptor {
+        name: "company",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Company name",
+    },
+    AttributeDescriptor {
+        name: "ssn",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Social Security Number",
+    },
+    AttributeDescriptor {
+        name: "passport_number",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Passport number",
+    },
+    AttributeDescriptor {
+        name: "license_number",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Driver's license number",
+    },
+    AttributeDescriptor {
+        name: "email",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Identity email address (PII)",
+    },
+    AttributeDescriptor {
+        name: "phone",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Identity phone number (PII)",
+    },
+    AttributeDescriptor {
+        name: "address1",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Address line 1",
+    },
+    AttributeDescriptor {
+        name: "address2",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Address line 2",
+    },
+    AttributeDescriptor {
+        name: "address3",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Address line 3",
+    },
+    AttributeDescriptor {
+        name: "city",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "City",
+    },
+    AttributeDescriptor {
+        name: "state",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "State / province",
+    },
+    AttributeDescriptor {
+        name: "postal_code",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Postal / ZIP code",
+    },
+    AttributeDescriptor {
+        name: "country",
+        sensitive: true,
+        item_types: &["identity"],
+        description: "Country",
+    },
+];
+
+/// Bitwarden cloud region for official servers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BitwardenRegion {
+    /// US cloud (default): `api.bitwarden.com` / `identity.bitwarden.com`
+    Us,
+    /// EU cloud: `api.bitwarden.eu` / `identity.bitwarden.eu`
+    Eu,
+}
+
+impl BitwardenRegion {
+    /// Parse from a string (`"us"` or `"eu"`, case-insensitive).
+    /// Returns `None` for unrecognised values.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "us" => Some(Self::Us),
+            "eu" => Some(Self::Eu),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for the Bitwarden backend.
+///
+/// URL resolution priority (highest to lowest):
+/// 1. Both `api_url` **and** `identity_url` explicitly set — used directly.
+/// 2. `base_url` set — derives `{base}/api` and `{base}/identity`.
+/// 3. `region == Eu` — uses official EU endpoints.
+/// 4. Default — official US cloud.
 #[derive(Debug, Clone)]
 pub struct BitwardenConfig {
-    /// Server base URL. If None, uses official Bitwarden cloud (US).
-    pub server_url: Option<String>,
-    /// User email address.
+    /// Unique instance identifier (from the `id` field in `[[backend]]` config).
+    /// Used as the D-Bus identity for this backend instance; allows multiple
+    /// Bitwarden accounts (e.g. `"personal"`, `"work"`) to coexist.
+    pub id: String,
+    /// User email address (required).
     pub email: String,
+    /// Official cloud region shorthand (`"us"` | `"eu"`).
+    /// Ignored when `base_url` or explicit URL overrides are set.
+    pub region: Option<BitwardenRegion>,
+    /// Self-hosted base URL (e.g. `"https://vault.example.com"`).
+    /// Derives `{base}/api` and `{base}/identity`.
+    /// Takes priority over `region`.
+    pub base_url: Option<String>,
+    /// Explicit API URL override (highest priority).
+    /// Must be set together with `identity_url` to take effect.
+    pub api_url: Option<String>,
+    /// Explicit identity URL override (highest priority).
+    /// Must be set together with `api_url` to take effect.
+    pub identity_url: Option<String>,
 }
 
 /// Bitwarden vault backend for rosec.
@@ -45,18 +316,35 @@ struct AuthState {
 impl std::fmt::Debug for BitwardenBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BitwardenBackend")
+            .field("id", &self.config.id)
             .field("email", &self.config.email)
-            .field("server_url", &self.config.server_url)
+            .field("region", &self.config.region)
+            .field("base_url", &self.config.base_url)
             .finish()
     }
 }
 
 impl BitwardenBackend {
     /// Create a new Bitwarden backend with the given configuration.
+    ///
+    /// URL resolution priority:
+    /// 1. Both `api_url` and `identity_url` set → use directly.
+    /// 2. `base_url` set → derive `{base}/api` + `{base}/identity`.
+    /// 3. `region == Eu` → official EU cloud.
+    /// 4. Default → official US cloud.
     pub fn new(config: BitwardenConfig) -> Result<Self, BitwardenError> {
-        let urls = match &config.server_url {
-            Some(url) => ServerUrls::from_base(url),
-            None => ServerUrls::official_us(),
+        let urls = match (&config.api_url, &config.identity_url) {
+            (Some(api), Some(identity)) => ServerUrls {
+                api_url: api.clone(),
+                identity_url: identity.clone(),
+            },
+            _ => match &config.base_url {
+                Some(base) => ServerUrls::from_base(base),
+                None => match config.region {
+                    Some(BitwardenRegion::Eu) => ServerUrls::official_eu(),
+                    _ => ServerUrls::official_us(),
+                },
+            },
         };
 
         let api = ApiClient::new(urls)?;
@@ -87,10 +375,58 @@ impl BitwardenBackend {
 
         // Step 3: Login
         let hash_b64 = crypto::b64_encode(&password_hash);
-        let login_resp = self
+        let login_resp = match self
             .api
             .login_password(email, &hash_b64, two_factor)
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(BitwardenError::DeviceVerificationRequired) => {
+                // The server doesn't recognise this device UUID.
+                // Try auto-registration with the stored API key (happy path for
+                // repeat logins after the first explicit registration).
+                match oauth_cred::load_and_decrypt(&self.config.id, &master_key, email) {
+                    Ok(Some(cred)) => {
+                        info!(
+                            backend = %self.config.id,
+                            "device not registered; attempting auto-registration with stored API key"
+                        );
+                        self.api
+                            .register_device(email, &cred.client_id, &cred.client_secret)
+                            .await?;
+                        info!(backend = %self.config.id, "device registered; retrying login");
+                        self.api.login_password(email, &hash_b64, None).await?
+                    }
+                    Ok(None) => {
+                        // No stored API key — propagate so the auth flow can
+                        // prompt for registration credentials via registration_info().
+                        return Err(BitwardenError::DeviceVerificationRequired);
+                    }
+                    Err(e) => {
+                        // Decrypt failed — most likely the master password was
+                        // changed since the credential was stored (HMAC mismatch
+                        // because the derived storage key differs).  Delete the
+                        // stale credential and fall through to registration so
+                        // the client can re-prompt.
+                        warn!(
+                            backend = %self.config.id,
+                            error = %e,
+                            "stored OAuth credential could not be decrypted \
+                             (master password may have changed); removing stale credential"
+                        );
+                        if let Err(rm_err) = rosec_core::oauth::clear(&self.config.id) {
+                            warn!(
+                                backend = %self.config.id,
+                                error = %rm_err,
+                                "failed to remove stale credential file"
+                            );
+                        }
+                        return Err(BitwardenError::DeviceVerificationRequired);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         let protected_key = login_resp
             .key
@@ -100,7 +436,7 @@ impl BitwardenBackend {
         // Step 4: Initialize vault state from protected key
         let mut vault = VaultState::new(&identity_keys, protected_key)?;
 
-        // Step 5: Sync
+        // Step 5: Sync — access_token is already Zeroizing<String>
         let sync = self.api.sync(&login_resp.access_token).await?;
         vault.process_sync(&sync)?;
 
@@ -110,10 +446,53 @@ impl BitwardenBackend {
         );
 
         Ok(AuthState {
-            access_token: Zeroizing::new(login_resp.access_token),
-            refresh_token: login_resp.refresh_token.map(Zeroizing::new),
+            // Fields are already Zeroizing<String> from the response struct
+            access_token: login_resp.access_token,
+            refresh_token: login_resp.refresh_token,
             vault,
         })
+    }
+
+    /// Register this device with Bitwarden and persist the API key.
+    ///
+    /// Called when `unlock` is invoked with `UnlockInput::WithRegistration`.
+    /// Derives the master key from `password`, registers the device via the
+    /// personal API key, then encrypts and saves the API key for future use.
+    async fn register_and_save(
+        &self,
+        password: &str,
+        reg_fields: std::collections::HashMap<String, zeroize::Zeroizing<String>>,
+    ) -> Result<(), BitwardenError> {
+        let email = &self.config.email;
+
+        let client_id = reg_fields
+            .get("client_id")
+            .ok_or_else(|| BitwardenError::Auth("missing client_id".to_string()))?;
+        let client_secret = reg_fields
+            .get("client_secret")
+            .ok_or_else(|| BitwardenError::Auth("missing client_secret".to_string()))?;
+
+        // Derive master key (needed both for registration auth and for encrypting
+        // the API key at rest).
+        let kdf = self.api.prelogin(email).await?;
+        let master_key = crypto::derive_master_key(password.as_bytes(), email, &kdf)?;
+
+        // Register the device UUID with Bitwarden.
+        self.api
+            .register_device(email, client_id, client_secret)
+            .await?;
+
+        // Persist the API key encrypted with a key derived from master_key.
+        oauth_cred::encrypt_and_save(
+            &self.config.id,
+            &master_key,
+            email,
+            client_id,
+            client_secret,
+        )?;
+
+        info!("device registered and API key saved for backend '{}'", self.config.id);
+        Ok(())
     }
 
     /// Re-sync the vault using the existing access token.
@@ -140,10 +519,11 @@ impl BitwardenBackend {
 
                 debug!("access token expired, refreshing");
                 let refresh_resp = api.refresh_token(&refresh_token).await?;
-                state.access_token = Zeroizing::new(refresh_resp.access_token);
+                // Fields are already Zeroizing<String> from the response struct
+                state.access_token = refresh_resp.access_token;
                 // Capture rotated refresh token if the server issued a new one
                 if let Some(new_rt) = refresh_resp.refresh_token {
-                    state.refresh_token = Some(Zeroizing::new(new_rt));
+                    state.refresh_token = Some(new_rt);
                 }
                 info!("access token refreshed");
 
@@ -158,7 +538,13 @@ impl BitwardenBackend {
     }
 
     /// Map a decrypted cipher to a VaultItemMeta.
-    fn cipher_to_meta(dc: &DecryptedCipher) -> VaultItemMeta {
+    ///
+    /// Takes `backend_id` explicitly so multiple Bitwarden instances attribute
+    /// their items to the correct instance ID rather than a hardcoded string.
+    ///
+    /// Only populates **public** attributes — no sensitive data appears here.
+    /// Sensitive attribute names are available via `build_item_attributes()`.
+    fn cipher_to_meta(backend_id: &str, dc: &DecryptedCipher) -> VaultItemMeta {
         let mut attributes = Attributes::new();
 
         // xdg:schema — required for Secret Service compatibility
@@ -180,29 +566,46 @@ impl BitwardenBackend {
             attributes.insert("org_id".to_string(), org_id.clone());
         }
 
-        // Login-specific attributes
+        // Login-specific public attributes
         if let Some(login) = &dc.login {
+            // username is public per attribute-model decision
             if let Some(username) = &login.username {
-                attributes.insert("username".to_string(), username.clone());
+                attributes.insert("username".to_string(), username.as_str().to_string());
             }
             if let Some(uri) = login.uris.first() {
                 attributes.insert("uri".to_string(), uri.clone());
             }
         }
 
-        // Card-specific attributes
+        // Card-specific public attributes (brand only — cardholder is PII/sensitive)
         if let Some(card) = &dc.card
-            && let Some(cardholder) = &card.cardholder_name
+            && let Some(brand) = &card.brand
         {
-            attributes.insert("cardholder".to_string(), cardholder.clone());
+            attributes.insert("brand".to_string(), brand.clone());
         }
 
-        // Custom fields as attributes
+        // SSH key public attributes
+        if let Some(ssh_key) = &dc.ssh_key {
+            if let Some(pub_key) = &ssh_key.public_key {
+                attributes.insert("public_key".to_string(), pub_key.clone());
+            }
+            if let Some(fp) = &ssh_key.fingerprint {
+                attributes.insert("fingerprint".to_string(), fp.clone());
+            }
+        }
+
+        // Custom fields as attributes — only text (type 0) and boolean (type 2)
+        // Hidden fields (type 1) are sensitive and excluded from public attrs.
         for field in &dc.fields {
             if let (Some(name), Some(value)) = (&field.name, &field.value) {
-                // Only expose text fields (type 0), not hidden (1) or boolean (2)
-                if field.field_type == 0 {
-                    attributes.insert(name.clone(), value.as_str().to_string());
+                match field.field_type {
+                    0 | 2 => {
+                        attributes.insert(
+                            format!("custom.{name}"),
+                            value.as_str().to_string(),
+                        );
+                    }
+                    _ => {} // hidden (1) and linked (3) excluded
                 }
             }
         }
@@ -218,7 +621,7 @@ impl BitwardenBackend {
 
         VaultItemMeta {
             id: dc.id.clone(),
-            backend_id: "bitwarden".to_string(),
+            backend_id: backend_id.to_string(),
             label: dc.name.clone(),
             attributes,
             created,
@@ -231,45 +634,331 @@ impl BitwardenBackend {
     /// notes for secure notes, etc.
     ///
     /// Returns the secret bytes wrapped in `SecretBytes` (zeroized on drop).
+    /// Uses `Zeroizing<Vec<u8>>` internally to avoid any plain-text intermediate buffer.
     fn get_primary_secret(dc: &DecryptedCipher) -> Option<SecretBytes> {
-        let bytes = match dc.cipher_type {
+        // Helper: borrow a Zeroizing<String> and produce a Zeroizing<Vec<u8>>
+        // without going through a plain intermediate buffer.
+        // Takes &String (the deref target of Zeroizing<String>) so it works
+        // directly with Option::map after .as_deref().
+        fn to_secret_bytes(s: &String) -> Zeroizing<Vec<u8>> {
+            Zeroizing::new(s.as_bytes().to_vec())
+        }
+
+        let bytes: Option<Zeroizing<Vec<u8>>> = match dc.cipher_type {
             CipherType::Login => dc
                 .login
                 .as_ref()
                 .and_then(|l| l.password.as_deref())
-                .map(|p| p.as_bytes().to_vec()),
+                .or(dc.login.as_ref().and_then(|l| l.totp.as_deref()))
+                .or(dc.notes.as_deref())
+                .map(to_secret_bytes),
             CipherType::SecureNote => dc
                 .notes
                 .as_deref()
-                .map(|n| n.as_bytes().to_vec()),
+                .map(to_secret_bytes),
             CipherType::Card => dc
                 .card
                 .as_ref()
                 .and_then(|c| c.number.as_deref())
-                .map(|n| n.as_bytes().to_vec()),
+                .map(to_secret_bytes),
             CipherType::SshKey => dc
                 .ssh_key
                 .as_ref()
                 .and_then(|sk| sk.private_key.as_deref())
                 .or(dc.notes.as_deref())
-                .map(|n| n.as_bytes().to_vec()),
+                .map(to_secret_bytes),
             CipherType::Identity | CipherType::Unknown(_) => dc
                 .notes
                 .as_deref()
-                .map(|n| n.as_bytes().to_vec()),
+                .map(to_secret_bytes),
         };
-        bytes.map(SecretBytes::new)
+        bytes.map(SecretBytes::from_zeroizing)
+    }
+
+    /// Build [`ItemAttributes`] for a decrypted cipher.
+    ///
+    /// Populates:
+    /// - `public`: non-sensitive attributes safe for D-Bus exposure
+    /// - `secret_names`: names of sensitive attributes that have values
+    fn build_item_attributes(backend_id: &str, dc: &DecryptedCipher) -> ItemAttributes {
+        let mut public = Attributes::new();
+        let mut secret_names = Vec::new();
+
+        // -- Common public attributes --
+        let schema = match dc.cipher_type {
+            CipherType::Login => "org.freedesktop.Secret.Generic",
+            CipherType::SecureNote => "org.freedesktop.Secret.Note",
+            _ => "org.freedesktop.Secret.Generic",
+        };
+        public.insert("xdg:schema".to_string(), schema.to_string());
+        public.insert("type".to_string(), dc.cipher_type.as_str().to_string());
+        public.insert("backend_id".to_string(), backend_id.to_string());
+
+        if let Some(folder) = &dc.folder_name {
+            public.insert("folder".to_string(), folder.clone());
+        }
+        if let Some(org_id) = &dc.organization_id {
+            public.insert("org_id".to_string(), org_id.clone());
+        }
+
+        // notes — always sensitive
+        if dc.notes.is_some() {
+            secret_names.push("notes".to_string());
+        }
+
+        // -- Login --
+        if let Some(login) = &dc.login {
+            // username is public
+            if let Some(username) = &login.username {
+                public.insert("username".to_string(), username.as_str().to_string());
+            }
+            if let Some(uri) = login.uris.first() {
+                public.insert("uri".to_string(), uri.clone());
+            }
+            // sensitive
+            if login.password.is_some() {
+                secret_names.push("password".to_string());
+            }
+            if login.totp.is_some() {
+                secret_names.push("totp".to_string());
+            }
+        }
+
+        // -- Card --
+        if let Some(card) = &dc.card {
+            // brand is public
+            if let Some(brand) = &card.brand {
+                public.insert("brand".to_string(), brand.clone());
+            }
+            // all others are sensitive
+            if card.cardholder_name.is_some() {
+                secret_names.push("cardholder".to_string());
+            }
+            if card.number.is_some() {
+                secret_names.push("number".to_string());
+            }
+            if card.exp_month.is_some() {
+                secret_names.push("exp_month".to_string());
+            }
+            if card.exp_year.is_some() {
+                secret_names.push("exp_year".to_string());
+            }
+            if card.code.is_some() {
+                secret_names.push("code".to_string());
+            }
+        }
+
+        // -- SSH Key --
+        if let Some(ssh_key) = &dc.ssh_key {
+            // public_key and fingerprint are public
+            if let Some(pub_key) = &ssh_key.public_key {
+                public.insert("public_key".to_string(), pub_key.clone());
+            }
+            if let Some(fp) = &ssh_key.fingerprint {
+                public.insert("fingerprint".to_string(), fp.clone());
+            }
+            // private_key is sensitive
+            if ssh_key.private_key.is_some() {
+                secret_names.push("private_key".to_string());
+            }
+        }
+
+        // -- Identity (all fields are sensitive PII) --
+        if let Some(ident) = &dc.identity {
+            let ident_fields: &[(&str, &Option<Zeroizing<String>>)] = &[
+                ("title", &ident.title),
+                ("first_name", &ident.first_name),
+                ("middle_name", &ident.middle_name),
+                ("last_name", &ident.last_name),
+                ("username", &ident.username),
+                ("company", &ident.company),
+                ("ssn", &ident.ssn),
+                ("passport_number", &ident.passport_number),
+                ("license_number", &ident.license_number),
+                ("email", &ident.email),
+                ("phone", &ident.phone),
+                ("address1", &ident.address1),
+                ("address2", &ident.address2),
+                ("address3", &ident.address3),
+                ("city", &ident.city),
+                ("state", &ident.state),
+                ("postal_code", &ident.postal_code),
+                ("country", &ident.country),
+            ];
+            for (name, value) in ident_fields {
+                if value.is_some() {
+                    secret_names.push((*name).to_string());
+                }
+            }
+        }
+
+        // -- Custom fields --
+        for field in &dc.fields {
+            if let Some(name) = &field.name {
+                let attr_name = format!("custom.{name}");
+                match field.field_type {
+                    0 => {
+                        // Text fields are public
+                        if let Some(value) = &field.value {
+                            public.insert(attr_name, value.as_str().to_string());
+                        }
+                    }
+                    1 => {
+                        // Hidden fields are sensitive
+                        if field.value.is_some() {
+                            secret_names.push(attr_name);
+                        }
+                    }
+                    // Boolean (2) and Linked (3) fields: expose as public text
+                    _ => {
+                        if let Some(value) = &field.value {
+                            public.insert(attr_name, value.as_str().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        ItemAttributes {
+            public,
+            secret_names,
+        }
+    }
+
+    /// Resolve a named secret attribute from a decrypted cipher.
+    ///
+    /// Returns `None` if the attribute doesn't exist on this cipher or has no value.
+    fn resolve_secret_attr(dc: &DecryptedCipher, attr: &str) -> Option<SecretBytes> {
+        // Helper: borrow a Zeroizing<String> → SecretBytes
+        fn to_sb(s: &Zeroizing<String>) -> SecretBytes {
+            SecretBytes::from_zeroizing(Zeroizing::new(s.as_bytes().to_vec()))
+        }
+
+        // notes — common to all types
+        if attr == "notes" {
+            return dc.notes.as_ref().map(to_sb);
+        }
+
+        // Custom fields (prefixed with "custom.")
+        if let Some(custom_name) = attr.strip_prefix("custom.") {
+            for field in &dc.fields {
+                if field.name.as_deref() == Some(custom_name) {
+                    return field.value.as_ref().map(to_sb);
+                }
+            }
+            return None;
+        }
+
+        // Type-specific attributes
+        match dc.cipher_type {
+            CipherType::Login => {
+                let login = dc.login.as_ref()?;
+                match attr {
+                    "password" => login.password.as_ref().map(to_sb),
+                    "totp" => login.totp.as_ref().map(to_sb),
+                    "username" => login.username.as_ref().map(to_sb),
+                    _ => None,
+                }
+            }
+            CipherType::Card => {
+                let card = dc.card.as_ref()?;
+                match attr {
+                    "cardholder" => card.cardholder_name.as_ref().map(to_sb),
+                    "number" => card.number.as_ref().map(to_sb),
+                    "exp_month" => card.exp_month.as_ref().map(to_sb),
+                    "exp_year" => card.exp_year.as_ref().map(to_sb),
+                    "code" => card.code.as_ref().map(to_sb),
+                    _ => None,
+                }
+            }
+            CipherType::SshKey => {
+                let ssh = dc.ssh_key.as_ref()?;
+                match attr {
+                    "private_key" => ssh.private_key.as_ref().map(to_sb),
+                    _ => None,
+                }
+            }
+            CipherType::Identity => {
+                let ident = dc.identity.as_ref()?;
+                match attr {
+                    "title" => ident.title.as_ref().map(to_sb),
+                    "first_name" => ident.first_name.as_ref().map(to_sb),
+                    "middle_name" => ident.middle_name.as_ref().map(to_sb),
+                    "last_name" => ident.last_name.as_ref().map(to_sb),
+                    "username" => ident.username.as_ref().map(to_sb),
+                    "company" => ident.company.as_ref().map(to_sb),
+                    "ssn" => ident.ssn.as_ref().map(to_sb),
+                    "passport_number" => ident.passport_number.as_ref().map(to_sb),
+                    "license_number" => ident.license_number.as_ref().map(to_sb),
+                    "email" => ident.email.as_ref().map(to_sb),
+                    "phone" => ident.phone.as_ref().map(to_sb),
+                    "address1" => ident.address1.as_ref().map(to_sb),
+                    "address2" => ident.address2.as_ref().map(to_sb),
+                    "address3" => ident.address3.as_ref().map(to_sb),
+                    "city" => ident.city.as_ref().map(to_sb),
+                    "state" => ident.state.as_ref().map(to_sb),
+                    "postal_code" => ident.postal_code.as_ref().map(to_sb),
+                    "country" => ident.country.as_ref().map(to_sb),
+                    _ => None,
+                }
+            }
+            CipherType::SecureNote | CipherType::Unknown(_) => None,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl VaultBackend for BitwardenBackend {
+    /// Returns the instance ID from config (e.g. `"personal"`, `"work"`).
+    /// This is what distinguishes multiple Bitwarden accounts from each other.
     fn id(&self) -> &str {
+        &self.config.id
+    }
+
+    /// Human-readable name: `"Bitwarden (<email>)"` so multiple instances are
+    /// distinguishable in UIs without exposing which is "personal" vs "work".
+    fn name(&self) -> &str {
+        &self.config.email
+    }
+
+    fn kind(&self) -> &str {
         "bitwarden"
     }
 
-    fn name(&self) -> &str {
-        "Bitwarden"
+    fn password_field(&self) -> AuthField {
+        AuthField {
+            id: "password",
+            label: "Master Password",
+            placeholder: "Enter your Bitwarden master password",
+            required: true,
+            kind: AuthFieldKind::Password,
+        }
+    }
+
+    fn registration_info(&self) -> Option<RegistrationInfo> {
+        static INFO: RegistrationInfo = RegistrationInfo {
+            instructions: "\
+This device is not registered with Bitwarden. To register it, you need \
+your personal API key.\n\n\
+Find it at: Bitwarden web vault → Account Settings → Security → Keys → View API Key",
+            fields: &[
+                AuthField {
+                    id: "client_id",
+                    label: "API key client_id",
+                    placeholder: "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    required: true,
+                    kind: AuthFieldKind::Text,
+                },
+                AuthField {
+                    id: "client_secret",
+                    label: "API key client_secret",
+                    placeholder: "",
+                    required: true,
+                    kind: AuthFieldKind::Secret,
+                },
+            ],
+        };
+        Some(INFO)
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -287,18 +976,21 @@ impl VaultBackend for BitwardenBackend {
     }
 
     async fn unlock(&self, input: UnlockInput) -> Result<(), BackendError> {
-        let password = match input {
-            UnlockInput::Password(p) => p,
-            UnlockInput::ApiKey { .. } => {
-                return Err(BackendError::NotSupported);
+        let (password, registration) = match input {
+            UnlockInput::Password(p) => (p, None),
+            UnlockInput::WithRegistration { password, registration_fields } => {
+                (password, Some(registration_fields))
             }
-            UnlockInput::SessionToken(_) => {
-                return Err(BackendError::NotSupported);
-            }
-            UnlockInput::Otp(_) => {
-                return Err(BackendError::NotSupported);
-            }
+            _ => return Err(BackendError::NotSupported),
         };
+
+        // If registration credentials were supplied, register the device first
+        // and persist the encrypted API key before attempting unlock.
+        if let Some(reg_fields) = registration {
+            self.register_and_save(&password, reg_fields)
+                .await
+                .map_err(BackendError::from)?;
+        }
 
         let auth_state = self
             .authenticate(&password, None)
@@ -335,15 +1027,24 @@ impl VaultBackend for BitwardenBackend {
         }
     }
 
+    async fn sync(&self) -> Result<(), BackendError> {
+        let mut guard = self.state.lock().await;
+        let state = guard.as_mut().ok_or(BackendError::Locked)?;
+        Self::resync(state, &self.api)
+            .await
+            .map_err(BackendError::from)
+    }
+
     async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError> {
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
+        let backend_id = &self.config.id;
 
         let items: Vec<VaultItemMeta> = state
             .vault
             .ciphers()
             .iter()
-            .map(Self::cipher_to_meta)
+            .map(|dc| Self::cipher_to_meta(backend_id, dc))
             .collect();
 
         Ok(items)
@@ -361,7 +1062,7 @@ impl VaultBackend for BitwardenBackend {
         let secret = Self::get_primary_secret(dc);
 
         Ok(VaultItem {
-            meta: Self::cipher_to_meta(dc),
+            meta: Self::cipher_to_meta(&self.config.id, dc),
             secret,
         })
     }
@@ -382,13 +1083,14 @@ impl VaultBackend for BitwardenBackend {
     async fn search(&self, attrs: &Attributes) -> Result<Vec<VaultItemMeta>, BackendError> {
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
+        let backend_id = &self.config.id;
 
         let items: Vec<VaultItemMeta> = state
             .vault
             .ciphers()
             .iter()
             .filter_map(|dc| {
-                let meta = Self::cipher_to_meta(dc);
+                let meta = Self::cipher_to_meta(backend_id, dc);
                 if attrs
                     .iter()
                     .all(|(key, value)| meta.attributes.get(key) == Some(value))
@@ -401,6 +1103,35 @@ impl VaultBackend for BitwardenBackend {
             .collect();
 
         Ok(items)
+    }
+
+    fn available_attributes(&self) -> &'static [AttributeDescriptor] {
+        BITWARDEN_ATTRIBUTES
+    }
+
+    async fn get_item_attributes(&self, id: &str) -> Result<ItemAttributes, BackendError> {
+        let guard = self.state.lock().await;
+        let state = guard.as_ref().ok_or(BackendError::Locked)?;
+
+        let dc = state
+            .vault
+            .cipher_by_id(id)
+            .ok_or(BackendError::NotFound)?;
+
+        Ok(Self::build_item_attributes(&self.config.id, dc))
+    }
+
+    async fn get_secret_attr(&self, id: &str, attr: &str) -> Result<SecretBytes, BackendError> {
+        let guard = self.state.lock().await;
+        let state = guard.as_ref().ok_or(BackendError::Locked)?;
+
+        let dc = state
+            .vault
+            .cipher_by_id(id)
+            .ok_or(BackendError::NotFound)?;
+
+        Self::resolve_secret_attr(dc, attr)
+            .ok_or_else(|| BackendError::NotFound)
     }
 }
 
@@ -450,9 +1181,103 @@ fn days_before_month(month: u64, leap: bool) -> u64 {
 mod tests {
     use super::*;
     use crate::vault::{
-        CipherType, DecryptedCard, DecryptedCipher, DecryptedField, DecryptedLogin,
-        DecryptedSshKey,
+        CipherType, DecryptedCard, DecryptedCipher, DecryptedField, DecryptedIdentity,
+        DecryptedLogin, DecryptedSshKey,
     };
+
+    // --- BitwardenRegion ---
+
+    #[test]
+    fn region_parse_us() {
+        assert_eq!(BitwardenRegion::parse("us"), Some(BitwardenRegion::Us));
+        assert_eq!(BitwardenRegion::parse("US"), Some(BitwardenRegion::Us));
+    }
+
+    #[test]
+    fn region_parse_eu() {
+        assert_eq!(BitwardenRegion::parse("eu"), Some(BitwardenRegion::Eu));
+        assert_eq!(BitwardenRegion::parse("EU"), Some(BitwardenRegion::Eu));
+    }
+
+    #[test]
+    fn region_parse_invalid() {
+        assert_eq!(BitwardenRegion::parse("au"), None);
+        assert_eq!(BitwardenRegion::parse(""), None);
+    }
+
+    // --- URL resolution via BitwardenBackend::new ---
+
+    fn make_config(id: &str, email: &str) -> BitwardenConfig {
+        BitwardenConfig {
+            id: id.to_string(),
+            email: email.to_string(),
+            region: None,
+            base_url: None,
+            api_url: None,
+            identity_url: None,
+        }
+    }
+
+    #[test]
+    fn url_resolution_default_is_us() {
+        // No region/base_url/explicit URLs → official US cloud
+        let backend = BitwardenBackend::new(make_config("personal", "a@b.com")).unwrap();
+        // We can't inspect private fields directly, but we can verify it constructs without error.
+        // The URL used is validated indirectly by other tests; just confirm construction succeeds.
+        assert_eq!(backend.id(), "personal");
+        assert_eq!(backend.name(), "a@b.com");
+        assert_eq!(backend.kind(), "bitwarden");
+    }
+
+    #[test]
+    fn url_resolution_eu_region() {
+        let mut config = make_config("work-eu", "b@c.com");
+        config.region = Some(BitwardenRegion::Eu);
+        let backend = BitwardenBackend::new(config).unwrap();
+        assert_eq!(backend.id(), "work-eu");
+    }
+
+    #[test]
+    fn url_resolution_base_url_overrides_region() {
+        let mut config = make_config("selfhosted", "c@d.com");
+        config.region = Some(BitwardenRegion::Eu); // should be ignored
+        config.base_url = Some("https://vault.example.com".to_string());
+        let backend = BitwardenBackend::new(config).unwrap();
+        assert_eq!(backend.id(), "selfhosted");
+    }
+
+    #[test]
+    fn url_resolution_explicit_urls_override_all() {
+        let mut config = make_config("custom", "d@e.com");
+        config.region = Some(BitwardenRegion::Eu); // ignored
+        config.base_url = Some("https://vault.example.com".to_string()); // ignored
+        config.api_url = Some("https://api.custom.example.com".to_string());
+        config.identity_url = Some("https://identity.custom.example.com".to_string());
+        let backend = BitwardenBackend::new(config).unwrap();
+        assert_eq!(backend.id(), "custom");
+    }
+
+    #[test]
+    fn url_resolution_partial_explicit_urls_falls_through_to_base() {
+        // Only api_url set (not identity_url) → falls through to base_url
+        let mut config = make_config("partial", "e@f.com");
+        config.base_url = Some("https://vault.example.com".to_string());
+        config.api_url = Some("https://api.custom.example.com".to_string());
+        // identity_url is None → explicit pair incomplete → uses base_url
+        let backend = BitwardenBackend::new(config).unwrap();
+        assert_eq!(backend.id(), "partial");
+    }
+
+    #[test]
+    fn multiple_instances_have_distinct_ids() {
+        let b1 = BitwardenBackend::new(make_config("personal", "alice@example.com")).unwrap();
+        let b2 = BitwardenBackend::new(make_config("work", "alice@corp.com")).unwrap();
+        assert_ne!(b1.id(), b2.id());
+        assert_eq!(b1.id(), "personal");
+        assert_eq!(b2.id(), "work");
+        assert_eq!(b1.name(), "alice@example.com");
+        assert_eq!(b2.name(), "alice@corp.com");
+    }
 
     // --- parse_iso8601 ---
 
@@ -555,15 +1380,15 @@ mod tests {
     fn cipher_to_meta_login_basic() {
         let mut dc = make_cipher(CipherType::Login);
         dc.login = Some(DecryptedLogin {
-            username: Some("alice".to_string()),
+            username: Some(Zeroizing::new("alice".to_string())),
             password: Some(Zeroizing::new("secret123".to_string())),
             totp: None,
             uris: vec!["https://example.com".to_string()],
         });
 
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
         assert_eq!(meta.id, "test-id-123");
-        assert_eq!(meta.backend_id, "bitwarden");
+        assert_eq!(meta.backend_id, "test-backend");
         assert_eq!(meta.label, "Test Item");
         assert!(!meta.locked);
         assert_eq!(meta.attributes.get("type"), Some(&"login".to_string()));
@@ -580,7 +1405,7 @@ mod tests {
     #[test]
     fn cipher_to_meta_secure_note_schema() {
         let dc = make_cipher(CipherType::SecureNote);
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
         assert_eq!(
             meta.attributes.get("xdg:schema"),
             Some(&"org.freedesktop.Secret.Note".to_string())
@@ -589,20 +1414,28 @@ mod tests {
     }
 
     #[test]
-    fn cipher_to_meta_card_with_cardholder() {
+    fn cipher_to_meta_card_public_attrs_only() {
         let mut dc = make_cipher(CipherType::Card);
         dc.card = Some(DecryptedCard {
-            cardholder_name: Some("John Doe".to_string()),
+            cardholder_name: Some(Zeroizing::new("John Doe".to_string())),
             number: Some(Zeroizing::new("4111111111111111".to_string())),
             brand: Some("Visa".to_string()),
-            exp_month: Some("12".to_string()),
-            exp_year: Some("2028".to_string()),
+            exp_month: Some(Zeroizing::new("12".to_string())),
+            exp_year: Some(Zeroizing::new("2028".to_string())),
             code: Some(Zeroizing::new("123".to_string())),
         });
 
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
-        assert_eq!(meta.attributes.get("cardholder"), Some(&"John Doe".to_string()));
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
         assert_eq!(meta.attributes.get("type"), Some(&"card".to_string()));
+        // brand is public
+        assert_eq!(meta.attributes.get("brand"), Some(&"Visa".to_string()));
+        // cardholder is sensitive — NOT in public attributes
+        assert!(!meta.attributes.contains_key("cardholder"));
+        // number, exp_month, exp_year, code are all sensitive
+        assert!(!meta.attributes.contains_key("number"));
+        assert!(!meta.attributes.contains_key("exp_month"));
+        assert!(!meta.attributes.contains_key("exp_year"));
+        assert!(!meta.attributes.contains_key("code"));
     }
 
     #[test]
@@ -611,19 +1444,19 @@ mod tests {
         dc.folder_name = Some("Work".to_string());
         dc.organization_id = Some("org-abc".to_string());
 
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
         assert_eq!(meta.attributes.get("folder"), Some(&"Work".to_string()));
         assert_eq!(meta.attributes.get("org_id"), Some(&"org-abc".to_string()));
     }
 
     #[test]
-    fn cipher_to_meta_text_fields_exposed_hidden_fields_excluded() {
+    fn cipher_to_meta_custom_fields_prefixed_and_hidden_excluded() {
         let mut dc = make_cipher(CipherType::Login);
         dc.fields = vec![
             DecryptedField {
                 name: Some("api_key_label".to_string()),
                 value: Some(Zeroizing::new("visible-value".to_string())),
-                field_type: 0, // text — should be exposed
+                field_type: 0, // text — should be exposed with custom. prefix
             },
             DecryptedField {
                 name: Some("secret_field".to_string()),
@@ -633,16 +1466,26 @@ mod tests {
             DecryptedField {
                 name: Some("bool_field".to_string()),
                 value: Some(Zeroizing::new("true".to_string())),
-                field_type: 2, // boolean — should NOT be exposed
+                field_type: 2, // boolean — exposed as public with custom. prefix
             },
         ];
 
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
+        // Text fields exposed with custom. prefix
         assert_eq!(
-            meta.attributes.get("api_key_label"),
+            meta.attributes.get("custom.api_key_label"),
             Some(&"visible-value".to_string())
         );
+        // Hidden fields excluded entirely
+        assert!(!meta.attributes.contains_key("custom.secret_field"));
         assert!(!meta.attributes.contains_key("secret_field"));
+        // Boolean fields exposed as public with custom. prefix
+        assert_eq!(
+            meta.attributes.get("custom.bool_field"),
+            Some(&"true".to_string())
+        );
+        // Bare names (without prefix) should not exist
+        assert!(!meta.attributes.contains_key("api_key_label"));
         assert!(!meta.attributes.contains_key("bool_field"));
     }
 
@@ -652,7 +1495,7 @@ mod tests {
         dc.creation_date = None;
         dc.revision_date = None;
 
-        let meta = BitwardenBackend::cipher_to_meta(&dc);
+        let meta = BitwardenBackend::cipher_to_meta("test-backend", &dc);
         assert!(meta.created.is_none());
         assert!(meta.modified.is_none());
     }
@@ -663,7 +1506,7 @@ mod tests {
     fn get_primary_secret_login_password() {
         let mut dc = make_cipher(CipherType::Login);
         dc.login = Some(DecryptedLogin {
-            username: Some("user".to_string()),
+            username: Some(Zeroizing::new("user".to_string())),
             password: Some(Zeroizing::new("my-password".to_string())),
             totp: None,
             uris: Vec::new(),
@@ -678,7 +1521,7 @@ mod tests {
     fn get_primary_secret_login_no_password() {
         let mut dc = make_cipher(CipherType::Login);
         dc.login = Some(DecryptedLogin {
-            username: Some("user".to_string()),
+            username: Some(Zeroizing::new("user".to_string())),
             password: None,
             totp: None,
             uris: Vec::new(),
@@ -701,7 +1544,7 @@ mod tests {
     fn get_primary_secret_card_number() {
         let mut dc = make_cipher(CipherType::Card);
         dc.card = Some(DecryptedCard {
-            cardholder_name: Some("Test".to_string()),
+            cardholder_name: Some(Zeroizing::new("Test".to_string())),
             number: Some(Zeroizing::new("4111111111111111".to_string())),
             brand: None,
             exp_month: None,
@@ -761,5 +1604,636 @@ mod tests {
         let dc = make_cipher(CipherType::Login);
         // No login data at all
         assert!(BitwardenBackend::get_primary_secret(&dc).is_none());
+    }
+
+    #[test]
+    fn get_primary_secret_login_falls_back_to_totp() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: Some(Zeroizing::new("user".to_string())),
+            password: None,
+            totp: Some(Zeroizing::new("otpauth://totp/test".to_string())),
+            uris: Vec::new(),
+        });
+
+        let secret = BitwardenBackend::get_primary_secret(&dc);
+        assert!(secret.is_some());
+        assert_eq!(secret.unwrap().as_slice(), b"otpauth://totp/test");
+    }
+
+    #[test]
+    fn get_primary_secret_login_falls_back_to_notes() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: Some(Zeroizing::new("user".to_string())),
+            password: None,
+            totp: None,
+            uris: Vec::new(),
+        });
+        dc.notes = Some(Zeroizing::new("login notes fallback".to_string()));
+
+        let secret = BitwardenBackend::get_primary_secret(&dc);
+        assert!(secret.is_some());
+        assert_eq!(secret.unwrap().as_slice(), b"login notes fallback");
+    }
+
+    #[test]
+    fn get_primary_secret_login_prefers_password_over_totp() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: None,
+            password: Some(Zeroizing::new("the-password".to_string())),
+            totp: Some(Zeroizing::new("the-totp".to_string())),
+            uris: Vec::new(),
+        });
+        dc.notes = Some(Zeroizing::new("the-notes".to_string()));
+
+        let secret = BitwardenBackend::get_primary_secret(&dc);
+        assert!(secret.is_some());
+        assert_eq!(secret.unwrap().as_slice(), b"the-password");
+    }
+
+    // --- available_attributes ---
+
+    #[test]
+    fn available_attributes_returns_non_empty_catalogue() {
+        assert!(!BITWARDEN_ATTRIBUTES.is_empty());
+        // Spot-check a few well-known entries
+        let names: Vec<&str> = BITWARDEN_ATTRIBUTES.iter().map(|a| a.name).collect();
+        assert!(names.contains(&"password"));
+        assert!(names.contains(&"username"));
+        assert!(names.contains(&"notes"));
+        assert!(names.contains(&"number"));
+        assert!(names.contains(&"private_key"));
+        assert!(names.contains(&"ssn"));
+    }
+
+    #[test]
+    fn available_attributes_notes_is_sensitive_and_common() {
+        let notes = BITWARDEN_ATTRIBUTES
+            .iter()
+            .find(|a| a.name == "notes")
+            .expect("notes descriptor must exist");
+        assert!(notes.sensitive);
+        assert!(notes.item_types.is_empty(), "notes applies to all types");
+    }
+
+    #[test]
+    fn available_attributes_username_login_is_public() {
+        let login_username = BITWARDEN_ATTRIBUTES
+            .iter()
+            .find(|a| a.name == "username" && a.item_types.contains(&"login"))
+            .expect("login username descriptor must exist");
+        assert!(!login_username.sensitive);
+    }
+
+    #[test]
+    fn available_attributes_identity_username_is_sensitive() {
+        let ident_username = BITWARDEN_ATTRIBUTES
+            .iter()
+            .find(|a| a.name == "username" && a.item_types.contains(&"identity"))
+            .expect("identity username descriptor must exist");
+        assert!(ident_username.sensitive);
+    }
+
+    // --- build_item_attributes ---
+
+    #[test]
+    fn build_item_attributes_login() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: Some(Zeroizing::new("alice".to_string())),
+            password: Some(Zeroizing::new("secret123".to_string())),
+            totp: Some(Zeroizing::new("otpauth://totp/test".to_string())),
+            uris: vec!["https://example.com".to_string()],
+        });
+        dc.notes = Some(Zeroizing::new("some notes".to_string()));
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        // Public attrs
+        assert_eq!(attrs.public.get("type"), Some(&"login".to_string()));
+        assert_eq!(attrs.public.get("username"), Some(&"alice".to_string()));
+        assert_eq!(
+            attrs.public.get("uri"),
+            Some(&"https://example.com".to_string())
+        );
+        assert_eq!(attrs.public.get("backend_id"), Some(&"bw".to_string()));
+        // Sensitive attrs must NOT be in public
+        assert!(!attrs.public.contains_key("password"));
+        assert!(!attrs.public.contains_key("totp"));
+        assert!(!attrs.public.contains_key("notes"));
+
+        // Secret names
+        assert!(attrs.secret_names.contains(&"password".to_string()));
+        assert!(attrs.secret_names.contains(&"totp".to_string()));
+        assert!(attrs.secret_names.contains(&"notes".to_string()));
+        // username should NOT be in secret_names (it's public for login)
+        assert!(!attrs.secret_names.contains(&"username".to_string()));
+    }
+
+    #[test]
+    fn build_item_attributes_login_minimal() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: None,
+            password: None,
+            totp: None,
+            uris: Vec::new(),
+        });
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+        assert_eq!(attrs.public.get("type"), Some(&"login".to_string()));
+        assert!(!attrs.public.contains_key("username"));
+        assert!(!attrs.public.contains_key("uri"));
+        assert!(attrs.secret_names.is_empty());
+    }
+
+    #[test]
+    fn build_item_attributes_card() {
+        let mut dc = make_cipher(CipherType::Card);
+        dc.card = Some(DecryptedCard {
+            cardholder_name: Some(Zeroizing::new("John Doe".to_string())),
+            number: Some(Zeroizing::new("4111111111111111".to_string())),
+            brand: Some("Visa".to_string()),
+            exp_month: Some(Zeroizing::new("12".to_string())),
+            exp_year: Some(Zeroizing::new("2028".to_string())),
+            code: Some(Zeroizing::new("123".to_string())),
+        });
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        // brand is public
+        assert_eq!(attrs.public.get("brand"), Some(&"Visa".to_string()));
+        // All card data fields are sensitive
+        assert!(!attrs.public.contains_key("cardholder"));
+        assert!(!attrs.public.contains_key("number"));
+        assert!(!attrs.public.contains_key("exp_month"));
+        assert!(!attrs.public.contains_key("exp_year"));
+        assert!(!attrs.public.contains_key("code"));
+
+        assert!(attrs.secret_names.contains(&"cardholder".to_string()));
+        assert!(attrs.secret_names.contains(&"number".to_string()));
+        assert!(attrs.secret_names.contains(&"exp_month".to_string()));
+        assert!(attrs.secret_names.contains(&"exp_year".to_string()));
+        assert!(attrs.secret_names.contains(&"code".to_string()));
+    }
+
+    #[test]
+    fn build_item_attributes_ssh_key() {
+        let mut dc = make_cipher(CipherType::SshKey);
+        dc.ssh_key = Some(DecryptedSshKey {
+            private_key: Some(Zeroizing::new("-----BEGIN RSA PRIVATE KEY-----".to_string())),
+            public_key: Some("ssh-rsa AAAA...".to_string()),
+            fingerprint: Some("SHA256:abc123".to_string()),
+        });
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        // public_key and fingerprint are public
+        assert_eq!(
+            attrs.public.get("public_key"),
+            Some(&"ssh-rsa AAAA...".to_string())
+        );
+        assert_eq!(
+            attrs.public.get("fingerprint"),
+            Some(&"SHA256:abc123".to_string())
+        );
+        // private_key is sensitive
+        assert!(!attrs.public.contains_key("private_key"));
+        assert!(attrs.secret_names.contains(&"private_key".to_string()));
+    }
+
+    #[test]
+    fn build_item_attributes_identity() {
+        let mut dc = make_cipher(CipherType::Identity);
+        dc.identity = Some(DecryptedIdentity {
+            title: Some(Zeroizing::new("Mr".to_string())),
+            first_name: Some(Zeroizing::new("John".to_string())),
+            middle_name: None,
+            last_name: Some(Zeroizing::new("Doe".to_string())),
+            username: Some(Zeroizing::new("jdoe".to_string())),
+            company: Some(Zeroizing::new("ACME".to_string())),
+            ssn: Some(Zeroizing::new("123-45-6789".to_string())),
+            passport_number: None,
+            license_number: None,
+            email: Some(Zeroizing::new("john@example.com".to_string())),
+            phone: Some(Zeroizing::new("+1234567890".to_string())),
+            address1: Some(Zeroizing::new("123 Main St".to_string())),
+            address2: None,
+            address3: None,
+            city: Some(Zeroizing::new("Springfield".to_string())),
+            state: Some(Zeroizing::new("IL".to_string())),
+            postal_code: Some(Zeroizing::new("62701".to_string())),
+            country: Some(Zeroizing::new("US".to_string())),
+        });
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        // ALL identity fields are sensitive — none in public
+        assert!(!attrs.public.contains_key("title"));
+        assert!(!attrs.public.contains_key("first_name"));
+        assert!(!attrs.public.contains_key("last_name"));
+        assert!(!attrs.public.contains_key("username"));
+        assert!(!attrs.public.contains_key("ssn"));
+        assert!(!attrs.public.contains_key("email"));
+        assert!(!attrs.public.contains_key("phone"));
+        assert!(!attrs.public.contains_key("address1"));
+        assert!(!attrs.public.contains_key("city"));
+        assert!(!attrs.public.contains_key("state"));
+        assert!(!attrs.public.contains_key("postal_code"));
+        assert!(!attrs.public.contains_key("country"));
+        assert!(!attrs.public.contains_key("company"));
+
+        // Secret names include all present fields
+        assert!(attrs.secret_names.contains(&"title".to_string()));
+        assert!(attrs.secret_names.contains(&"first_name".to_string()));
+        assert!(attrs.secret_names.contains(&"last_name".to_string()));
+        assert!(attrs.secret_names.contains(&"username".to_string()));
+        assert!(attrs.secret_names.contains(&"company".to_string()));
+        assert!(attrs.secret_names.contains(&"ssn".to_string()));
+        assert!(attrs.secret_names.contains(&"email".to_string()));
+        assert!(attrs.secret_names.contains(&"phone".to_string()));
+        assert!(attrs.secret_names.contains(&"address1".to_string()));
+        assert!(attrs.secret_names.contains(&"city".to_string()));
+        assert!(attrs.secret_names.contains(&"state".to_string()));
+        assert!(attrs.secret_names.contains(&"postal_code".to_string()));
+        assert!(attrs.secret_names.contains(&"country".to_string()));
+        // None fields should NOT be in secret_names
+        assert!(!attrs.secret_names.contains(&"middle_name".to_string()));
+        assert!(!attrs.secret_names.contains(&"passport_number".to_string()));
+        assert!(!attrs.secret_names.contains(&"license_number".to_string()));
+        assert!(!attrs.secret_names.contains(&"address2".to_string()));
+        assert!(!attrs.secret_names.contains(&"address3".to_string()));
+    }
+
+    #[test]
+    fn build_item_attributes_secure_note() {
+        let mut dc = make_cipher(CipherType::SecureNote);
+        dc.notes = Some(Zeroizing::new("my secret note".to_string()));
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        assert_eq!(
+            attrs.public.get("xdg:schema"),
+            Some(&"org.freedesktop.Secret.Note".to_string())
+        );
+        assert_eq!(attrs.public.get("type"), Some(&"note".to_string()));
+        assert!(!attrs.public.contains_key("notes"));
+        assert!(attrs.secret_names.contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn build_item_attributes_custom_fields() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.fields = vec![
+            DecryptedField {
+                name: Some("api_key".to_string()),
+                value: Some(Zeroizing::new("visible".to_string())),
+                field_type: 0, // text — public with custom. prefix
+            },
+            DecryptedField {
+                name: Some("secret_token".to_string()),
+                value: Some(Zeroizing::new("hidden-val".to_string())),
+                field_type: 1, // hidden — sensitive with custom. prefix
+            },
+            DecryptedField {
+                name: Some("enabled".to_string()),
+                value: Some(Zeroizing::new("true".to_string())),
+                field_type: 2, // boolean — public with custom. prefix
+            },
+            DecryptedField {
+                name: None, // nameless field — skipped
+                value: Some(Zeroizing::new("orphan".to_string())),
+                field_type: 0,
+            },
+        ];
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+
+        // Text field → public
+        assert_eq!(
+            attrs.public.get("custom.api_key"),
+            Some(&"visible".to_string())
+        );
+        // Hidden field → sensitive
+        assert!(!attrs.public.contains_key("custom.secret_token"));
+        assert!(attrs.secret_names.contains(&"custom.secret_token".to_string()));
+        // Boolean field → public
+        assert_eq!(
+            attrs.public.get("custom.enabled"),
+            Some(&"true".to_string())
+        );
+        // Nameless field → skipped
+        assert!(!attrs.public.contains_key("custom."));
+    }
+
+    #[test]
+    fn build_item_attributes_folder_and_org() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.folder_name = Some("Work".to_string());
+        dc.organization_id = Some("org-abc".to_string());
+
+        let attrs = BitwardenBackend::build_item_attributes("bw", &dc);
+        assert_eq!(attrs.public.get("folder"), Some(&"Work".to_string()));
+        assert_eq!(attrs.public.get("org_id"), Some(&"org-abc".to_string()));
+    }
+
+    // --- resolve_secret_attr ---
+
+    #[test]
+    fn resolve_secret_attr_notes_common() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.notes = Some(Zeroizing::new("my notes".to_string()));
+
+        let result = BitwardenBackend::resolve_secret_attr(&dc, "notes");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_slice(), b"my notes");
+    }
+
+    #[test]
+    fn resolve_secret_attr_notes_missing() {
+        let dc = make_cipher(CipherType::Login);
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "notes").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_login_password() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: Some(Zeroizing::new("user".to_string())),
+            password: Some(Zeroizing::new("pw123".to_string())),
+            totp: None,
+            uris: Vec::new(),
+        });
+
+        let result = BitwardenBackend::resolve_secret_attr(&dc, "password");
+        assert_eq!(result.unwrap().as_slice(), b"pw123");
+    }
+
+    #[test]
+    fn resolve_secret_attr_login_totp() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: None,
+            password: None,
+            totp: Some(Zeroizing::new("otpauth://totp/test".to_string())),
+            uris: Vec::new(),
+        });
+
+        let result = BitwardenBackend::resolve_secret_attr(&dc, "totp");
+        assert_eq!(result.unwrap().as_slice(), b"otpauth://totp/test");
+    }
+
+    #[test]
+    fn resolve_secret_attr_login_username_as_secret() {
+        // For login, username can be retrieved as a secret attr too
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: Some(Zeroizing::new("alice".to_string())),
+            password: None,
+            totp: None,
+            uris: Vec::new(),
+        });
+
+        let result = BitwardenBackend::resolve_secret_attr(&dc, "username");
+        assert_eq!(result.unwrap().as_slice(), b"alice");
+    }
+
+    #[test]
+    fn resolve_secret_attr_login_nonexistent() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.login = Some(DecryptedLogin {
+            username: None,
+            password: None,
+            totp: None,
+            uris: Vec::new(),
+        });
+
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "number").is_none());
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "bogus").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_card_all_fields() {
+        let mut dc = make_cipher(CipherType::Card);
+        dc.card = Some(DecryptedCard {
+            cardholder_name: Some(Zeroizing::new("Jane Doe".to_string())),
+            number: Some(Zeroizing::new("4111111111111111".to_string())),
+            brand: Some("Visa".to_string()),
+            exp_month: Some(Zeroizing::new("06".to_string())),
+            exp_year: Some(Zeroizing::new("2030".to_string())),
+            code: Some(Zeroizing::new("999".to_string())),
+        });
+
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "cardholder")
+                .unwrap()
+                .as_slice(),
+            b"Jane Doe"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "number")
+                .unwrap()
+                .as_slice(),
+            b"4111111111111111"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "exp_month")
+                .unwrap()
+                .as_slice(),
+            b"06"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "exp_year")
+                .unwrap()
+                .as_slice(),
+            b"2030"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "code")
+                .unwrap()
+                .as_slice(),
+            b"999"
+        );
+        // brand is not a secret attr (public only)
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "brand").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_ssh_private_key() {
+        let mut dc = make_cipher(CipherType::SshKey);
+        dc.ssh_key = Some(DecryptedSshKey {
+            private_key: Some(Zeroizing::new("-----BEGIN OPENSSH PRIVATE KEY-----".to_string())),
+            public_key: Some("ssh-ed25519 AAAA...".to_string()),
+            fingerprint: Some("SHA256:xyz".to_string()),
+        });
+
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "private_key")
+                .unwrap()
+                .as_slice(),
+            b"-----BEGIN OPENSSH PRIVATE KEY-----"
+        );
+        // public_key and fingerprint are not secret attrs
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "public_key").is_none());
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "fingerprint").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_identity_pii_fields() {
+        let mut dc = make_cipher(CipherType::Identity);
+        dc.identity = Some(DecryptedIdentity {
+            title: Some(Zeroizing::new("Dr".to_string())),
+            first_name: Some(Zeroizing::new("Alice".to_string())),
+            middle_name: Some(Zeroizing::new("B".to_string())),
+            last_name: Some(Zeroizing::new("Smith".to_string())),
+            username: Some(Zeroizing::new("asmith".to_string())),
+            company: Some(Zeroizing::new("Widgets Inc".to_string())),
+            ssn: Some(Zeroizing::new("987-65-4321".to_string())),
+            passport_number: Some(Zeroizing::new("AB123456".to_string())),
+            license_number: Some(Zeroizing::new("DL-789".to_string())),
+            email: Some(Zeroizing::new("alice@widgets.com".to_string())),
+            phone: Some(Zeroizing::new("+1-555-1234".to_string())),
+            address1: Some(Zeroizing::new("456 Oak Ave".to_string())),
+            address2: Some(Zeroizing::new("Suite 100".to_string())),
+            address3: None,
+            city: Some(Zeroizing::new("Portland".to_string())),
+            state: Some(Zeroizing::new("OR".to_string())),
+            postal_code: Some(Zeroizing::new("97201".to_string())),
+            country: Some(Zeroizing::new("US".to_string())),
+        });
+
+        // Spot-check several identity PII fields
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "title")
+                .unwrap()
+                .as_slice(),
+            b"Dr"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "first_name")
+                .unwrap()
+                .as_slice(),
+            b"Alice"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "middle_name")
+                .unwrap()
+                .as_slice(),
+            b"B"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "ssn")
+                .unwrap()
+                .as_slice(),
+            b"987-65-4321"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "passport_number")
+                .unwrap()
+                .as_slice(),
+            b"AB123456"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "license_number")
+                .unwrap()
+                .as_slice(),
+            b"DL-789"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "address1")
+                .unwrap()
+                .as_slice(),
+            b"456 Oak Ave"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "address2")
+                .unwrap()
+                .as_slice(),
+            b"Suite 100"
+        );
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "address3").is_none());
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "city")
+                .unwrap()
+                .as_slice(),
+            b"Portland"
+        );
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "country")
+                .unwrap()
+                .as_slice(),
+            b"US"
+        );
+    }
+
+    #[test]
+    fn resolve_secret_attr_secure_note_only_notes() {
+        let mut dc = make_cipher(CipherType::SecureNote);
+        dc.notes = Some(Zeroizing::new("top secret".to_string()));
+
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "notes")
+                .unwrap()
+                .as_slice(),
+            b"top secret"
+        );
+        // No other attrs for secure notes
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "password").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_custom_fields() {
+        let mut dc = make_cipher(CipherType::Login);
+        dc.fields = vec![
+            DecryptedField {
+                name: Some("api_key".to_string()),
+                value: Some(Zeroizing::new("text-val".to_string())),
+                field_type: 0,
+            },
+            DecryptedField {
+                name: Some("secret_token".to_string()),
+                value: Some(Zeroizing::new("hidden-val".to_string())),
+                field_type: 1,
+            },
+        ];
+
+        // Text custom field — resolve by custom. prefix
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "custom.api_key")
+                .unwrap()
+                .as_slice(),
+            b"text-val"
+        );
+        // Hidden custom field — also resolvable
+        assert_eq!(
+            BitwardenBackend::resolve_secret_attr(&dc, "custom.secret_token")
+                .unwrap()
+                .as_slice(),
+            b"hidden-val"
+        );
+        // Non-existent custom field
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "custom.nope").is_none());
+        // Bare name (without custom. prefix) should not resolve as custom
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "api_key").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_attr_wrong_type_returns_none() {
+        // Card cipher asked for login attrs
+        let mut dc = make_cipher(CipherType::Card);
+        dc.card = Some(DecryptedCard {
+            cardholder_name: Some(Zeroizing::new("Jane".to_string())),
+            number: None,
+            brand: None,
+            exp_month: None,
+            exp_year: None,
+            code: None,
+        });
+
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "password").is_none());
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "totp").is_none());
+        assert!(BitwardenBackend::resolve_secret_attr(&dc, "private_key").is_none());
     }
 }

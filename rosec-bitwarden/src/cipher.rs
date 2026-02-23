@@ -125,11 +125,19 @@ impl CipherString {
     /// Decrypt this cipher string to a UTF-8 string.
     pub fn decrypt_to_string(&self, keys: &Keys) -> Result<String, BitwardenError> {
         let bytes = self.decrypt_symmetric(keys)?;
+        // `Zeroizing<Vec<u8>>` does not implement `Into<Vec<u8>>` in zeroize 1.x,
+        // so we copy the bytes out. The copy is short-lived (dropped with `bytes`
+        // before this function returns) and the `Zeroizing` wrapper ensures the
+        // decrypted bytes are wiped on drop.
         String::from_utf8(bytes.to_vec())
             .map_err(|e| BitwardenError::CipherParse(format!("invalid UTF-8: {e}")))
     }
 
     /// Decrypt this cipher string to a zeroizing UTF-8 string (for secrets).
+    ///
+    /// The resulting `String` is wrapped in `Zeroizing` so it is scrubbed when
+    /// dropped. The intermediate byte buffer is also `Zeroizing`, so decrypted
+    /// bytes are wiped even if UTF-8 conversion fails.
     pub fn decrypt_to_zeroizing_string(
         &self,
         keys: &Keys,
