@@ -442,6 +442,15 @@ async fn prompt_and_auth(
 
     let json = serde_json::to_string(&request)?;
 
+    // Helper: build the borrowed &str map for a D-Bus call without allocating.
+    macro_rules! as_str_map {
+        ($map:expr) => {
+            $map.iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<HashMap<&str, &str>>()
+        };
+    }
+
     // If credentials were already collected (e.g. from the opportunistic unlock
     // sweep), skip the prompt and use them directly.  The backend returned
     // RegistrationRequired, so we'll still need to collect registration-specific
@@ -450,18 +459,11 @@ async fn prompt_and_auth(
         let mut cred_map: HashMap<String, Zeroizing<String>> =
             existing.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-        macro_rules! as_str_map {
-            ($map:expr) => {
-                $map.iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect::<HashMap<&str, &str>>()
-            };
-        }
-
         // This call is expected to return RegistrationRequired — that's why
         // we have a prefill.  Collect only the registration fields via TTY.
-        let result: Result<bool, zbus::Error> =
-            proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await;
+        let result: Result<bool, zbus::Error> = with_spinner("Verifying…", async {
+            proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await
+        }).await;
 
         let needs_registration = matches!(
             &result,
@@ -486,9 +488,9 @@ async fn prompt_and_auth(
                 .collect();
             let reg_extra = collect_tty(&reg_only_fields).await?;
             cred_map.extend(reg_extra);
-            let _ok: bool = proxy
-                .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
-                .await?;
+            let _ok: bool = with_spinner("Saving…", async {
+                proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await
+            }).await?;
         } else {
             result?;
         }
@@ -496,7 +498,15 @@ async fn prompt_and_auth(
         return Ok(());
     }
 
-    // No prefill — collect credentials fresh via the configured prompt.
+    // No prefill — print a header so the user knows which backend they are
+    // unlocking, then collect credentials fresh via the configured prompt.
+    eprintln!();
+    if backend_name.is_empty() || backend_name == backend_id {
+        eprintln!("Unlocking {backend_id}");
+    } else {
+        eprintln!("Unlocking {backend_id}  ({})", backend_name);
+    }
+
     let has_display =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
@@ -547,18 +557,12 @@ async fn prompt_and_auth(
     // (HashMap<&str, &str>) to avoid creating any plain String copies.
     let mut cred_map: HashMap<String, Zeroizing<String>> = collected;
 
-    // Helper: build the borrowed &str map for a D-Bus call without allocating.
-    macro_rules! as_str_map {
-        ($map:expr) => {
-            $map.iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect::<HashMap<&str, &str>>()
-        };
-    }
-
-    let result: Result<bool, zbus::Error> = proxy
-        .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
-        .await;
+    let result: Result<bool, zbus::Error> = with_spinner("Verifying…", async {
+        proxy
+            .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
+            .await
+    })
+    .await;
 
     let needs_registration = matches!(
         &result,
@@ -592,9 +596,12 @@ async fn prompt_and_auth(
         let reg_extra = collect_tty(&reg_only_fields).await?;
         cred_map.extend(reg_extra);
 
-        let _ok: bool = proxy
-            .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
-            .await?;
+        let _ok: bool = with_spinner("Saving…", async {
+            proxy
+                .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
+                .await
+        })
+        .await?;
     } else {
         result?;
     }
@@ -760,6 +767,46 @@ async fn collect_tty(fields: &[PromptField<'_>]) -> Result<HashMap<String, Zeroi
         map.insert(f.id.to_string(), v);
     }
     Ok(map)
+}
+
+/// Run `fut` while showing a TTY spinner on stderr.
+///
+/// Prints braille spinner frames at ~80 ms intervals until the future resolves,
+/// then clears the spinner line.  If stderr is not a terminal the spinner is
+/// skipped and `fut` runs silently.
+async fn with_spinner<F, T>(msg: &str, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::io::IsTerminal as _;
+    if !std::io::stderr().is_terminal() {
+        return fut.await;
+    }
+
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let msg = msg.to_string();
+
+    // Spawn the spinner loop as a task; cancel it when the future completes.
+    let spinner = tokio::task::spawn_blocking(move || {
+        let mut i = 0usize;
+        loop {
+            let frame = FRAMES[i % FRAMES.len()];
+            // \r returns to start of line; spaces overwrite previous content.
+            eprint!("\r{frame} {msg}   ");
+            let _ = std::io::stderr().flush();
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            i += 1;
+        }
+    });
+
+    let result = fut.await;
+
+    spinner.abort();
+    // Clear the spinner line.
+    eprint!("\r\x1b[2K");
+    let _ = std::io::stderr().flush();
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2602,47 +2649,30 @@ async fn opportunistic_unlock(
         all_fields.push((id.clone(), name.clone(), kind.clone(), fields));
     }
 
-    // Prompt using the first backend's field descriptors as representative
-    // (all backends share the same password field).  The label is overridden
-    // to make clear this will be tried across all backends.
-    let (_first_id, first_name, _first_kind, first_fields) = &all_fields[0];
-    let label = if backends.len() == 2 {
-        format!("Unlocking {} and 1 other backend", first_name)
-    } else {
-        format!(
-            "Unlocking {} and {} other backends",
-            first_name,
-            backends.len() - 1
-        )
-    };
+    // Print a clear header listing every backend we are about to unlock.
+    eprintln!();
+    eprintln!("Unlocking {} backend{}:", all_fields.len(), if all_fields.len() == 1 { "" } else { "s" });
+    for (id, name, _kind, _fields) in &all_fields {
+        if name.is_empty() || name == id {
+            eprintln!("  {id}");
+        } else {
+            eprintln!("  {id:<30}  ({})", name);
+        }
+    }
 
-    // Build prompt fields with the combined label.
-    let combined_fields: Vec<FieldDesc> = first_fields
-        .iter()
-        .map(|(fid, _label, fkind, placeholder, required)| {
-            (
-                fid.clone(),
-                label.clone(),
-                fkind.clone(),
-                placeholder.clone(),
-                *required,
-            )
-        })
-        .collect();
+    // Use the first backend's password field label/kind as representative —
+    // all backends share a password field.  We prompt once for all of them.
+    let (_first_id, _first_name, _first_kind, first_fields) = &all_fields[0];
+    let pw_field = first_fields.first().ok_or_else(|| anyhow::anyhow!("backend returned no auth fields"))?;
 
-    // Prompt once via TTY.
-    let collected = {
-        let pfields: Vec<PromptField<'_>> = combined_fields
-            .iter()
-            .map(|(id, lbl, fkind, ph, _)| PromptField {
-                id: id.as_str(),
-                label: lbl.as_str(),
-                kind: fkind.as_str(),
-                placeholder: ph.as_str(),
-            })
-            .collect();
-        collect_tty(&pfields).await?
-    };
+    // Prompt once via TTY using the field's own label (e.g. "Master Password").
+    let pfields = [PromptField {
+        id: pw_field.0.as_str(),
+        label: pw_field.1.as_str(),
+        kind: pw_field.2.as_str(),
+        placeholder: pw_field.3.as_str(),
+    }];
+    let collected = collect_tty(&pfields).await?;
 
     let string_map: HashMap<String, String> = collected
         .iter()
@@ -2650,7 +2680,7 @@ async fn opportunistic_unlock(
         .collect();
 
     // Try the collected credentials against all locked backends concurrently.
-    let results =
+    let results = with_spinner("Verifying…", async {
         futures_util::future::join_all(all_fields.iter().map(|(id, name, kind, _fields)| {
             let proxy = proxy.clone();
             let id = id.clone();
@@ -2663,7 +2693,9 @@ async fn opportunistic_unlock(
                 (id, name, kind, result)
             }
         }))
-        .await;
+        .await
+    })
+    .await;
 
     // Collect failures — these need individual prompts.
     let mut failed = Vec::new();
