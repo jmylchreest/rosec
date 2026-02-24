@@ -99,7 +99,11 @@ impl ApiClient {
         }
 
         let prelogin: PreloginResponse = resp.json().await?;
-        debug!(kdf = prelogin.kdf, iterations = prelogin.kdf_iterations, "prelogin response");
+        debug!(
+            kdf = prelogin.kdf,
+            iterations = prelogin.kdf_iterations,
+            "prelogin response"
+        );
 
         match prelogin.kdf {
             0 => Ok(KdfParams::Pbkdf2 {
@@ -331,9 +335,7 @@ impl ApiClient {
 fn device_id_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
-        })?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
     Some(base.join("rosec").join("device_id"))
 }
 
@@ -463,7 +465,11 @@ pub struct LoginResponse {
     #[serde(default, deserialize_with = "deser_opt_zeroizing_string")]
     pub refresh_token: Option<Zeroizing<String>>,
     /// The user's protected symmetric vault key, returned by the server on login.
-    #[serde(alias = "Key", default, deserialize_with = "deser_opt_zeroizing_string")]
+    #[serde(
+        alias = "Key",
+        default,
+        deserialize_with = "deser_opt_zeroizing_string"
+    )]
     pub key: Option<Zeroizing<String>>,
 }
 
@@ -471,7 +477,10 @@ impl std::fmt::Debug for LoginResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginResponse")
             .field("access_token", &"[redacted]")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[redacted]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
             .field("key", &self.key.as_ref().map(|_| "[redacted]"))
             .finish()
     }
@@ -501,7 +510,10 @@ impl std::fmt::Debug for RefreshResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RefreshResponse")
             .field("access_token", &"[redacted]")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[redacted]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -727,14 +739,8 @@ mod tests {
             let components: Vec<_> = path.components().collect();
             let len = components.len();
             assert!(len >= 2);
-            assert_eq!(
-                components[len - 1].as_os_str(),
-                "device_id"
-            );
-            assert_eq!(
-                components[len - 2].as_os_str(),
-                "rosec"
-            );
+            assert_eq!(components[len - 1].as_os_str(), "device_id");
+            assert_eq!(components[len - 2].as_os_str(), "rosec");
         }
     }
 
@@ -756,8 +762,14 @@ mod tests {
         }"#;
         let resp: LoginResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.access_token.as_str(), "eyJhbGc...");
-        assert_eq!(resp.refresh_token.as_deref().map(|s| s.as_str()), Some("refresh123"));
-        assert_eq!(resp.key.as_deref().map(|s| s.as_str()), Some("2.encryptedKey"));
+        assert_eq!(
+            resp.refresh_token.as_deref().map(|s| s.as_str()),
+            Some("refresh123")
+        );
+        assert_eq!(
+            resp.key.as_deref().map(|s| s.as_str()),
+            Some("2.encryptedKey")
+        );
     }
 
     #[test]
@@ -787,7 +799,10 @@ mod tests {
         }"#;
         let resp: RefreshResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.access_token.as_str(), "new-access");
-        assert_eq!(resp.refresh_token.as_deref().map(|s| s.as_str()), Some("new-refresh"));
+        assert_eq!(
+            resp.refresh_token.as_deref().map(|s| s.as_str()),
+            Some("new-refresh")
+        );
     }
 
     #[test]

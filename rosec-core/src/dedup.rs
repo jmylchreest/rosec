@@ -93,7 +93,7 @@ fn select_by_newest(
                 created: None,
                 modified: None,
                 locked: true,
-            }
+            };
         }
     };
     let mut winner = first.clone();

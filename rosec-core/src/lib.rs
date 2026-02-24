@@ -193,9 +193,7 @@ impl std::fmt::Debug for UnlockInput {
                 .field("client_id", client_id)
                 .field("client_secret", &"[redacted]")
                 .finish(),
-            Self::SessionToken(_) => {
-                f.debug_tuple("SessionToken").field(&"[redacted]").finish()
-            }
+            Self::SessionToken(_) => f.debug_tuple("SessionToken").field(&"[redacted]").finish(),
             Self::Otp(_) => f.debug_tuple("Otp").field(&"[redacted]").finish(),
         }
     }
@@ -506,8 +504,14 @@ mod tests {
     #[test]
     fn unlock_input_debug_redacts_with_registration() {
         let mut reg_fields = HashMap::new();
-        reg_fields.insert("client_id".to_string(), Zeroizing::new("user.abc".to_string()));
-        reg_fields.insert("client_secret".to_string(), Zeroizing::new("s3cr3t".to_string()));
+        reg_fields.insert(
+            "client_id".to_string(),
+            Zeroizing::new("user.abc".to_string()),
+        );
+        reg_fields.insert(
+            "client_secret".to_string(),
+            Zeroizing::new("s3cr3t".to_string()),
+        );
         let input = UnlockInput::WithRegistration {
             password: Zeroizing::new("masterpass".to_string()),
             registration_fields: reg_fields,

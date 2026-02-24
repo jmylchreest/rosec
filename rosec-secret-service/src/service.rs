@@ -15,10 +15,7 @@ use crate::state::{ServiceState, map_backend_error, map_zbus_error};
 
 /// Log the D-Bus caller at debug level for a given method name.
 fn log_caller(method: &str, header: &Header<'_>) {
-    let sender = header
-        .sender()
-        .map(|s| s.as_str())
-        .unwrap_or("<unknown>");
+    let sender = header.sender().map(|s| s.as_str()).unwrap_or("<unknown>");
     debug!(method, sender, "D-Bus call");
 }
 
@@ -53,10 +50,7 @@ impl SecretService {
             .map_err(map_backend_error)?;
 
         // Register the org.freedesktop.Secret.Session object at the session path
-        let session_obj = SecretSession::new(
-            path.clone(),
-            Arc::clone(&self.state.sessions),
-        );
+        let session_obj = SecretSession::new(path.clone(), Arc::clone(&self.state.sessions));
         let server = self.state.conn.object_server();
         server
             .at(path.clone(), session_obj)
@@ -114,9 +108,7 @@ impl SecretService {
             let state = Arc::clone(&self.state);
             let secret_result = self
                 .state
-                .run_on_tokio(async move {
-                    state.resolve_primary_secret(backend, &item_id).await
-                })
+                .run_on_tokio(async move { state.resolve_primary_secret(backend, &item_id).await })
                 .await?;
             // Skip items that have no primary secret (e.g. login without
             // password, empty secure note) rather than failing the entire
@@ -135,7 +127,11 @@ impl SecretService {
         Ok(secrets)
     }
 
-    fn close_session(&self, session: &str, #[zbus(header)] header: Header<'_>) -> Result<(), FdoError> {
+    fn close_session(
+        &self,
+        session: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), FdoError> {
         log_caller("CloseSession", &header);
         self.state
             .sessions
@@ -143,7 +139,11 @@ impl SecretService {
             .map_err(map_backend_error)
     }
 
-    fn read_alias(&self, name: &str, #[zbus(header)] header: Header<'_>) -> Result<String, FdoError> {
+    fn read_alias(
+        &self,
+        name: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<String, FdoError> {
         log_caller("ReadAlias", &header);
         if name == "default" {
             Ok("/org/freedesktop/secrets/collection/default".to_string())
@@ -152,12 +152,21 @@ impl SecretService {
         }
     }
 
-    fn set_alias(&self, _name: &str, _collection: &str, #[zbus(header)] header: Header<'_>) -> Result<(), FdoError> {
+    fn set_alias(
+        &self,
+        _name: &str,
+        _collection: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), FdoError> {
         log_caller("SetAlias", &header);
         Err(FdoError::NotSupported("read-only".to_string()))
     }
 
-    async fn lock(&self, objects: Vec<String>, #[zbus(header)] header: Header<'_>) -> Result<(Vec<String>, String), FdoError> {
+    async fn lock(
+        &self,
+        objects: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(Vec<String>, String), FdoError> {
         log_caller("Lock", &header);
         for backend in self.state.backends_ordered() {
             let bid = backend.id().to_string();
@@ -227,11 +236,8 @@ impl SecretService {
             Some(backend_id) => {
                 // Allocate a unique prompt path and register the object.
                 let prompt_path = self.state.allocate_prompt(&backend_id);
-                let prompt_obj = SecretPrompt::new(
-                    prompt_path.clone(),
-                    backend_id,
-                    Arc::clone(&self.state),
-                );
+                let prompt_obj =
+                    SecretPrompt::new(prompt_path.clone(), backend_id, Arc::clone(&self.state));
                 self.state
                     .conn
                     .object_server()
@@ -278,8 +284,8 @@ pub(crate) fn build_secret_value(
 
     let (parameters, value) = if let Some(key) = aes_key {
         // DH-encrypted session: AES-128-CBC with random IV
-        let (iv, ciphertext) = aes128_cbc_encrypt(key, secret.as_slice())
-            .map_err(map_backend_error)?;
+        let (iv, ciphertext) =
+            aes128_cbc_encrypt(key, secret.as_slice()).map_err(map_backend_error)?;
         (iv, ciphertext)
     } else {
         // Plain session: no parameters, raw plaintext value

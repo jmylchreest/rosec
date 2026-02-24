@@ -5,11 +5,11 @@
 //! and Vaultwarden.
 
 use aes::Aes256;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use block_padding::Pkcs7;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use cbc::Decryptor;
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -187,8 +187,8 @@ pub(crate) fn encrypt_symmetric(
     keys: &Keys,
     plaintext: &[u8],
 ) -> Result<EncryptResult, BitwardenError> {
-    use cbc::cipher::BlockEncryptMut;
     use cbc::Encryptor;
+    use cbc::cipher::BlockEncryptMut;
     use rand::RngCore;
 
     type Aes256CbcEnc = Encryptor<Aes256>;

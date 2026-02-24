@@ -3,8 +3,8 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use sha2::{Digest, Sha256};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use anyhow::{Result, bail};
 use zbus::Connection;
@@ -253,40 +253,57 @@ fn load_config() -> Config {
 /// JSON types matching the rosec-prompt wire protocol.
 #[derive(Serialize)]
 struct PromptRequest<'a> {
-    #[serde(rename = "t")]  title:         &'a str,
-    #[serde(rename = "m")]  message:       &'a str,
-    #[serde(rename = "h")]  hint:          &'a str,
-    backend:                               &'a str,
-    confirm_label:                         &'a str,
-    cancel_label:                          &'a str,
-    fields:                                Vec<PromptField<'a>>,
-    theme:                                 PromptTheme<'a>,
+    #[serde(rename = "t")]
+    title: &'a str,
+    #[serde(rename = "m")]
+    message: &'a str,
+    #[serde(rename = "h")]
+    hint: &'a str,
+    backend: &'a str,
+    confirm_label: &'a str,
+    cancel_label: &'a str,
+    fields: Vec<PromptField<'a>>,
+    theme: PromptTheme<'a>,
 }
 
 #[derive(Serialize, Clone)]
 struct PromptField<'a> {
-    id:          &'a str,
-    label:       &'a str,
-    kind:        &'a str,
+    id: &'a str,
+    label: &'a str,
+    kind: &'a str,
     placeholder: &'a str,
 }
 
 #[derive(Serialize)]
 struct PromptTheme<'a> {
-    #[serde(rename = "bg")]   background:         &'a str,
-    #[serde(rename = "fg")]   foreground:         &'a str,
-    #[serde(rename = "bdr")]  border_color:       &'a str,
-    #[serde(rename = "bw")]   border_width:       u16,
-    #[serde(rename = "font")] font_family:        &'a str,
-    #[serde(rename = "lc")]   label_color:        &'a str,
-    #[serde(rename = "ac")]   accent_color:       &'a str,
-    #[serde(rename = "ybg")]  confirm_background: &'a str,
-    #[serde(rename = "yt")]   confirm_text:       &'a str,
-    #[serde(rename = "nbg")]  cancel_background:  &'a str,
-    #[serde(rename = "nt")]   cancel_text:        &'a str,
-    #[serde(rename = "ibg")]  input_background:   &'a str,
-    #[serde(rename = "it")]   input_text:         &'a str,
-    #[serde(rename = "size")] font_size:          u16,
+    #[serde(rename = "bg")]
+    background: &'a str,
+    #[serde(rename = "fg")]
+    foreground: &'a str,
+    #[serde(rename = "bdr")]
+    border_color: &'a str,
+    #[serde(rename = "bw")]
+    border_width: u16,
+    #[serde(rename = "font")]
+    font_family: &'a str,
+    #[serde(rename = "lc")]
+    label_color: &'a str,
+    #[serde(rename = "ac")]
+    accent_color: &'a str,
+    #[serde(rename = "ybg")]
+    confirm_background: &'a str,
+    #[serde(rename = "yt")]
+    confirm_text: &'a str,
+    #[serde(rename = "nbg")]
+    cancel_background: &'a str,
+    #[serde(rename = "nt")]
+    cancel_text: &'a str,
+    #[serde(rename = "ibg")]
+    input_background: &'a str,
+    #[serde(rename = "it")]
+    input_text: &'a str,
+    #[serde(rename = "size")]
+    font_size: u16,
 }
 
 /// Resolve the path to the named binary, checking sibling of current exe first
@@ -333,8 +350,16 @@ async fn prompt_and_auth(
     // SM uses token-based auth, not a vault password — use "Authenticate"
     // as the action verb.  All other backends use "Unlock".
     let is_token_auth = backend_kind.ends_with("-sm");
-    let action_verb = if is_token_auth { "Authenticate" } else { "Unlock" };
-    let confirm_label = if is_token_auth { "Authenticate" } else { "Unlock" };
+    let action_verb = if is_token_auth {
+        "Authenticate"
+    } else {
+        "Unlock"
+    };
+    let confirm_label = if is_token_auth {
+        "Authenticate"
+    } else {
+        "Unlock"
+    };
 
     // The human-readable name (which may contain PII such as an email address)
     // is shown in the tooltip (hint) so it is discoverable on hover but does
@@ -345,36 +370,36 @@ async fn prompt_and_auth(
         backend_name.to_string()
     };
     let request = PromptRequest {
-        title:             &format!("{action_verb} {backend_id}"),
-        message:           "",
-        hint:              &hint,
-        backend:           backend_id,
+        title: &format!("{action_verb} {backend_id}"),
+        message: "",
+        hint: &hint,
+        backend: backend_id,
         confirm_label,
-        cancel_label:      "Cancel",
-        fields:            fields.clone(),
+        cancel_label: "Cancel",
+        fields: fields.clone(),
         theme: PromptTheme {
-            background:         &theme.background,
-            foreground:         &theme.foreground,
-            border_color:       &theme.border_color,
-            border_width:       theme.border_width,
-            font_family:        &theme.font_family,
-            label_color:        &theme.label_color,
-            accent_color:       &theme.accent_color,
+            background: &theme.background,
+            foreground: &theme.foreground,
+            border_color: &theme.border_color,
+            border_width: theme.border_width,
+            font_family: &theme.font_family,
+            label_color: &theme.label_color,
+            accent_color: &theme.accent_color,
             confirm_background: &theme.confirm_background,
-            confirm_text:       &theme.confirm_text,
-            cancel_background:  &theme.cancel_background,
-            cancel_text:        &theme.cancel_text,
-            input_background:   &theme.input_background,
-            input_text:         &theme.input_text,
-            font_size:          theme.font_size,
+            confirm_text: &theme.confirm_text,
+            cancel_background: &theme.cancel_background,
+            cancel_text: &theme.cancel_text,
+            input_background: &theme.input_background,
+            input_text: &theme.input_text,
+            font_size: theme.font_size,
         },
     };
 
     let json = serde_json::to_string(&request)?;
 
     // Determine the prompt program path.
-    let has_display = std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var_os("DISPLAY").is_some();
+    let has_display =
+        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
     let collected: HashMap<String, Zeroizing<String>> = if has_display {
         let program = match config.prompt.backend.as_str() {
@@ -399,10 +424,13 @@ async fn prompt_and_auth(
                 }
                 let raw: HashMap<String, String> =
                     serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())?;
-                raw.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect()
+                raw.into_iter()
+                    .map(|(k, v)| (k, Zeroizing::new(v)))
+                    .collect()
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                   || e.kind() == std::io::ErrorKind::PermissionDenied =>
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 // GUI binary not available — fall through to TTY
                 collect_tty(&fields).await?
@@ -428,8 +456,9 @@ async fn prompt_and_auth(
         };
     }
 
-    let result: Result<bool, zbus::Error> =
-        proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await;
+    let result: Result<bool, zbus::Error> = proxy
+        .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
+        .await;
 
     let needs_registration = matches!(
         &result,
@@ -463,7 +492,9 @@ async fn prompt_and_auth(
         let reg_extra = collect_tty(&reg_only_fields).await?;
         cred_map.extend(reg_extra);
 
-        let _ok: bool = proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await?;
+        let _ok: bool = proxy
+            .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
+            .await?;
     } else {
         result?;
     }
@@ -540,11 +571,11 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
 
     // Call Unlock([default_collection]).  Returns (unlocked_list, prompt_path).
     // prompt_path == "/" means everything was already unlocked (auto-unlock backends).
-    let collection_path = OwnedObjectPath::try_from(
-        "/org/freedesktop/secrets/collection/default".to_string(),
-    )?;
-    let (_, prompt_path): (Vec<OwnedObjectPath>, OwnedObjectPath) =
-        service_proxy.call("Unlock", &(vec![collection_path],)).await?;
+    let collection_path =
+        OwnedObjectPath::try_from("/org/freedesktop/secrets/collection/default".to_string())?;
+    let (_, prompt_path): (Vec<OwnedObjectPath>, OwnedObjectPath) = service_proxy
+        .call("Unlock", &(vec![collection_path],))
+        .await?;
     let prompt_path = prompt_path.to_string();
 
     if prompt_path == "/" {
@@ -621,9 +652,7 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
 }
 
 /// Collect credentials via TTY for the given fields.
-async fn collect_tty(
-    fields: &[PromptField<'_>],
-) -> Result<HashMap<String, Zeroizing<String>>> {
+async fn collect_tty(fields: &[PromptField<'_>]) -> Result<HashMap<String, Zeroizing<String>>> {
     eprintln!();
     let mut map = HashMap::new();
     for f in fields {
@@ -685,13 +714,7 @@ fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<String> {
     unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
 
     // Print a newline since ECHO is off (the user's Enter was not echoed).
-    let _ = unsafe {
-        libc::write(
-            fd,
-            b"\n".as_ptr().cast(),
-            1,
-        )
-    };
+    let _ = unsafe { libc::write(fd, b"\n".as_ptr().cast(), 1) };
 
     result?;
     Ok(line
@@ -771,12 +794,18 @@ async fn prompt_field(label: &str, placeholder: &str, kind: &str) -> Result<Zero
 async fn cmd_backend(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("list");
     match sub {
-        "list" | "ls"            => cmd_backend_list().await,
-        "auth"                   => cmd_backend_auth(&args[1..]).await,
-        "add"                    => cmd_backend_add(&args[1..]).await,
-        "remove" | "rm"          => cmd_backend_remove(&args[1..]).await,
-        "kinds"                  => { cmd_backend_kinds(); Ok(()) }
-        "help" | "--help" | "-h" => { print_backend_help(); Ok(()) }
+        "list" | "ls" => cmd_backend_list().await,
+        "auth" => cmd_backend_auth(&args[1..]).await,
+        "add" => cmd_backend_add(&args[1..]).await,
+        "remove" | "rm" => cmd_backend_remove(&args[1..]).await,
+        "kinds" => {
+            cmd_backend_kinds();
+            Ok(())
+        }
+        "help" | "--help" | "-h" => {
+            print_backend_help();
+            Ok(())
+        }
         other => {
             eprintln!("unknown backend subcommand: {other}");
             print_backend_help();
@@ -796,17 +825,31 @@ async fn cmd_backend_list() -> Result<()> {
     )
     .await?;
 
-    let entries: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let entries: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
     if entries.is_empty() {
         println!("No backends configured. Run `rosec backend add <kind>` to add one.");
         return Ok(());
     }
 
-    let id_w   = entries.iter().map(|(id, ..)| id.len()).max().unwrap_or(2).max(2);
-    let name_w = entries.iter().map(|(_, n, ..)| n.len()).max().unwrap_or(4).max(4);
-    let kind_w = entries.iter().map(|(_, _, k, _)| k.len()).max().unwrap_or(4).max(4);
+    let id_w = entries
+        .iter()
+        .map(|(id, ..)| id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let name_w = entries
+        .iter()
+        .map(|(_, n, ..)| n.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let kind_w = entries
+        .iter()
+        .map(|(_, _, k, _)| k.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
 
     println!(
         "{:<id_w$}  {:<name_w$}  {:<kind_w$}  STATE",
@@ -816,7 +859,9 @@ async fn cmd_backend_list() -> Result<()> {
     for (id, name, kind, locked) in &entries {
         println!(
             "{:<id_w$}  {:<name_w$}  {:<kind_w$}  {}",
-            id, name, kind,
+            id,
+            name,
+            kind,
             if *locked { "locked" } else { "unlocked" },
         );
     }
@@ -834,9 +879,9 @@ async fn cmd_backend_list() -> Result<()> {
 ///   3. `GetRegistrationInfo` → display instructions, prompt extra fields
 ///   4. Retry `AuthBackend` with password + registration fields combined
 async fn cmd_backend_auth(args: &[String]) -> Result<()> {
-    let backend_id = args.first().ok_or_else(|| {
-        anyhow::anyhow!("usage: rosec backend auth <backend-id>")
-    })?;
+    let backend_id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec backend auth <backend-id>"))?;
 
     let conn = conn().await?;
     let config = load_config();
@@ -849,8 +894,7 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
     .await?;
 
     // Resolve the friendly backend name and kind from BackendList.
-    let backends: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
     let entry = backends.iter().find(|(id, _, _, _)| id == backend_id);
     let backend_name = entry.map(|(_, name, _, _)| name.as_str()).unwrap_or("");
     let backend_kind = entry.map(|(_, _, k, _)| k.as_str()).unwrap_or("");
@@ -858,7 +902,15 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
     let field_descs: Vec<(String, String, String, String, bool)> =
         proxy.call("GetAuthFields", &(backend_id,)).await?;
 
-    prompt_and_auth(backend_id, backend_name, backend_kind, &field_descs, &proxy, &config).await?;
+    prompt_and_auth(
+        backend_id,
+        backend_name,
+        backend_kind,
+        &field_descs,
+        &proxy,
+        &config,
+    )
+    .await?;
 
     println!("Backend '{backend_id}' authenticated.");
     Ok(())
@@ -938,7 +990,8 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
                 &format!("{description} (optional, Enter to skip)"),
                 "",
                 "text",
-            ).await?;
+            )
+            .await?;
             let s = v.as_str().to_string();
             if !s.is_empty() {
                 options.push((key.to_string(), s));
@@ -1027,15 +1080,18 @@ fn derive_backend_id(kind: &str, options: &[(String, String)]) -> String {
 
     let hash = Sha256::digest(value.as_bytes());
     // Use the first 4 bytes (8 hex chars) — low collision probability for personal use
-    let short = format!("{:08x}", u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]));
+    let short = format!(
+        "{:08x}",
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+    );
     format!("{kind}-{short}")
 }
 
 /// `rosec backend remove <id>`
 async fn cmd_backend_remove(args: &[String]) -> Result<()> {
-    let id = args.first().ok_or_else(|| {
-        anyhow::anyhow!("usage: rosec backend remove <id>")
-    })?;
+    let id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec backend remove <id>"))?;
     let cfg = config_path();
     config_edit::remove_backend(&cfg, id)?;
     println!("Removed backend '{id}' from {}", cfg.display());
@@ -1057,13 +1113,11 @@ async fn cmd_status() -> Result<()> {
     )
     .await?;
 
-    let (_, _, _, cache_size, last_sync_epoch, sessions): (
-        String, String, u32, u32, u64, u32,
-    ) = proxy.call("Status", &()).await?;
+    let (_, _, _, cache_size, last_sync_epoch, sessions): (String, String, u32, u32, u64, u32) =
+        proxy.call("Status", &()).await?;
 
     // Fetch all backends with type and lock state.
-    let backends: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
     println!("Backends:");
     for (id, name, kind, locked) in &backends {
@@ -1094,8 +1148,7 @@ async fn cmd_sync() -> Result<()> {
     let config = load_config();
 
     // Fetch the list of backends so we know which ones to sync.
-    let backends: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
     for (id, name, kind, _locked) in &backends {
         eprint!("Syncing '{id}'...");
@@ -1145,8 +1198,7 @@ async fn sync_before_get(conn: &Connection) -> Result<()> {
     .await?;
 
     // Check global staleness: if last_sync_epoch is within 60 s, skip.
-    let status: (String, String, u32, u32, u64, u32) =
-        proxy.call("Status", &()).await?;
+    let status: (String, String, u32, u32, u64, u32) = proxy.call("Status", &()).await?;
     let last_sync_epoch = status.4;
 
     if last_sync_epoch > 0 {
@@ -1160,8 +1212,7 @@ async fn sync_before_get(conn: &Connection) -> Result<()> {
     }
 
     // Stale or never synced — sync each unlocked backend in parallel.
-    let backends: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
     let futures: Vec<_> = backends
         .into_iter()
@@ -1207,19 +1258,19 @@ impl OutputFormat {
         match s {
             "human" => Some(Self::Human),
             "table" => Some(Self::Table),
-            "kv"    => Some(Self::Kv),
-            "json"  => Some(Self::Json),
-            _       => None,
+            "kv" => Some(Self::Kv),
+            "json" => Some(Self::Json),
+            _ => None,
         }
     }
 }
 
 /// All data fetched for a single search result item.
 struct ItemSummary {
-    label:   String,
-    attrs:   HashMap<String, String>,
-    path:    String,
-    locked:  bool,
+    label: String,
+    attrs: HashMap<String, String>,
+    path: String,
+    locked: bool,
 }
 
 impl ItemSummary {
@@ -1377,7 +1428,10 @@ fn glob_matches(item: &ItemSummary, attrs: &HashMap<String, String>) -> bool {
         let value = if key == "name" {
             item.label.as_str()
         } else {
-            item.attrs.get(key.as_str()).map(String::as_str).unwrap_or("")
+            item.attrs
+                .get(key.as_str())
+                .map(String::as_str)
+                .unwrap_or("")
         };
         wildmatch::WildMatch::new(pattern).matches(value)
     })
@@ -1416,8 +1470,7 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     if rosecd {
         warn_if_no_backends(&conn).await;
     }
-    let has_globs = all_attrs.values().any(|v| is_glob(v))
-        || all_attrs.contains_key("name");
+    let has_globs = all_attrs.values().any(|v| is_glob(v)) || all_attrs.contains_key("name");
 
     // Strategy:
     //   - Any glob pattern or "name" filter → use org.rosec.Search.SearchItemsGlob
@@ -1442,31 +1495,32 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     // Fetch metadata for all result paths.
     let mut items: Vec<ItemSummary> = Vec::new();
     for path in &unlocked {
-        let summary = fetch_item_data(&conn, path, false).await
+        let summary = fetch_item_data(&conn, path, false)
+            .await
             .unwrap_or_else(|_| ItemSummary {
-                label:  path.clone(),
-                attrs:  HashMap::new(),
-                path:   path.clone(),
+                label: path.clone(),
+                attrs: HashMap::new(),
+                path: path.clone(),
                 locked: false,
             });
         items.push(summary);
     }
     for path in &locked {
-        let summary = fetch_item_data(&conn, path, true).await
+        let summary = fetch_item_data(&conn, path, true)
+            .await
             .unwrap_or_else(|_| ItemSummary {
-                label:  path.clone(),
-                attrs:  HashMap::new(),
-                path:   path.clone(),
+                label: path.clone(),
+                attrs: HashMap::new(),
+                path: path.clone(),
                 locked: true,
             });
         items.push(summary);
     }
 
     match format {
-        OutputFormat::Human |
-        OutputFormat::Table => print_search_table(&items, show_path),
-        OutputFormat::Kv    => print_search_kv(&items, show_path),
-        OutputFormat::Json  => print_search_json(&items)?,  // JSON always includes path
+        OutputFormat::Human | OutputFormat::Table => print_search_table(&items, show_path),
+        OutputFormat::Kv => print_search_kv(&items, show_path),
+        OutputFormat::Json => print_search_json(&items)?, // JSON always includes path
     }
 
     Ok(())
@@ -1485,7 +1539,12 @@ async fn fetch_item_data(conn: &zbus::Connection, path: &str, locked: bool) -> R
     let label: String = item_proxy.get_property("Label").await?;
     let attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
 
-    Ok(ItemSummary { label, attrs, path: path.to_string(), locked })
+    Ok(ItemSummary {
+        label,
+        attrs,
+        path: path.to_string(),
+        locked,
+    })
 }
 
 /// Truncate a string to `max` display chars, appending `…` if cut.
@@ -1506,40 +1565,74 @@ fn trunc(s: &str, max: usize) -> String {
 ///
 /// Columns: TYPE | NAME | USERNAME | URI | ID [| PATH]
 fn print_search_table(items: &[ItemSummary], show_path: bool) {
-    const H_TYPE:  &str = "TYPE";
-    const H_NAME:  &str = "NAME";
-    const H_USER:  &str = "USERNAME";
-    const H_URI:   &str = "URI";
-    const H_ID:    &str = "ID";
+    const H_TYPE: &str = "TYPE";
+    const H_NAME: &str = "NAME";
+    const H_USER: &str = "USERNAME";
+    const H_URI: &str = "URI";
+    const H_ID: &str = "ID";
 
     // Hard caps keep the table usable on a standard 120-column terminal.
     const MAX_TYPE: usize = 10;
     const MAX_NAME: usize = 30;
     const MAX_USER: usize = 30;
-    const MAX_URI:  usize = 45;
-    const W_ID:     usize = 16; // always exactly 16 hex chars
+    const MAX_URI: usize = 45;
+    const W_ID: usize = 16; // always exactly 16 hex chars
 
-    let w_type = items.iter()
-        .map(|i| i.attrs.get("type").map(String::len).unwrap_or(0).min(MAX_TYPE))
-        .max().unwrap_or(0)
+    let w_type = items
+        .iter()
+        .map(|i| {
+            i.attrs
+                .get("type")
+                .map(String::len)
+                .unwrap_or(0)
+                .min(MAX_TYPE)
+        })
+        .max()
+        .unwrap_or(0)
         .max(H_TYPE.len());
-    let w_name = items.iter()
+    let w_name = items
+        .iter()
         .map(|i| i.label.len().min(MAX_NAME))
-        .max().unwrap_or(0)
+        .max()
+        .unwrap_or(0)
         .max(H_NAME.len());
-    let w_user = items.iter()
-        .map(|i| i.attrs.get("username").map(String::len).unwrap_or(0).min(MAX_USER))
-        .max().unwrap_or(0)
+    let w_user = items
+        .iter()
+        .map(|i| {
+            i.attrs
+                .get("username")
+                .map(String::len)
+                .unwrap_or(0)
+                .min(MAX_USER)
+        })
+        .max()
+        .unwrap_or(0)
         .max(H_USER.len());
-    let w_uri = items.iter()
-        .map(|i| i.attrs.get("uri").map(String::len).unwrap_or(0).min(MAX_URI))
-        .max().unwrap_or(0)
+    let w_uri = items
+        .iter()
+        .map(|i| {
+            i.attrs
+                .get("uri")
+                .map(String::len)
+                .unwrap_or(0)
+                .min(MAX_URI)
+        })
+        .max()
+        .unwrap_or(0)
         .max(H_URI.len());
 
     // Separator width: columns + 2-char gaps between each pair + ID column.
     // The ID header text is 2 chars ("ID") but data is always 16 hex chars.
     let w_id_col = W_ID.max(H_ID.len());
-    let sep_w = w_type + 2 + w_name + 2 + w_user + 2 + w_uri + 2 + w_id_col
+    let sep_w = w_type
+        + 2
+        + w_name
+        + 2
+        + w_user
+        + 2
+        + w_uri
+        + 2
+        + w_id_col
         + if show_path { 2 + "PATH".len() } else { 0 };
 
     if show_path {
@@ -1557,8 +1650,8 @@ fn print_search_table(items: &[ItemSummary], show_path: bool) {
 
     for item in items {
         let item_type = item.attrs.get("type").map(String::as_str).unwrap_or("");
-        let username  = item.attrs.get("username").map(String::as_str).unwrap_or("");
-        let uri       = item.attrs.get("uri").map(String::as_str).unwrap_or("");
+        let username = item.attrs.get("username").map(String::as_str).unwrap_or("");
+        let uri = item.attrs.get("uri").map(String::as_str).unwrap_or("");
 
         let t = trunc(item_type, MAX_TYPE);
         let n = trunc(&item.label, MAX_NAME);
@@ -1569,12 +1662,23 @@ fn print_search_table(items: &[ItemSummary], show_path: bool) {
         if show_path {
             println!(
                 "{:<w_type$}  {:<w_name$}  {:<w_user$}  {:<w_uri$}  {:<w_id_col$}  {}{}",
-                t, n, u, r, item.display_id(), item.path, lock_indicator,
+                t,
+                n,
+                u,
+                r,
+                item.display_id(),
+                item.path,
+                lock_indicator,
             );
         } else {
             println!(
                 "{:<w_type$}  {:<w_name$}  {:<w_user$}  {:<w_uri$}  {}{}",
-                t, n, u, r, item.display_id(), lock_indicator,
+                t,
+                n,
+                u,
+                r,
+                item.display_id(),
+                lock_indicator,
             );
         }
     }
@@ -1609,23 +1713,38 @@ fn print_search_kv(items: &[ItemSummary], show_path: bool) {
 
 /// Print results as a JSON array.
 fn print_search_json(items: &[ItemSummary]) -> Result<()> {
-    let json_items: Vec<serde_json::Value> = items.iter().map(|item| {
-        let mut obj = serde_json::Map::new();
-        obj.insert("label".to_string(),    serde_json::Value::String(item.label.clone()));
-        obj.insert("id".to_string(),       serde_json::Value::String(item.display_id().to_string()));
-        obj.insert("path".to_string(),     serde_json::Value::String(item.path.clone()));
-        obj.insert("locked".to_string(),   serde_json::Value::Bool(item.locked));
+    let json_items: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "label".to_string(),
+                serde_json::Value::String(item.label.clone()),
+            );
+            obj.insert(
+                "id".to_string(),
+                serde_json::Value::String(item.display_id().to_string()),
+            );
+            obj.insert(
+                "path".to_string(),
+                serde_json::Value::String(item.path.clone()),
+            );
+            obj.insert("locked".to_string(), serde_json::Value::Bool(item.locked));
 
-        let mut attrs_obj = serde_json::Map::new();
-        let mut sorted_attrs: Vec<_> = item.attrs.iter().collect();
-        sorted_attrs.sort_by_key(|(k, _)| k.as_str());
-        for (k, v) in sorted_attrs {
-            attrs_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
-        }
-        obj.insert("attributes".to_string(), serde_json::Value::Object(attrs_obj));
+            let mut attrs_obj = serde_json::Map::new();
+            let mut sorted_attrs: Vec<_> = item.attrs.iter().collect();
+            sorted_attrs.sort_by_key(|(k, _)| k.as_str());
+            for (k, v) in sorted_attrs {
+                attrs_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            obj.insert(
+                "attributes".to_string(),
+                serde_json::Value::Object(attrs_obj),
+            );
 
-        serde_json::Value::Object(obj)
-    }).collect();
+            serde_json::Value::Object(obj)
+        })
+        .collect();
 
     println!("{}", serde_json::to_string_pretty(&json_items)?);
     Ok(())
@@ -1659,8 +1778,9 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool
         )
         .await?;
         let suffix = format!("_{raw}");
-        let (unlocked, locked): (Vec<String>, Vec<String>) =
-            proxy.call("SearchItems", &(&HashMap::<String, String>::new(),)).await?;
+        let (unlocked, locked): (Vec<String>, Vec<String>) = proxy
+            .call("SearchItems", &(&HashMap::<String, String>::new(),))
+            .await?;
         // Check unlocked first (preferred).
         for path in &unlocked {
             if path.ends_with(&suffix) {
@@ -1677,7 +1797,10 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool
     }
 
     // Legacy: treat as full path segment.
-    Ok((format!("/org/freedesktop/secrets/collection/default/{raw}"), false))
+    Ok((
+        format!("/org/freedesktop/secrets/collection/default/{raw}"),
+        false,
+    ))
 }
 
 async fn cmd_get(args: &[String]) -> Result<()> {
@@ -1720,7 +1843,8 @@ async fn cmd_get(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    let raw = id.ok_or_else(|| anyhow::anyhow!("missing item path or ID  (try `rosec get --help`)"))?;
+    let raw =
+        id.ok_or_else(|| anyhow::anyhow!("missing item path or ID  (try `rosec get --help`)"))?;
 
     let conn = conn().await?;
 
@@ -1741,8 +1865,7 @@ async fn cmd_get(args: &[String]) -> Result<()> {
             // Item not found — try unlocking, syncing, and re-resolving.
             trigger_unlock(&conn).await?;
             sync_before_get(&conn).await?;
-            resolve_item_path(&conn, raw).await
-                .map_err(|_| e)?  // If still not found, return the original error.
+            resolve_item_path(&conn, raw).await.map_err(|_| e)? // If still not found, return the original error.
         }
         Err(e) => return Err(e),
     };
@@ -1817,8 +1940,10 @@ fn normalise_attr_key(attr: &str) -> String {
         let name = &attr[..dot];
         let suffix = &attr[dot + 1..];
         // Only treat as an index if suffix is a pure decimal integer.
-        if !name.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
-            && let Ok(idx) = suffix.parse::<usize>() {
+        if !name.is_empty()
+            && suffix.chars().all(|c| c.is_ascii_digit())
+            && let Ok(idx) = suffix.parse::<usize>()
+        {
             return if idx == 0 {
                 name.to_string()
             } else {
@@ -1894,8 +2019,7 @@ async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Res
                         // Add a trailing newline on TTY only if the secret itself
                         // doesn't already end with one (avoids the double-newline
                         // that appears when the stored value has a trailing \n).
-                        if std::io::IsTerminal::is_terminal(&out)
-                            && !secret_bytes.ends_with(b"\n")
+                        if std::io::IsTerminal::is_terminal(&out) && !secret_bytes.ends_with(b"\n")
                         {
                             out.write_all(b"\n")?;
                         }
@@ -2192,7 +2316,10 @@ async fn cmd_inspect_inner(
             }
             obj.insert("secret".into(), primary_secret);
 
-            println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(obj))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Object(obj))?
+            );
         }
     }
 
@@ -2210,7 +2337,10 @@ async fn cmd_lock() -> Result<()> {
     .await?;
 
     let (locked, _prompt): (Vec<String>, String) = proxy
-        .call("Lock", &(vec!["/org/freedesktop/secrets/collection/default"],))
+        .call(
+            "Lock",
+            &(vec!["/org/freedesktop/secrets/collection/default"],),
+        )
         .await?;
 
     if locked.is_empty() {
@@ -2233,8 +2363,7 @@ async fn cmd_unlock() -> Result<()> {
     )
     .await?;
 
-    let backends: Vec<(String, String, String, bool)> =
-        proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
     // Separate already-unlocked from locked backends.
     let mut locked: Vec<(String, String, String)> = Vec::new(); // (id, name, kind)
@@ -2308,14 +2437,24 @@ async fn opportunistic_unlock(
     let label = if backends.len() == 2 {
         format!("Unlocking {} and 1 other backend", first_name)
     } else {
-        format!("Unlocking {} and {} other backends", first_name, backends.len() - 1)
+        format!(
+            "Unlocking {} and {} other backends",
+            first_name,
+            backends.len() - 1
+        )
     };
 
     // Build prompt fields with the combined label.
     let combined_fields: Vec<FieldDesc> = first_fields
         .iter()
         .map(|(fid, _label, fkind, placeholder, required)| {
-            (fid.clone(), label.clone(), fkind.clone(), placeholder.clone(), *required)
+            (
+                fid.clone(),
+                label.clone(),
+                fkind.clone(),
+                placeholder.clone(),
+                *required,
+            )
         })
         .collect();
 
@@ -2339,8 +2478,8 @@ async fn opportunistic_unlock(
         .collect();
 
     // Try the collected credentials against all locked backends concurrently.
-    let results = futures_util::future::join_all(
-        all_fields.iter().map(|(id, name, kind, _fields)| {
+    let results =
+        futures_util::future::join_all(all_fields.iter().map(|(id, name, kind, _fields)| {
             let proxy = proxy.clone();
             let id = id.clone();
             let name = name.clone();
@@ -2351,8 +2490,8 @@ async fn opportunistic_unlock(
                     proxy.call("AuthBackend", &(&id, &map)).await;
                 (id, name, kind, result)
             }
-        })
-    ).await;
+        }))
+        .await;
 
     // Collect failures — these need individual prompts.
     let mut failed = Vec::new();
@@ -2371,4 +2510,3 @@ async fn opportunistic_unlock(
 
     Ok(failed)
 }
-

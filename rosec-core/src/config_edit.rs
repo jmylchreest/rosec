@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-use toml_edit::{value, DocumentMut, Item, Table};
+use anyhow::{Context, Result, bail};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 // ---------------------------------------------------------------------------
 // Public API

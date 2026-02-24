@@ -123,7 +123,10 @@ pub struct DecryptedCard {
 impl std::fmt::Debug for DecryptedCard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecryptedCard")
-            .field("cardholder_name", &self.cardholder_name.as_ref().map(|_| "[redacted]"))
+            .field(
+                "cardholder_name",
+                &self.cardholder_name.as_ref().map(|_| "[redacted]"),
+            )
             .field("number", &self.number.as_ref().map(|_| "[redacted]"))
             .field("brand", &self.brand)
             .field("exp_month", &self.exp_month.as_ref().map(|_| "[redacted]"))
@@ -142,7 +145,10 @@ pub struct DecryptedSshKey {
 impl std::fmt::Debug for DecryptedSshKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecryptedSshKey")
-            .field("private_key", &self.private_key.as_ref().map(|_| "[redacted]"))
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[redacted]"),
+            )
             .field("public_key", &self.public_key)
             .field("fingerprint", &self.fingerprint)
             .finish()
@@ -175,7 +181,11 @@ impl std::fmt::Debug for DecryptedIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Helper: redact if Some, show None otherwise.
         fn r(opt: &Option<Zeroizing<String>>) -> &str {
-            if opt.is_some() { "[redacted]" } else { "<none>" }
+            if opt.is_some() {
+                "[redacted]"
+            } else {
+                "<none>"
+            }
         }
         f.debug_struct("DecryptedIdentity")
             .field("title", &r(&self.title))
@@ -284,17 +294,15 @@ impl VaultState {
             };
             match CipherString::parse(key_str) {
                 Ok(cs) => match cs.decrypt_asymmetric(pk) {
-                    Ok(org_key_bytes) => {
-                        match Keys::from_bytes(&org_key_bytes) {
-                            Ok(keys) => {
-                                debug!(org_id = %org.id, "decrypted org key");
-                                self.org_keys.insert(org.id.clone(), keys);
-                            }
-                            Err(e) => {
-                                warn!(org_id = %org.id, error = %e, "invalid org key length");
-                            }
+                    Ok(org_key_bytes) => match Keys::from_bytes(&org_key_bytes) {
+                        Ok(keys) => {
+                            debug!(org_id = %org.id, "decrypted org key");
+                            self.org_keys.insert(org.id.clone(), keys);
                         }
-                    }
+                        Err(e) => {
+                            warn!(org_id = %org.id, error = %e, "invalid org key length");
+                        }
+                    },
                     Err(e) => {
                         warn!(org_id = %org.id, error = %e, "failed to decrypt org key");
                     }
@@ -376,9 +384,7 @@ impl VaultState {
         // the wrong key.
         let base_keys = match &sc.organization_id {
             Some(org_id) => self.org_keys.get(org_id).ok_or_else(|| {
-                BitwardenError::Other(anyhow::anyhow!(
-                    "org key unavailable for org {org_id}"
-                ))
+                BitwardenError::Other(anyhow::anyhow!("org key unavailable for org {org_id}"))
             })?,
             None => &self.vault_keys,
         };

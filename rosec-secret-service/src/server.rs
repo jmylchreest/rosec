@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rosec_core::VaultBackend;
 use rosec_core::config::PromptConfig;
 use rosec_core::router::Router;
-use rosec_core::VaultBackend;
 use zbus::Connection;
 
 use crate::collection::{CollectionState, SecretCollection};
@@ -53,7 +53,16 @@ pub async fn register_objects_with_config(
     sessions: Arc<SessionManager>,
     return_attr_map: HashMap<String, Vec<String>>,
 ) -> zbus::Result<Arc<ServiceState>> {
-    register_objects_with_full_config(conn, backends, router, sessions, return_attr_map, HashMap::new(), PromptConfig::default()).await
+    register_objects_with_full_config(
+        conn,
+        backends,
+        router,
+        sessions,
+        return_attr_map,
+        HashMap::new(),
+        PromptConfig::default(),
+    )
+    .await
 }
 
 /// Full constructor used by `rosecd` — passes `return_attr_map`, `collection_map`, and `PromptConfig`.
@@ -85,10 +94,16 @@ pub async fn register_objects_with_full_config(
 
     let server = conn.object_server();
     server
-        .at(paths.service.clone(), SecretService::new(Arc::clone(&state)))
+        .at(
+            paths.service.clone(),
+            SecretService::new(Arc::clone(&state)),
+        )
         .await?;
     server
-        .at("/org/rosec/Daemon", RosecManagement::new(Arc::clone(&state)))
+        .at(
+            "/org/rosec/Daemon",
+            RosecManagement::new(Arc::clone(&state)),
+        )
         .await?;
     server
         .at("/org/rosec/Search", RosecSearch::new(Arc::clone(&state)))
@@ -103,7 +118,10 @@ pub async fn register_objects_with_full_config(
         backends: backends_for_collection,
     };
     server
-        .at(paths.collection_default.clone(), SecretCollection::new(collection_state))
+        .at(
+            paths.collection_default.clone(),
+            SecretCollection::new(collection_state),
+        )
         .await?;
 
     Ok(state)

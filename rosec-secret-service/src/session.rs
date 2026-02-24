@@ -6,7 +6,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 use zvariant::Value;
 
-use crate::crypto::{derive_session_key, generate_dh_keypair, SessionAlgorithm};
+use crate::crypto::{SessionAlgorithm, derive_session_key, generate_dh_keypair};
 
 /// Information stored per open session.
 #[derive(Debug)]
@@ -80,7 +80,7 @@ impl SessionManager {
                     _ => {
                         return Err(BackendError::Unavailable(
                             "DH session requires Array<Byte> input (client public key)".to_string(),
-                        ))
+                        ));
                     }
                 };
 
@@ -271,18 +271,20 @@ mod tests {
         let mgr = SessionManager::new();
         // Wrong-length public key (64 bytes instead of 128)
         let input = dh_input(&[0u8; 64]);
-        assert!(mgr
-            .open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
-            .is_err());
+        assert!(
+            mgr.open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
+                .is_err()
+        );
     }
 
     #[test]
     fn dh_session_non_array_input_rejected() {
         let mgr = SessionManager::new();
         let input = Value::from("not-an-array");
-        assert!(mgr
-            .open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
-            .is_err());
+        assert!(
+            mgr.open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
+                .is_err()
+        );
     }
 
     #[test]
@@ -371,9 +373,10 @@ mod tests {
     #[test]
     fn close_nonexistent_session_is_noop() {
         let mgr = SessionManager::new();
-        assert!(mgr
-            .close_session("/org/freedesktop/secrets/session/snonexistent")
-            .is_ok());
+        assert!(
+            mgr.close_session("/org/freedesktop/secrets/session/snonexistent")
+                .is_ok()
+        );
     }
 
     #[test]

@@ -10,10 +10,7 @@ use crate::state::{ServiceState, map_backend_error};
 
 /// Log the D-Bus caller at debug level for a secrets-extension method.
 fn log_caller(method: &str, header: &Header<'_>) {
-    let sender = header
-        .sender()
-        .map(|s| s.as_str())
-        .unwrap_or("<unknown>");
+    let sender = header.sender().map(|s| s.as_str()).unwrap_or("<unknown>");
     debug!(method, sender, "D-Bus secrets-extension call");
 }
 
@@ -81,14 +78,12 @@ impl RosecSecrets {
 
         let secret = self
             .state
-            .run_on_tokio(async move {
-                backend.get_secret_attr(&item_id, &attr_name).await
-            })
+            .run_on_tokio(async move { backend.get_secret_attr(&item_id, &attr_name).await })
             .await?
             .map_err(|e| match e {
-                BackendError::NotFound => FdoError::Failed(format!(
-                    "attribute '{attr_name_for_err}' not found"
-                )),
+                BackendError::NotFound => {
+                    FdoError::Failed(format!("attribute '{attr_name_for_err}' not found"))
+                }
                 other => map_backend_error(other),
             })?;
 

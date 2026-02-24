@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use notify::Watcher;
+use rosec_core::VaultBackend;
 use rosec_core::config::Config;
 use rosec_core::router::{Router, RouterConfig};
-use rosec_core::VaultBackend;
 use rosec_secret_service::server::register_objects_with_full_config;
 use rosec_secret_service::session::SessionManager;
 
@@ -40,9 +40,10 @@ async fn main() -> Result<()> {
         .backend
         .iter()
         .filter_map(|entry| {
-            entry.return_attr.as_ref().map(|patterns| {
-                (entry.id.clone(), patterns.clone())
-            })
+            entry
+                .return_attr
+                .as_ref()
+                .map(|patterns| (entry.id.clone(), patterns.clone()))
         })
         .collect();
 
@@ -50,23 +51,31 @@ async fn main() -> Result<()> {
         .backend
         .iter()
         .filter_map(|entry| {
-            entry.collection.as_ref().map(|col| {
-                (entry.id.clone(), col.clone())
-            })
+            entry
+                .collection
+                .as_ref()
+                .map(|col| (entry.id.clone(), col.clone()))
         })
         .collect();
 
     let conn = zbus::Connection::session().await?;
-    let state = register_objects_with_full_config(&conn, backends, router, sessions, return_attr_map, collection_map, config.prompt.clone()).await?;
+    let state = register_objects_with_full_config(
+        &conn,
+        backends,
+        router,
+        sessions,
+        return_attr_map,
+        collection_map,
+        config.prompt.clone(),
+    )
+    .await?;
 
     // Claim the well-known bus name so clients can discover us.
     // If another process already owns it, report who it is before exiting.
     if let Err(e) = conn.request_name("org.freedesktop.secrets").await {
         // Query the bus for the current owner's PID and comm so the user knows what to kill.
         let owner_info = bus_name_owner_info(&conn, "org.freedesktop.secrets").await;
-        anyhow::bail!(
-            "cannot claim org.freedesktop.secrets: {e}\n{owner_info}"
-        );
+        anyhow::bail!("cannot claim org.freedesktop.secrets: {e}\n{owner_info}");
     }
 
     // Start logind watcher if any logind-based policy is enabled.
@@ -95,10 +104,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let cache_rebuild_interval = config
-        .service
-        .refresh_interval_secs
-        .unwrap_or(60);
+    let cache_rebuild_interval = config.service.refresh_interval_secs.unwrap_or(60);
 
     let cache_rebuild_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -196,7 +202,9 @@ async fn main() -> Result<()> {
                     Err(err) => {
                         let err_str = err.to_string();
                         if err_str.starts_with("locked::") {
-                            tracing::debug!("background cache rebuild skipped: backend not yet unlocked");
+                            tracing::debug!(
+                                "background cache rebuild skipped: backend not yet unlocked"
+                            );
                         } else {
                             consecutive_failures += 1;
                             if consecutive_failures <= 3 {
@@ -242,7 +250,10 @@ async fn main() -> Result<()> {
             if let Some(max_min) = autolock.max_unlocked_minutes
                 && autolock_state.is_max_unlocked_expired(max_min)
             {
-                tracing::info!(max_minutes = max_min, "max-unlocked timeout expired, locking");
+                tracing::info!(
+                    max_minutes = max_min,
+                    "max-unlocked timeout expired, locking"
+                );
                 if let Err(e) = autolock_state.auto_lock().await {
                     tracing::warn!("auto-lock failed: {e}");
                 }
@@ -312,7 +323,9 @@ async fn shutdown_signal() {
                 }
             }
             Err(e) => {
-                tracing::warn!("failed to register SIGTERM handler: {e}, falling back to SIGINT only");
+                tracing::warn!(
+                    "failed to register SIGTERM handler: {e}, falling back to SIGINT only"
+                );
                 ctrl_c.await.ok();
             }
         }
@@ -354,13 +367,16 @@ async fn logind_watcher(
     // Special characters in the ID are escaped as '_XX' (systemd D-Bus path encoding);
     // for typical numeric IDs this is a no-op.
     let session_path: Option<String> = session_id.as_ref().map(|id| {
-        let encoded: String = id.chars().map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_string()
-            } else {
-                format!("_{:02x}", c as u32)
-            }
-        }).collect();
+        let encoded: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("_{:02x}", c as u32)
+                }
+            })
+            .collect();
         format!("/org/freedesktop/login1/session/{encoded}")
     });
 
@@ -373,11 +389,8 @@ async fn logind_watcher(
         .member("PrepareForSleep")?
         .path("/org/freedesktop/login1")?
         .build();
-    let mut sleep_stream = zbus::MessageStream::for_match_rule(
-        sleep_rule,
-        &system_bus,
-        None,
-    ).await?;
+    let mut sleep_stream =
+        zbus::MessageStream::for_match_rule(sleep_rule, &system_bus, None).await?;
 
     // -----------------------------------------------------------------------
     // Subscribe to SessionRemoved — fires when any session is removed (logout)
@@ -388,11 +401,8 @@ async fn logind_watcher(
         .member("SessionRemoved")?
         .path("/org/freedesktop/login1")?
         .build();
-    let mut session_removed_stream = zbus::MessageStream::for_match_rule(
-        session_removed_rule,
-        &system_bus,
-        None,
-    ).await?;
+    let mut session_removed_stream =
+        zbus::MessageStream::for_match_rule(session_removed_rule, &system_bus, None).await?;
 
     // -----------------------------------------------------------------------
     // Subscribe to Lock on our own Session object (if we know the session path)
@@ -405,11 +415,7 @@ async fn logind_watcher(
                 .member("Lock")?
                 .path(spath.as_str())?
                 .build();
-            let stream = zbus::MessageStream::for_match_rule(
-                lock_rule,
-                &system_bus,
-                None,
-            ).await?;
+            let stream = zbus::MessageStream::for_match_rule(lock_rule, &system_bus, None).await?;
             Some(stream)
         } else {
             tracing::warn!("XDG_SESSION_ID not set — session Lock signal not subscribed");
@@ -631,7 +637,10 @@ async fn config_watcher(
     // when rosecd starts before any config file has been written (e.g. on
     // first run before `rosec backend add` has been called).
     std::fs::create_dir_all(watch_dir).map_err(|e| {
-        anyhow::anyhow!("cannot create config directory {}: {e}", watch_dir.display())
+        anyhow::anyhow!(
+            "cannot create config directory {}: {e}",
+            watch_dir.display()
+        )
     })?;
 
     watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive)?;
@@ -652,11 +661,8 @@ async fn config_watcher(
         }
 
         // Debounce: drain any additional events that arrive within 500 ms.
-        while let Ok(Some(())) = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            rx.recv(),
-        )
-        .await
+        while let Ok(Some(())) =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), rx.recv()).await
         {}
 
         // Only reload if the event is for our config file specifically.
@@ -694,18 +700,20 @@ async fn config_watcher(
         let known_ids: HashSet<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
 
         // Remove backends that are gone or changed (changed = remove + re-add).
-        let known_map: std::collections::HashMap<&str, &str> =
-            known.iter().map(|(id, fp)| (id.as_str(), fp.as_str())).collect();
-        let new_map: std::collections::HashMap<&str, &str> =
-            new_fingerprints.iter().map(|(id, fp)| (id.as_str(), fp.as_str())).collect();
+        let known_map: std::collections::HashMap<&str, &str> = known
+            .iter()
+            .map(|(id, fp)| (id.as_str(), fp.as_str()))
+            .collect();
+        let new_map: std::collections::HashMap<&str, &str> = new_fingerprints
+            .iter()
+            .map(|(id, fp)| (id.as_str(), fp.as_str()))
+            .collect();
 
         for id in &known_ids {
-            let changed = new_map.get(id).is_none_or(|new_fp| {
-                known_map.get(id) != Some(new_fp)
-            });
-            if changed
-                && state.hotreload_remove_backend(id).await
-            {
+            let changed = new_map
+                .get(id)
+                .is_none_or(|new_fp| known_map.get(id) != Some(new_fp));
+            if changed && state.hotreload_remove_backend(id).await {
                 tracing::info!(backend_id = id, "hot-reload: removed backend");
             }
         }
@@ -714,9 +722,9 @@ async fn config_watcher(
         for entry in &new_config.backend {
             let id = entry.id.as_str();
             let is_new = !known_ids.contains(id);
-            let is_changed = known_map.get(id).is_some_and(|old_fp| {
-                new_map.get(id).is_some_and(|new_fp| old_fp != new_fp)
-            });
+            let is_changed = known_map
+                .get(id)
+                .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
             if is_new || is_changed {
                 match build_single_backend(entry).await {
                     Ok(backend) => {
@@ -731,7 +739,10 @@ async fn config_watcher(
         }
 
         known = new_fingerprints;
-        tracing::info!("hot-reload complete ({} backends active)", state.backend_count());
+        tracing::info!(
+            "hot-reload complete ({} backends active)",
+            state.backend_count()
+        );
     }
 
     Ok(())
@@ -753,7 +764,9 @@ async fn build_single_backend(
                 .options
                 .get("email")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("bitwarden backend '{}' requires 'email' option", entry.id))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("bitwarden backend '{}' requires 'email' option", entry.id)
+                })?
                 .to_string();
 
             let region = entry
@@ -762,9 +775,21 @@ async fn build_single_backend(
                 .and_then(|v| v.as_str())
                 .and_then(rosec_bitwarden::BitwardenRegion::parse);
 
-            let base_url = entry.options.get("base_url").and_then(|v| v.as_str()).map(String::from);
-            let api_url = entry.options.get("api_url").and_then(|v| v.as_str()).map(String::from);
-            let identity_url = entry.options.get("identity_url").and_then(|v| v.as_str()).map(String::from);
+            let base_url = entry
+                .options
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let api_url = entry
+                .options
+                .get("api_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let identity_url = entry
+                .options
+                .get("identity_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
             let bw_config = rosec_bitwarden::BitwardenConfig {
                 id: entry.id.clone(),
@@ -775,8 +800,10 @@ async fn build_single_backend(
                 identity_url,
             };
 
-            Ok(Arc::new(rosec_bitwarden::BitwardenBackend::new(bw_config)
-                .map_err(|e| anyhow::anyhow!("bitwarden backend '{}': {e}", entry.id))?))
+            Ok(Arc::new(
+                rosec_bitwarden::BitwardenBackend::new(bw_config)
+                    .map_err(|e| anyhow::anyhow!("bitwarden backend '{}': {e}", entry.id))?,
+            ))
         }
         "bitwarden-sm" => {
             let organization_id = entry
@@ -810,7 +837,9 @@ async fn build_single_backend(
                 organization_id,
             };
 
-            Ok(Arc::new(rosec_bitwarden_sm::BitwardenSmBackend::new(sm_config)))
+            Ok(Arc::new(rosec_bitwarden_sm::BitwardenSmBackend::new(
+                sm_config,
+            )))
         }
         other => anyhow::bail!("unknown backend kind '{other}'"),
     }
@@ -835,7 +864,9 @@ fn parse_config_path() -> PathBuf {
             eprintln!("Usage: rosecd [--config <path>]");
             eprintln!();
             eprintln!("Options:");
-            eprintln!("  -c, --config <path>  Path to config file (default: $XDG_CONFIG_HOME/rosec/config.toml)");
+            eprintln!(
+                "  -c, --config <path>  Path to config file (default: $XDG_CONFIG_HOME/rosec/config.toml)"
+            );
             eprintln!("  -h, --help           Show this help message");
             std::process::exit(0);
         }
@@ -847,11 +878,11 @@ fn parse_config_path() -> PathBuf {
 fn default_config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| {
-            tracing::warn!("neither XDG_CONFIG_HOME nor HOME are set; using current directory for config");
+            tracing::warn!(
+                "neither XDG_CONFIG_HOME nor HOME are set; using current directory for config"
+            );
             PathBuf::from(".")
         });
     base.join("rosec").join("config.toml")
@@ -894,5 +925,3 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     let config: Config = toml::from_str(&content)?;
     Ok(config)
 }
-
-

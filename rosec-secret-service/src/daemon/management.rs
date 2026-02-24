@@ -11,10 +11,7 @@ use crate::state::ServiceState;
 
 /// Log the D-Bus caller at debug level for a management method.
 fn log_caller(method: &str, header: &Header<'_>) {
-    let sender = header
-        .sender()
-        .map(|s| s.as_str())
-        .unwrap_or("<unknown>");
+    let sender = header.sender().map(|s| s.as_str()).unwrap_or("<unknown>");
     debug!(method, sender, "D-Bus management call");
 }
 
@@ -88,12 +85,19 @@ impl RosecManagement {
     /// Returns the number of items visible after the sync.
     /// Returns a D-Bus error if the backend is not found, is locked, or the
     /// network request fails.
-    async fn sync_backend(&self, backend_id: &str, #[zbus(header)] header: Header<'_>) -> Result<u32, FdoError> {
+    async fn sync_backend(
+        &self,
+        backend_id: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<u32, FdoError> {
         log_caller("SyncBackend", &header);
         self.state.sync_backend(backend_id).await
     }
 
-    fn backend_info(&self, #[zbus(header)] header: Header<'_>) -> Result<Vec<BackendInfo>, FdoError> {
+    fn backend_info(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<BackendInfo>, FdoError> {
         log_caller("BackendInfo", &header);
         let infos = self
             .state
@@ -112,7 +116,10 @@ impl RosecManagement {
     /// Lock state is derived from cached item metadata — an unlocked backend
     /// has at least one item without the locked flag set (or the cache is
     /// non-empty), while a locked backend has no accessible items.
-    async fn backend_list(&self, #[zbus(header)] header: Header<'_>) -> Result<Vec<BackendListEntry>, FdoError> {
+    async fn backend_list(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<BackendListEntry>, FdoError> {
         log_caller("BackendList", &header);
         let backends = self.state.backends_ordered();
         let mut entries = Vec::with_capacity(backends.len());
@@ -120,7 +127,8 @@ impl RosecManagement {
             let id = b.id().to_string();
             let name = b.name().to_string();
             let kind = b.kind().to_string();
-            let status = self.state
+            let status = self
+                .state
                 .run_on_tokio(async move { b.status().await })
                 .await?
                 .map_err(|e| FdoError::Failed(format!("status error for {id}: {e}")))?;
@@ -142,7 +150,11 @@ impl RosecManagement {
     /// Each element is a tuple `(id, label, kind, placeholder, required)` where
     /// `kind` is one of `"text"`, `"password"`, or `"secret"`.
     /// Returns at least one element (the password field) if the backend is found.
-    fn get_auth_fields(&self, backend_id: &str, #[zbus(header)] header: Header<'_>) -> Result<Vec<AuthFieldInfo>, FdoError> {
+    fn get_auth_fields(
+        &self,
+        backend_id: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<AuthFieldInfo>, FdoError> {
         log_caller("GetAuthFields", &header);
         use rosec_core::AuthFieldKind;
 
@@ -151,7 +163,7 @@ impl RosecManagement {
             None => {
                 return Err(FdoError::Failed(format!(
                     "backend '{backend_id}' not found"
-                )))
+                )));
             }
         };
 
@@ -159,9 +171,9 @@ impl RosecManagement {
             id: f.id.to_string(),
             label: f.label.to_string(),
             kind: match f.kind {
-                AuthFieldKind::Text     => "text".to_string(),
+                AuthFieldKind::Text => "text".to_string(),
                 AuthFieldKind::Password => "password".to_string(),
-                AuthFieldKind::Secret   => "secret".to_string(),
+                AuthFieldKind::Secret => "secret".to_string(),
             },
             placeholder: f.placeholder.to_string(),
             required: f.required,
@@ -193,13 +205,13 @@ impl RosecManagement {
             None => {
                 return Err(FdoError::Failed(format!(
                     "backend '{backend_id}' not found"
-                )))
+                )));
             }
         };
 
-        let info = backend.registration_info().ok_or_else(|| {
-            FdoError::Failed("no_registration_required".to_string())
-        })?;
+        let info = backend
+            .registration_info()
+            .ok_or_else(|| FdoError::Failed("no_registration_required".to_string()))?;
 
         let fields = info
             .fields
@@ -208,9 +220,9 @@ impl RosecManagement {
                 id: f.id.to_string(),
                 label: f.label.to_string(),
                 kind: match f.kind {
-                    AuthFieldKind::Text     => "text".to_string(),
+                    AuthFieldKind::Text => "text".to_string(),
                     AuthFieldKind::Password => "password".to_string(),
-                    AuthFieldKind::Secret   => "secret".to_string(),
+                    AuthFieldKind::Secret => "secret".to_string(),
                 },
                 placeholder: f.placeholder.to_string(),
                 required: f.required,
@@ -302,5 +314,3 @@ pub struct AuthFieldInfo {
     pub placeholder: String,
     pub required: bool,
 }
-
-

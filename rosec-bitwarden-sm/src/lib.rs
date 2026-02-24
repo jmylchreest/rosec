@@ -38,11 +38,11 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
+use rosec_core::credential::StorageKey;
 use rosec_core::{
-    AuthField, AuthFieldKind, Attributes, BackendError, BackendStatus, RecoveryOutcome,
+    Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus, RecoveryOutcome,
     SecretBytes, UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
-use rosec_core::credential::StorageKey;
 use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -155,10 +155,7 @@ impl SmBackend {
     fn derive_storage_key(&self) -> Result<StorageKey, BackendError> {
         let seed = rosec_core::machine_key::load_or_create()
             .map_err(|e| BackendError::Unavailable(format!("machine key: {e}")))?;
-        let (_, hkdf) = Hkdf::<Sha256>::extract(
-            Some(self.config.id.as_bytes()),
-            &seed,
-        );
+        let (_, hkdf) = Hkdf::<Sha256>::extract(Some(self.config.id.as_bytes()), &seed);
         let info = format!("rosec-sm-token-v1:{}", self.config.id);
         let mut key_material = Zeroizing::new(vec![0u8; 64]);
         hkdf.expand(info.as_bytes(), &mut key_material)
@@ -308,9 +305,11 @@ impl VaultBackend for SmBackend {
                 match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
                     Ok(Some(cred)) => cred.client_secret,
                     Ok(None) => return Err(BackendError::Locked),
-                    Err(e) => return Err(BackendError::Unavailable(
-                        format!("failed to load SM token for sync: {e}")
-                    )),
+                    Err(e) => {
+                        return Err(BackendError::Unavailable(format!(
+                            "failed to load SM token for sync: {e}"
+                        )));
+                    }
                 }
             }
         };
@@ -362,9 +361,11 @@ impl VaultBackend for SmBackend {
                 };
                 match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
                     Ok(Some(cred)) => cred.client_secret,
-                    Ok(None) => return Ok(RecoveryOutcome::Failed(
-                        "no stored token — run `rosec backend auth`".to_string()
-                    )),
+                    Ok(None) => {
+                        return Ok(RecoveryOutcome::Failed(
+                            "no stored token — run `rosec backend auth`".to_string(),
+                        ));
+                    }
                     Err(e) => return Ok(RecoveryOutcome::Failed(e)),
                 }
             }
@@ -389,7 +390,10 @@ impl VaultBackend for SmBackend {
         // mutex is held by an ongoing sync, we just return the cached value
         // from the last time we could read it.  Callers tolerate a slightly
         // stale timestamp here.
-        self.state.try_lock().ok().and_then(|g| g.as_ref().map(|s| s.last_synced_at))
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.last_synced_at))
     }
 
     /// Check whether the SM org has changed since our last sync without
@@ -412,16 +416,18 @@ impl VaultBackend for SmBackend {
             }
         };
 
-        let org_id = Uuid::parse_str(&self.config.organization_id).map_err(|e| {
-            BackendError::Unavailable(format!("invalid organization_id: {e}"))
-        })?;
+        let org_id = Uuid::parse_str(&self.config.organization_id)
+            .map_err(|e| BackendError::Unavailable(format!("invalid organization_id: {e}")))?;
 
         let client = SmApiClient::new(self.urls())
             .map_err(|e| BackendError::Unavailable(format!("SM HTTP client: {e}")))?;
 
         let last_synced_str: String = last_synced_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-        match client.check_secrets_changed(&bearer, org_id, &last_synced_str).await {
+        match client
+            .check_secrets_changed(&bearer, org_id, &last_synced_str)
+            .await
+        {
             Ok(changed) => {
                 debug!(backend = %self.config.id, changed, "SM delta-sync check");
                 Ok(changed)
@@ -440,14 +446,22 @@ impl VaultBackend for SmBackend {
     async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError> {
         let state = self.state.lock().await;
         let auth = state.as_ref().ok_or(BackendError::Locked)?;
-        Ok(auth.secrets.iter().map(|s| secret_to_meta(s, &self.config.id)).collect())
+        Ok(auth
+            .secrets
+            .iter()
+            .map(|s| secret_to_meta(s, &self.config.id))
+            .collect())
     }
 
     async fn get_item(&self, id: &str) -> Result<VaultItem, BackendError> {
         let state = self.state.lock().await;
         let auth = state.as_ref().ok_or(BackendError::Locked)?;
         let target_id = Uuid::parse_str(id).map_err(|_| BackendError::NotFound)?;
-        let secret = auth.secrets.iter().find(|s| s.id == target_id).ok_or(BackendError::NotFound)?;
+        let secret = auth
+            .secrets
+            .iter()
+            .find(|s| s.id == target_id)
+            .ok_or(BackendError::NotFound)?;
         Ok(VaultItem {
             meta: secret_to_meta(secret, &self.config.id),
             secret: Some(secret_value(secret)),
@@ -458,7 +472,11 @@ impl VaultBackend for SmBackend {
         let state = self.state.lock().await;
         let auth = state.as_ref().ok_or(BackendError::Locked)?;
         let target_id = Uuid::parse_str(id).map_err(|_| BackendError::NotFound)?;
-        let secret = auth.secrets.iter().find(|s| s.id == target_id).ok_or(BackendError::NotFound)?;
+        let secret = auth
+            .secrets
+            .iter()
+            .find(|s| s.id == target_id)
+            .ok_or(BackendError::NotFound)?;
         Ok(secret_value(secret))
     }
 
@@ -554,13 +572,18 @@ mod tests {
 
     #[tokio::test]
     async fn list_items_when_locked_returns_error() {
-        assert!(matches!(make_backend().list_items().await, Err(BackendError::Locked)));
+        assert!(matches!(
+            make_backend().list_items().await,
+            Err(BackendError::Locked)
+        ));
     }
 
     #[tokio::test]
     async fn get_secret_when_locked_returns_error() {
         assert!(matches!(
-            make_backend().get_secret("00000000-0000-0000-0000-000000000000").await,
+            make_backend()
+                .get_secret("00000000-0000-0000-0000-000000000000")
+                .await,
             Err(BackendError::Locked)
         ));
     }
@@ -569,8 +592,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn unlock_blank_token_without_stored_token_returns_registration_required() {
         // An empty token means "use stored" — if nothing is stored, RegistrationRequired.
-        let tmp = std::env::temp_dir()
-            .join(format!("rosec-sm-test-{}-blank", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("rosec-sm-test-{}-blank", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = TEST_ENV_MUTEX.lock().unwrap();
         unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
@@ -596,50 +618,80 @@ mod tests {
     async fn list_items_returns_secrets_when_unlocked() {
         let b = make_backend();
         let secret_id = Uuid::new_v4();
-        inject_state(&b, vec![DecryptedSecret {
-            id: secret_id,
-            key: "MY_API_KEY".to_string(),
-            value: Zeroizing::new("s3cr3t".to_string()),
-            note: Zeroizing::new("".to_string()),
-            project_id: None,
-            project_name: None,
-        }]).await;
+        inject_state(
+            &b,
+            vec![DecryptedSecret {
+                id: secret_id,
+                key: "MY_API_KEY".to_string(),
+                value: Zeroizing::new("s3cr3t".to_string()),
+                note: Zeroizing::new("".to_string()),
+                project_id: None,
+                project_name: None,
+            }],
+        )
+        .await;
         let items = b.list_items().await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "MY_API_KEY");
         assert_eq!(items[0].backend_id, "test-sm");
-        assert_eq!(items[0].attributes.get("sm.key").map(String::as_str), Some("MY_API_KEY"));
-        assert_eq!(items[0].attributes.get("sm.id").map(String::as_str), Some(secret_id.to_string().as_str()));
+        assert_eq!(
+            items[0].attributes.get("sm.key").map(String::as_str),
+            Some("MY_API_KEY")
+        );
+        assert_eq!(
+            items[0].attributes.get("sm.id").map(String::as_str),
+            Some(secret_id.to_string().as_str())
+        );
     }
 
     #[tokio::test]
     async fn get_secret_returns_value() {
         let b = make_backend();
         let secret_id = Uuid::new_v4();
-        inject_state(&b, vec![DecryptedSecret {
-            id: secret_id,
-            key: "DB_PASS".to_string(),
-            value: Zeroizing::new("hunter2".to_string()),
-            note: Zeroizing::new("".to_string()),
-            project_id: None,
-            project_name: None,
-        }]).await;
-        assert_eq!(b.get_secret(&secret_id.to_string()).await.unwrap().as_slice(), b"hunter2");
+        inject_state(
+            &b,
+            vec![DecryptedSecret {
+                id: secret_id,
+                key: "DB_PASS".to_string(),
+                value: Zeroizing::new("hunter2".to_string()),
+                note: Zeroizing::new("".to_string()),
+                project_id: None,
+                project_name: None,
+            }],
+        )
+        .await;
+        assert_eq!(
+            b.get_secret(&secret_id.to_string())
+                .await
+                .unwrap()
+                .as_slice(),
+            b"hunter2"
+        );
     }
 
     #[tokio::test]
     async fn get_secret_falls_back_to_note_when_value_empty() {
         let b = make_backend();
         let secret_id = Uuid::new_v4();
-        inject_state(&b, vec![DecryptedSecret {
-            id: secret_id,
-            key: "NOTE_ONLY".to_string(),
-            value: Zeroizing::new("".to_string()),
-            note: Zeroizing::new("from-note".to_string()),
-            project_id: None,
-            project_name: None,
-        }]).await;
-        assert_eq!(b.get_secret(&secret_id.to_string()).await.unwrap().as_slice(), b"from-note");
+        inject_state(
+            &b,
+            vec![DecryptedSecret {
+                id: secret_id,
+                key: "NOTE_ONLY".to_string(),
+                value: Zeroizing::new("".to_string()),
+                note: Zeroizing::new("from-note".to_string()),
+                project_id: None,
+                project_name: None,
+            }],
+        )
+        .await;
+        assert_eq!(
+            b.get_secret(&secret_id.to_string())
+                .await
+                .unwrap()
+                .as_slice(),
+            b"from-note"
+        );
     }
 
     #[tokio::test]
@@ -657,10 +709,28 @@ mod tests {
         let b = make_backend();
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
-        inject_state(&b, vec![
-            DecryptedSecret { id: id1, key: "KEY_A".to_string(), value: Zeroizing::new("a".to_string()), note: Zeroizing::new("".to_string()), project_id: None, project_name: None },
-            DecryptedSecret { id: id2, key: "KEY_B".to_string(), value: Zeroizing::new("b".to_string()), note: Zeroizing::new("".to_string()), project_id: None, project_name: None },
-        ]).await;
+        inject_state(
+            &b,
+            vec![
+                DecryptedSecret {
+                    id: id1,
+                    key: "KEY_A".to_string(),
+                    value: Zeroizing::new("a".to_string()),
+                    note: Zeroizing::new("".to_string()),
+                    project_id: None,
+                    project_name: None,
+                },
+                DecryptedSecret {
+                    id: id2,
+                    key: "KEY_B".to_string(),
+                    value: Zeroizing::new("b".to_string()),
+                    note: Zeroizing::new("".to_string()),
+                    project_id: None,
+                    project_name: None,
+                },
+            ],
+        )
+        .await;
         let mut query = Attributes::new();
         query.insert("sm.key".to_string(), "KEY_A".to_string());
         let results = b.search(&query).await.unwrap();
@@ -681,11 +751,17 @@ mod tests {
         let meta = secret_to_meta(&secret, "backend-x");
         assert_eq!(meta.label, "MY_SECRET");
         assert_eq!(meta.backend_id, "backend-x");
-        assert_eq!(meta.attributes.get("type").map(String::as_str), Some("secret"));
+        assert_eq!(
+            meta.attributes.get("type").map(String::as_str),
+            Some("secret")
+        );
         assert!(meta.attributes.contains_key("sm.key"));
         assert!(meta.attributes.contains_key("sm.id"));
         assert!(meta.attributes.contains_key("sm.project_id"));
-        assert_eq!(meta.attributes.get("sm.project").map(String::as_str), Some("my-project"));
+        assert_eq!(
+            meta.attributes.get("sm.project").map(String::as_str),
+            Some("my-project")
+        );
     }
 
     #[test]
@@ -696,8 +772,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn recover_when_no_token_stored_returns_failed() {
-        let tmp = std::env::temp_dir()
-            .join(format!("rosec-sm-test-{}-recover", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("rosec-sm-test-{}-recover", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = TEST_ENV_MUTEX.lock().unwrap();
         unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
@@ -711,7 +787,9 @@ mod tests {
     #[tokio::test]
     async fn get_item_when_locked_returns_error() {
         assert!(matches!(
-            make_backend().get_item("00000000-0000-0000-0000-000000000000").await,
+            make_backend()
+                .get_item("00000000-0000-0000-0000-000000000000")
+                .await,
             Err(BackendError::Locked)
         ));
     }
@@ -720,31 +798,42 @@ mod tests {
     async fn get_item_found_and_not_found() {
         let b = make_backend();
         let secret_id = Uuid::new_v4();
-        inject_state(&b, vec![DecryptedSecret {
-            id: secret_id,
-            key: "FOUND_KEY".to_string(),
-            value: Zeroizing::new("found-value".to_string()),
-            note: Zeroizing::new("".to_string()),
-            project_id: None,
-            project_name: None,
-        }]).await;
+        inject_state(
+            &b,
+            vec![DecryptedSecret {
+                id: secret_id,
+                key: "FOUND_KEY".to_string(),
+                value: Zeroizing::new("found-value".to_string()),
+                note: Zeroizing::new("".to_string()),
+                project_id: None,
+                project_name: None,
+            }],
+        )
+        .await;
         let item = b.get_item(&secret_id.to_string()).await.unwrap();
         assert_eq!(item.meta.label, "FOUND_KEY");
         assert_eq!(item.secret.unwrap().as_slice(), b"found-value");
-        assert!(matches!(b.get_item("00000000-0000-0000-0000-000000000099").await, Err(BackendError::NotFound)));
+        assert!(matches!(
+            b.get_item("00000000-0000-0000-0000-000000000099").await,
+            Err(BackendError::NotFound)
+        ));
     }
 
     #[tokio::test]
     async fn search_returns_empty_when_no_match() {
         let b = make_backend();
-        inject_state(&b, vec![DecryptedSecret {
-            id: Uuid::new_v4(),
-            key: "UNRELATED".to_string(),
-            value: Zeroizing::new("x".to_string()),
-            note: Zeroizing::new("".to_string()),
-            project_id: None,
-            project_name: None,
-        }]).await;
+        inject_state(
+            &b,
+            vec![DecryptedSecret {
+                id: Uuid::new_v4(),
+                key: "UNRELATED".to_string(),
+                value: Zeroizing::new("x".to_string()),
+                note: Zeroizing::new("".to_string()),
+                project_id: None,
+                project_name: None,
+            }],
+        )
+        .await;
         let mut query = Attributes::new();
         query.insert("sm.key".to_string(), "DOES_NOT_EXIST".to_string());
         assert!(b.search(&query).await.unwrap().is_empty());

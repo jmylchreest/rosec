@@ -15,7 +15,7 @@
 //!    16-byte IV is returned in the `parameters` field of the Secret struct.
 
 use aes::Aes128;
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use hkdf::Hkdf;
 use num_bigint::BigUint;
 use rosec_core::BackendError;

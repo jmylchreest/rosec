@@ -541,8 +541,8 @@ fn update(state: &mut GuiApp, message: Message) {
         }
         Message::Cancel => std::process::exit(1),
         Message::KeyPressed(key) => {
-            use iced::keyboard::key::Named;
             use iced::keyboard::Key;
+            use iced::keyboard::key::Named;
             match key {
                 Key::Named(Named::Enter) => confirm_and_exit(state),
                 Key::Named(Named::Escape) => std::process::exit(1),

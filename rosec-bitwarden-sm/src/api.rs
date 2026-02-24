@@ -49,10 +49,14 @@ impl AccessToken {
 
         let parts: Vec<&str> = first.split('.').collect();
         if parts.len() != 3 {
-            return Err(SmApiError::InvalidToken("expected 3 dot-separated parts before ':'"));
+            return Err(SmApiError::InvalidToken(
+                "expected 3 dot-separated parts before ':'",
+            ));
         }
         if parts[0] != "0" {
-            return Err(SmApiError::InvalidToken("unsupported token version (expected '0')"));
+            return Err(SmApiError::InvalidToken(
+                "unsupported token version (expected '0')",
+            ));
         }
 
         let access_token_id = parts[1]
@@ -86,8 +90,8 @@ impl AccessToken {
     ///   → [enc_key: 32 bytes | mac_key: 32 bytes]
     pub fn derive_token_enc_key(&self) -> Zeroizing<[u8; 64]> {
         // PRK = HMAC-SHA256(key = "bitwarden-accesstoken", data = seed)
-        let mut mac = HmacSha256::new_from_slice(b"bitwarden-accesstoken")
-            .expect("HMAC key size is valid");
+        let mut mac =
+            HmacSha256::new_from_slice(b"bitwarden-accesstoken").expect("HMAC key size is valid");
         mac.update(self.enc_key_seed.as_ref());
         let prk_generic = mac.finalize().into_bytes();
         let mut prk = Zeroizing::new([0u8; 32]);
@@ -188,7 +192,9 @@ impl SmApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(SmApiError::Api(format!("SM login failed ({status}): {body}")));
+            return Err(SmApiError::Api(format!(
+                "SM login failed ({status}): {body}"
+            )));
         }
 
         let login: LoginResponse = resp.json().await.map_err(SmApiError::Http)?;
@@ -218,7 +224,9 @@ impl SmApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(SmApiError::Api(format!("SM list secrets failed ({status}): {body}")));
+            return Err(SmApiError::Api(format!(
+                "SM list secrets failed ({status}): {body}"
+            )));
         }
 
         let list: SecretIdentifiersResponse = resp.json().await.map_err(SmApiError::Http)?;
@@ -270,7 +278,10 @@ impl SmApiClient {
         }
 
         let sync: SyncResponse = resp.json().await.map_err(SmApiError::Http)?;
-        debug!(has_changes = sync.has_changes, "SM delta-sync check complete");
+        debug!(
+            has_changes = sync.has_changes,
+            "SM delta-sync check complete"
+        );
         Ok(sync.has_changes)
     }
 
@@ -339,7 +350,9 @@ impl SmApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(SmApiError::Api(format!("SM get secrets failed ({status}): {text}")));
+            return Err(SmApiError::Api(format!(
+                "SM get secrets failed ({status}): {text}"
+            )));
         }
 
         let secrets: SecretsResponse = resp.json().await.map_err(SmApiError::Http)?;
@@ -462,13 +475,15 @@ pub fn decrypt_org_key(
 /// the given 64-byte AES-256-CBC-HMAC-SHA256 key (`[enc_key_32 | mac_key_32]`).
 pub fn decrypt_enc_string(enc: &str, key64: &[u8; 64]) -> Result<Zeroizing<Vec<u8>>, SmApiError> {
     // Strip the "2." type prefix.
-    let body = enc
-        .strip_prefix("2.")
-        .ok_or_else(|| SmApiError::Crypto(format!("unsupported EncString type (expected '2.'): {enc}")))?;
+    let body = enc.strip_prefix("2.").ok_or_else(|| {
+        SmApiError::Crypto(format!("unsupported EncString type (expected '2.'): {enc}"))
+    })?;
 
     let parts: Vec<&str> = body.split('|').collect();
     if parts.len() != 3 {
-        return Err(SmApiError::Crypto("EncString type 2 must have 3 pipe-separated parts".to_string()));
+        return Err(SmApiError::Crypto(
+            "EncString type 2 must have 3 pipe-separated parts".to_string(),
+        ));
     }
 
     let iv = B64
@@ -482,10 +497,14 @@ pub fn decrypt_enc_string(enc: &str, key64: &[u8; 64]) -> Result<Zeroizing<Vec<u
         .map_err(|e| SmApiError::Crypto(format!("EncString MAC base64: {e}")))?;
 
     if iv.len() != 16 {
-        return Err(SmApiError::Crypto("EncString IV must be 16 bytes".to_string()));
+        return Err(SmApiError::Crypto(
+            "EncString IV must be 16 bytes".to_string(),
+        ));
     }
     if mac.len() != 32 {
-        return Err(SmApiError::Crypto("EncString MAC must be 32 bytes".to_string()));
+        return Err(SmApiError::Crypto(
+            "EncString MAC must be 32 bytes".to_string(),
+        ));
     }
 
     let enc_key = &key64[..32];
@@ -645,7 +664,11 @@ pub async fn fetch_secrets(
         let key = decrypt_field_opt(Some(&raw.key), &org_key)?;
         let value = decrypt_field_opt(raw.value.as_deref(), &org_key)?;
         let note = decrypt_field_opt(raw.note.as_deref(), &org_key)?;
-        let project_id = raw.projects.as_deref().and_then(|p| p.first()).map(|p| p.id);
+        let project_id = raw
+            .projects
+            .as_deref()
+            .and_then(|p| p.first())
+            .map(|p| p.id);
         let project_name = project_id.and_then(|id| project_names.get(&id).cloned());
 
         secrets.push(DecryptedSecret {
@@ -675,7 +698,8 @@ mod tests {
     // Expected derived key (base64):
     // "H9/oIRLtL9nGCQOVDjSMoEbJsjWXSOCb3qeyDt6ckzS3FhyboEDWyTP/CQfbIszNmAVg2ExFganG1FVFGXO/Jg=="
     const TEST_TOKEN: &str = "0.ec2c1d46-6a4b-4751-a310-af9601317f2d.C2IgxjjLF7qSshsbwe8JGcbM075YXw:X8vbvA0bduihIDe/qrzIQQ==";
-    const EXPECTED_KEY_B64: &str = "H9/oIRLtL9nGCQOVDjSMoEbJsjWXSOCb3qeyDt6ckzS3FhyboEDWyTP/CQfbIszNmAVg2ExFganG1FVFGXO/Jg==";
+    const EXPECTED_KEY_B64: &str =
+        "H9/oIRLtL9nGCQOVDjSMoEbJsjWXSOCb3qeyDt6ckzS3FhyboEDWyTP/CQfbIszNmAVg2ExFganG1FVFGXO/Jg==";
 
     #[test]
     fn parse_access_token() {
@@ -701,7 +725,12 @@ mod tests {
 
     #[test]
     fn parse_token_wrong_version() {
-        assert!(AccessToken::parse("1.ec2c1d46-6a4b-4751-a310-af9601317f2d.secret:X8vbvA0bduihIDe/qrzIQQ==").is_err());
+        assert!(
+            AccessToken::parse(
+                "1.ec2c1d46-6a4b-4751-a310-af9601317f2d.secret:X8vbvA0bduihIDe/qrzIQQ=="
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use rosec_core::config::PromptConfig;
-use rosec_core::router::Router;
 use rosec_core::dedup::is_stale;
-use rosec_core::{Attributes, BackendError, RecoveryOutcome, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta};
+use rosec_core::router::Router;
+use rosec_core::{
+    Attributes, BackendError, RecoveryOutcome, SecretBytes, UnlockInput, VaultBackend,
+    VaultItemMeta,
+};
 use tracing::{info, warn};
-use zbus::fdo::Error as FdoError;
 use zbus::Connection;
+use zbus::fdo::Error as FdoError;
 use zeroize::Zeroizing;
 
 use wildmatch::WildMatch;
@@ -93,7 +96,11 @@ pub struct ServiceState {
 
 impl std::fmt::Debug for ServiceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let order = self.backend_order.read().map(|g| g.clone()).unwrap_or_default();
+        let order = self
+            .backend_order
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         f.debug_struct("ServiceState")
             .field("backends", &order)
             .finish()
@@ -108,7 +115,16 @@ impl ServiceState {
         conn: Connection,
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
-        Self::new_with_config(backends, router, sessions, conn, tokio_handle, HashMap::new(), HashMap::new(), PromptConfig::default())
+        Self::new_with_config(
+            backends,
+            router,
+            sessions,
+            conn,
+            tokio_handle,
+            HashMap::new(),
+            HashMap::new(),
+            PromptConfig::default(),
+        )
     }
 
     /// Like `new`, but accepts per-backend `return_attr` patterns from config.
@@ -123,7 +139,16 @@ impl ServiceState {
         tokio_handle: tokio::runtime::Handle,
         return_attr_map: HashMap<String, Vec<String>>,
     ) -> Self {
-        Self::new_with_config(backends, router, sessions, conn, tokio_handle, return_attr_map, HashMap::new(), PromptConfig::default())
+        Self::new_with_config(
+            backends,
+            router,
+            sessions,
+            conn,
+            tokio_handle,
+            return_attr_map,
+            HashMap::new(),
+            PromptConfig::default(),
+        )
     }
 
     /// Full constructor: accepts `return_attr` patterns, collection map, and `PromptConfig`.
@@ -169,10 +194,16 @@ impl ServiceState {
     ///
     /// Returns the configured patterns if present, otherwise the default list.
     fn return_attr_patterns(&self, backend_id: &str) -> Vec<String> {
-        let map = self.return_attr_map.read().unwrap_or_else(|e| e.into_inner());
-        map.get(backend_id)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_RETURN_ATTR.iter().map(|s| (*s).to_string()).collect())
+        let map = self
+            .return_attr_map
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        map.get(backend_id).cloned().unwrap_or_else(|| {
+            DEFAULT_RETURN_ATTR
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        })
     }
 
     /// Resolve the primary secret for an item using `return_attr` patterns.
@@ -254,7 +285,11 @@ impl ServiceState {
 
     /// Look up a backend by its ID.
     pub fn backend_by_id(&self, id: &str) -> Option<Arc<dyn VaultBackend>> {
-        self.backends.read().unwrap_or_else(|e| e.into_inner()).get(id).map(Arc::clone)
+        self.backends
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .map(Arc::clone)
     }
 
     /// Spawn `fut` on the Tokio runtime and await the result.
@@ -277,7 +312,10 @@ impl ServiceState {
 
     /// Return the number of currently registered backends.
     pub fn backend_count(&self) -> usize {
-        self.backends.read().unwrap_or_else(|e| e.into_inner()).len()
+        self.backends
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Hot-add a new backend at runtime.
@@ -291,7 +329,10 @@ impl ServiceState {
         }
         map.insert(id.clone(), backend);
         drop(map);
-        self.backend_order.write().unwrap_or_else(|e| e.into_inner()).push(id);
+        self.backend_order
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(id);
     }
 
     /// Hot-remove a backend at runtime.
@@ -410,9 +451,7 @@ impl ServiceState {
         };
         match *guard {
             Some(last) => {
-                let elapsed = SystemTime::now()
-                    .duration_since(last)
-                    .unwrap_or_default();
+                let elapsed = SystemTime::now().duration_since(last).unwrap_or_default();
                 elapsed.as_secs() >= idle_minutes * 60
             }
             None => false,
@@ -427,9 +466,7 @@ impl ServiceState {
         };
         match *guard {
             Some(since) => {
-                let elapsed = SystemTime::now()
-                    .duration_since(since)
-                    .unwrap_or_default();
+                let elapsed = SystemTime::now().duration_since(since).unwrap_or_default();
                 elapsed.as_secs() >= max_minutes * 60
             }
             None => false,
@@ -471,23 +508,28 @@ impl ServiceState {
         {
             tracing::debug!(program = %askpass, "using SSH_ASKPASS for prompt");
             let mut child = std::process::Command::new(&askpass)
-                .arg(label)          // prompt text as argv[1] (standard convention)
+                .arg(label) // prompt text as argv[1] (standard convention)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
-                .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS '{askpass}' failed to launch: {e}")))?;
+                .map_err(|e| {
+                    FdoError::Failed(format!("SSH_ASKPASS '{askpass}' failed to launch: {e}"))
+                })?;
 
             let pid = child.id();
             self.set_prompt_pid(&prompt_path, pid);
 
             // Read exactly one line from stdout into a zeroizing buffer.
             let password = {
-                let stdout = child.stdout.take()
+                let stdout = child
+                    .stdout
+                    .take()
                     .ok_or_else(|| FdoError::Failed("SSH_ASKPASS: no stdout pipe".to_string()))?;
                 let mut reader = std::io::BufReader::new(stdout);
                 let mut line = Zeroizing::new(String::new());
-                reader.read_line(&mut line)
+                reader
+                    .read_line(&mut line)
                     .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS read error: {e}")))?;
                 // Drop the reader (closes pipe read end) before waiting.
                 drop(reader);
@@ -500,12 +542,15 @@ impl ServiceState {
                 line
             };
 
-            let status = child.wait()
+            let status = child
+                .wait()
                 .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS wait error: {e}")))?;
             self.finish_prompt(&prompt_path);
 
             if !status.success() || password.is_empty() {
-                return Err(FdoError::Failed("SSH_ASKPASS: cancelled or empty".to_string()));
+                return Err(FdoError::Failed(
+                    "SSH_ASKPASS: cancelled or empty".to_string(),
+                ));
             }
             return Ok(password);
         }
@@ -516,8 +561,8 @@ impl ServiceState {
             custom => custom.to_string(),
         };
 
-        let has_display = std::env::var_os("WAYLAND_DISPLAY").is_some()
-            || std::env::var_os("DISPLAY").is_some();
+        let has_display =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
         let has_tty = std::path::Path::new("/dev/tty").exists();
 
         // ── 2 & 3. GUI or TTY via rosec-prompt ────────────────────────────
@@ -527,15 +572,16 @@ impl ServiceState {
 
             let mut cmd = std::process::Command::new(&program);
             cmd.stdin(Stdio::piped())
-               .stdout(Stdio::piped())
-               .stderr(Stdio::inherit());
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
 
             if !has_display {
                 // No GUI available — request TTY mode.
                 cmd.arg("--tty");
             }
 
-            let mut child = cmd.spawn()
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| FdoError::Failed(format!("rosec-prompt failed to launch: {e}")))?;
 
             let pid = child.id();
@@ -544,24 +590,29 @@ impl ServiceState {
             // Send JSON on stdin then close it.
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
-                stdin.write_all(json.as_bytes())
+                stdin
+                    .write_all(json.as_bytes())
                     .map_err(|e| FdoError::Failed(format!("rosec-prompt stdin write: {e}")))?;
                 // stdin dropped here → EOF sent to child
             }
 
             // Read one line of JSON from stdout ({"field_id": "value"}).
             let response_line = {
-                let stdout = child.stdout.take()
+                let stdout = child
+                    .stdout
+                    .take()
                     .ok_or_else(|| FdoError::Failed("rosec-prompt: no stdout pipe".to_string()))?;
                 let mut reader = std::io::BufReader::new(stdout);
                 let mut line = Zeroizing::new(String::new());
-                reader.read_line(&mut line)
+                reader
+                    .read_line(&mut line)
                     .map_err(|e| FdoError::Failed(format!("rosec-prompt read error: {e}")))?;
                 drop(reader);
                 line
             };
 
-            let status = child.wait()
+            let status = child
+                .wait()
                 .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
             self.finish_prompt(&prompt_path);
 
@@ -576,7 +627,8 @@ impl ServiceState {
                 .map_err(|e| FdoError::Failed(format!("rosec-prompt JSON parse: {e}")))?;
 
             // Find the password field ID for this backend.
-            let backend = self.backend_by_id(backend_id)
+            let backend = self
+                .backend_by_id(backend_id)
                 .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
             let pw_id = backend.password_field().id.to_string();
 
@@ -727,9 +779,9 @@ impl ServiceState {
         backend_id: &str,
         fields: HashMap<String, String>,
     ) -> Result<(), FdoError> {
-        let backend = self.backend_by_id(backend_id).ok_or_else(|| {
-            FdoError::Failed(format!("backend '{backend_id}' not found"))
-        })?;
+        let backend = self
+            .backend_by_id(backend_id)
+            .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
 
         let pw_field = backend.password_field();
         let pw_field_id = pw_field.id;
@@ -770,7 +822,10 @@ impl ServiceState {
         let input = if registration_fields.is_empty() {
             UnlockInput::Password(password)
         } else {
-            UnlockInput::WithRegistration { password, registration_fields }
+            UnlockInput::WithRegistration {
+                password,
+                registration_fields,
+            }
         };
 
         backend.unlock(input).await.map_err(map_backend_error)?;
@@ -807,7 +862,10 @@ impl ServiceState {
                 let value = if key == "name" {
                     meta.label.as_str()
                 } else {
-                    meta.attributes.get(key.as_str()).map(String::as_str).unwrap_or("")
+                    meta.attributes
+                        .get(key.as_str())
+                        .map(String::as_str)
+                        .unwrap_or("")
                 };
                 if !WildMatch::new(pattern).matches(value) {
                     continue 'item;
@@ -835,7 +893,9 @@ impl ServiceState {
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         let cache = self.metadata_cache.lock().map_err(|_| {
-            map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+            map_backend_error(BackendError::Unavailable(
+                "metadata_cache lock poisoned".to_string(),
+            ))
         })?;
 
         let mut unlocked = Vec::new();
@@ -867,7 +927,9 @@ impl ServiceState {
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         let cache = self.metadata_cache.lock().map_err(|_| {
-            map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+            map_backend_error(BackendError::Unavailable(
+                "metadata_cache lock poisoned".to_string(),
+            ))
         })?;
 
         let mut unlocked = Vec::new();
@@ -878,7 +940,10 @@ impl ServiceState {
                 let value = if key == "name" {
                     meta.label.as_str()
                 } else {
-                    meta.attributes.get(key.as_str()).map(String::as_str).unwrap_or("")
+                    meta.attributes
+                        .get(key.as_str())
+                        .map(String::as_str)
+                        .unwrap_or("")
                 };
                 if !WildMatch::new(pattern).matches(value) {
                     continue 'item;
@@ -945,7 +1010,8 @@ impl ServiceState {
         // Attribute search or full listing needs cache access — run on Tokio.
         let has_attrs = attributes.is_some();
         let this = Arc::clone(self);
-        let entries = self.tokio_handle
+        let entries = self
+            .tokio_handle
             .spawn(async move {
                 if has_attrs {
                     this.rebuild_cache_inner().await
@@ -954,7 +1020,7 @@ impl ServiceState {
                 }
             })
             .await
-            .map_err(|e| FdoError::Failed(format!("resolve task panicked: {e}")))?? ;
+            .map_err(|e| FdoError::Failed(format!("resolve task panicked: {e}")))??;
 
         if let Some(attrs) = attributes {
             let attrs: Attributes = attrs.into_iter().collect();
@@ -969,10 +1035,7 @@ impl ServiceState {
 
     /// Sync a specific backend against the remote server, then rebuild the cache.
     /// Dispatches to Tokio so that network and cache futures run on the Tokio reactor.
-    pub async fn sync_backend(
-        self: &Arc<Self>,
-        backend_id: &str,
-    ) -> Result<u32, FdoError> {
+    pub async fn sync_backend(self: &Arc<Self>, backend_id: &str) -> Result<u32, FdoError> {
         let backend = self
             .backend_by_id(backend_id)
             .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
@@ -1051,10 +1114,16 @@ impl ServiceState {
             .map_err(|e| FdoError::Failed(format!("cache rebuild task panicked: {e}")))?
     }
 
-    pub(crate) async fn ensure_cache_inner(&self) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
-        let has_items = self.items.lock().map_err(|_| {
-            map_backend_error(BackendError::Unavailable("items lock poisoned".to_string()))
-        }).map(|g| !g.is_empty())?;
+    pub(crate) async fn ensure_cache_inner(
+        &self,
+    ) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
+        let has_items = self
+            .items
+            .lock()
+            .map_err(|_| {
+                map_backend_error(BackendError::Unavailable("items lock poisoned".to_string()))
+            })
+            .map(|g| !g.is_empty())?;
 
         if has_items {
             if self.should_rebuild_cache().unwrap_or(false) {
@@ -1084,7 +1153,9 @@ impl ServiceState {
         Ok(entries)
     }
 
-    pub(crate) async fn rebuild_cache_inner(&self) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
+    pub(crate) async fn rebuild_cache_inner(
+        &self,
+    ) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
         let entries = self.fetch_entries().await?;
         self.register_items(&entries).await?;
 
@@ -1114,7 +1185,9 @@ impl ServiceState {
         // previous metadata_cache entries with `locked: true`.
         {
             let mut cache = self.metadata_cache.lock().map_err(|_| {
-                map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+                map_backend_error(BackendError::Unavailable(
+                    "metadata_cache lock poisoned".to_string(),
+                ))
             })?;
             // Remove old entries for backends that were refreshed.
             cache.retain(|_, meta| !fresh_backends.contains(&meta.backend_id));
@@ -1133,7 +1206,8 @@ impl ServiceState {
         let mut backend_ids: Vec<String> = Vec::new();
         for backend in self.backends_ordered() {
             let bid = backend.id().to_string();
-            let result = self.run_on_tokio(async move { backend.list_items().await })
+            let result = self
+                .run_on_tokio(async move { backend.list_items().await })
                 .await?;
             let fetched = match result {
                 Ok(items) => items,
@@ -1194,10 +1268,9 @@ impl ServiceState {
     }
 
     fn should_rebuild_cache(&self) -> Result<bool, FdoError> {
-        let last_sync = self
-            .last_sync
-            .lock()
-            .map_err(|_| map_backend_error(BackendError::Unavailable("sync lock poisoned".to_string())))?;
+        let last_sync = self.last_sync.lock().map_err(|_| {
+            map_backend_error(BackendError::Unavailable("sync lock poisoned".to_string()))
+        })?;
         if let Some(last_sync) = *last_sync {
             Ok(is_stale(last_sync, 1))
         } else {
@@ -1206,10 +1279,9 @@ impl ServiceState {
     }
 
     fn update_cache_time(&self) -> Result<(), FdoError> {
-        let mut last_sync = self
-            .last_sync
-            .lock()
-            .map_err(|_| map_backend_error(BackendError::Unavailable("sync lock poisoned".to_string())))?;
+        let mut last_sync = self.last_sync.lock().map_err(|_| {
+            map_backend_error(BackendError::Unavailable("sync lock poisoned".to_string()))
+        })?;
         *last_sync = Some(SystemTime::now());
         Ok(())
     }
@@ -1221,10 +1293,11 @@ impl ServiceState {
         let server = self.conn.object_server();
         let mut pending = Vec::new();
         {
-            let registered = self
-                .registered_items
-                .lock()
-                .map_err(|_| map_backend_error(BackendError::Unavailable("registered lock poisoned".to_string())))?;
+            let registered = self.registered_items.lock().map_err(|_| {
+                map_backend_error(BackendError::Unavailable(
+                    "registered lock poisoned".to_string(),
+                ))
+            })?;
             for (path, item) in entries {
                 if registered.contains(path) {
                     continue;
@@ -1242,9 +1315,12 @@ impl ServiceState {
             let backend = self
                 .backend_by_id(&item.backend_id)
                 .or_else(|| self.backends_ordered().into_iter().next())
-                .ok_or_else(|| map_backend_error(BackendError::Unavailable(
-                    format!("no backend found for item backend_id '{}'", item.backend_id),
-                )))?;
+                .ok_or_else(|| {
+                    map_backend_error(BackendError::Unavailable(format!(
+                        "no backend found for item backend_id '{}'",
+                        item.backend_id
+                    )))
+                })?;
             let return_attr_patterns = self.return_attr_patterns(&item.backend_id);
             let state = ItemState {
                 meta: item.clone(),
@@ -1260,10 +1336,11 @@ impl ServiceState {
                 .map_err(map_zbus_error)?;
         }
 
-        let mut registered = self
-            .registered_items
-            .lock()
-            .map_err(|_| map_backend_error(BackendError::Unavailable("registered lock poisoned".to_string())))?;
+        let mut registered = self.registered_items.lock().map_err(|_| {
+            map_backend_error(BackendError::Unavailable(
+                "registered lock poisoned".to_string(),
+            ))
+        })?;
         for (path, _) in pending {
             registered.insert(path);
         }
@@ -1298,7 +1375,7 @@ fn resolve_prompt_binary() -> String {
 /// Includes enough context for the prompt to display a useful title and
 /// theme, but deliberately excludes the field values (those come back).
 fn build_prompt_json(backend_id: String, label: &str, cfg: &PromptConfig) -> String {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let theme = &cfg.theme;
     let req: Value = json!({
         "title": label,
@@ -1348,9 +1425,7 @@ pub(crate) fn map_backend_error(err: BackendError) -> FdoError {
         // (e.g. "backend locked", "network unreachable") — pass it through.
         BackendError::Unavailable(reason) => FdoError::Failed(reason),
         // Sentinel string detected by the CLI to trigger the registration retry flow.
-        BackendError::RegistrationRequired => {
-            FdoError::Failed("registration_required".to_string())
-        }
+        BackendError::RegistrationRequired => FdoError::Failed("registration_required".to_string()),
         // Other/internal errors: log the full chain server-side, return an
         // opaque message to the D-Bus caller to avoid leaking internal detail
         // (cipher UUIDs, server HTTP bodies, file paths, etc.).
@@ -1416,8 +1491,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use rosec_core::{BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput, VaultItem};
     use rosec_core::router::RouterConfig;
+    use rosec_core::{BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput, VaultItem};
 
     #[derive(Debug)]
     struct MockBackend {
@@ -1509,11 +1584,7 @@ mod tests {
             }
         }
 
-        async fn get_secret_attr(
-            &self,
-            id: &str,
-            attr: &str,
-        ) -> Result<SecretBytes, BackendError> {
+        async fn get_secret_attr(&self, id: &str, attr: &str) -> Result<SecretBytes, BackendError> {
             if id == "rich-item" && attr == "password" {
                 Ok(SecretBytes::new(b"rich-password".to_vec()))
             } else if id == "rich-item" && attr == "totp" {
@@ -1535,7 +1606,13 @@ mod tests {
             Ok(conn) => conn,
             Err(err) => panic!("session bus failed: {err}"),
         };
-        Arc::new(ServiceState::new(vec![backend], router, sessions, conn, tokio::runtime::Handle::current()))
+        Arc::new(ServiceState::new(
+            vec![backend],
+            router,
+            sessions,
+            conn,
+            tokio::runtime::Handle::current(),
+        ))
     }
 
     fn meta(id: &str, label: &str, locked: bool) -> VaultItemMeta {
@@ -1588,14 +1665,19 @@ mod tests {
         assert!(invalid.is_err());
 
         // Open session via SessionManager directly
-        let session = match state.sessions.open_session("plain", &zvariant::Value::from("")) {
+        let session = match state
+            .sessions
+            .open_session("plain", &zvariant::Value::from(""))
+        {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
         state.ensure_session(&session).expect("valid session");
 
         // Retrieve the secret for the resolved item
-        let aes_key = state.sessions.get_session_key(&session)
+        let aes_key = state
+            .sessions
+            .get_session_key(&session)
             .expect("session key lookup");
         let item_meta = &resolved[0].1;
         let backend = state.backend_by_id(&item_meta.backend_id).expect("backend");
@@ -1677,13 +1759,18 @@ mod tests {
         let items = vec![meta("item-1", "one", false)];
         let state = new_state(items).await;
         // Populate the cache.
-        state.resolve_items(Some(HashMap::new()), None).await.expect("cache");
+        state
+            .resolve_items(Some(HashMap::new()), None)
+            .await
+            .expect("cache");
         // Find the path we assigned.
         let path = {
             let guard = state.items.lock().expect("items lock");
             guard.keys().next().cloned().expect("at least one item")
         };
-        let (backend, item_id) = state.backend_and_id_for_path(&path).expect("should resolve");
+        let (backend, item_id) = state
+            .backend_and_id_for_path(&path)
+            .expect("should resolve");
         assert_eq!(backend.id(), "mock");
         assert_eq!(item_id, "item-1");
     }
@@ -1706,7 +1793,10 @@ mod tests {
             meta("b", "Beta Thing", false),
         ];
         let state = new_state(items).await;
-        state.resolve_items(Some(HashMap::new()), None).await.expect("cache");
+        state
+            .resolve_items(Some(HashMap::new()), None)
+            .await
+            .expect("cache");
 
         let mut attrs = HashMap::new();
         attrs.insert("name".to_string(), "Alpha*".to_string());
@@ -1717,14 +1807,16 @@ mod tests {
 
     #[tokio::test]
     async fn search_items_glob_empty_returns_all() {
-        let items = vec![
-            meta("a", "Alpha", false),
-            meta("b", "Beta", true),
-        ];
+        let items = vec![meta("a", "Alpha", false), meta("b", "Beta", true)];
         let state = new_state(items).await;
-        state.resolve_items(Some(HashMap::new()), None).await.expect("cache");
+        state
+            .resolve_items(Some(HashMap::new()), None)
+            .await
+            .expect("cache");
 
-        let (unlocked, locked) = state.search_items_glob(&HashMap::new()).expect("glob search");
+        let (unlocked, locked) = state
+            .search_items_glob(&HashMap::new())
+            .expect("glob search");
         assert_eq!(unlocked.len(), 1);
         assert_eq!(locked.len(), 1);
     }

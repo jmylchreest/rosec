@@ -26,7 +26,11 @@ pub struct SecretPrompt {
 
 impl SecretPrompt {
     pub fn new(path: String, backend_id: String, state: Arc<ServiceState>) -> Self {
-        Self { path, backend_id, state }
+        Self {
+            path,
+            backend_id,
+            state,
+        }
     }
 }
 
@@ -67,15 +71,15 @@ impl SecretPrompt {
         // is still running — but cancel_prompt() sends SIGTERM to the child
         // so the window disappears when the client calls CancelPrompt or
         // when the Prompt object is dropped (via Dismiss).
-    let ctxt_owned = ctxt.to_owned();
-    let state2 = Arc::clone(&state);
-    state
-        .run_on_tokio(async move {
-            tokio::spawn(async move {
-                run_prompt_task(state2, prompt_path, backend_id, label, ctxt_owned).await;
-            });
-        })
-        .await?;
+        let ctxt_owned = ctxt.to_owned();
+        let state2 = Arc::clone(&state);
+        state
+            .run_on_tokio(async move {
+                tokio::spawn(async move {
+                    run_prompt_task(state2, prompt_path, backend_id, label, ctxt_owned).await;
+                });
+            })
+            .await?;
 
         Ok(())
     }
@@ -118,9 +122,7 @@ async fn run_prompt_task(
 ) {
     // Inline helper: emit Completed(dismissed=true).
     async fn emit_dismissed(ctxt: &SignalEmitter<'_>) {
-        if let Err(e) =
-            SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await
-        {
+        if let Err(e) = SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
     }
@@ -186,9 +188,7 @@ async fn run_prompt_task(
 
                     let collection =
                         zvariant::Value::from("/org/freedesktop/secrets/collection/default");
-                    if let Err(e) =
-                        SecretPrompt::completed(&ctxt, false, &collection).await
-                    {
+                    if let Err(e) = SecretPrompt::completed(&ctxt, false, &collection).await {
                         tracing::warn!(error = %e, "failed to emit Completed(unlocked)");
                     }
                 }

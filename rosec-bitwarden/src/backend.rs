@@ -3,7 +3,7 @@
 use std::time::SystemTime;
 
 use rosec_core::{
-    AttributeDescriptor, AuthField, AuthFieldKind, Attributes, BackendError, BackendStatus,
+    AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus,
     ItemAttributes, RecoveryOutcome, RegistrationInfo, SecretBytes, UnlockInput, VaultBackend,
     VaultItem, VaultItemMeta,
 };
@@ -375,11 +375,7 @@ impl BitwardenBackend {
 
         // Step 3: Login
         let hash_b64 = crypto::b64_encode(&password_hash);
-        let login_resp = match self
-            .api
-            .login_password(email, &hash_b64, two_factor)
-            .await
-        {
+        let login_resp = match self.api.login_password(email, &hash_b64, two_factor).await {
             Ok(resp) => resp,
             Err(BitwardenError::DeviceVerificationRequired) => {
                 // The server doesn't recognise this device UUID.
@@ -428,10 +424,9 @@ impl BitwardenBackend {
             Err(e) => return Err(e),
         };
 
-        let protected_key = login_resp
-            .key
-            .as_deref()
-            .ok_or_else(|| BitwardenError::Auth("no protected key in login response".to_string()))?;
+        let protected_key = login_resp.key.as_deref().ok_or_else(|| {
+            BitwardenError::Auth("no protected key in login response".to_string())
+        })?;
 
         // Step 4: Initialize vault state from protected key
         let mut vault = VaultState::new(&identity_keys, protected_key)?;
@@ -486,7 +481,10 @@ impl BitwardenBackend {
             client_secret,
         )?;
 
-        info!("device registered and API key saved for backend '{}'", self.config.id);
+        info!(
+            "device registered and API key saved for backend '{}'",
+            self.config.id
+        );
         Ok(())
     }
 
@@ -525,7 +523,10 @@ impl BitwardenBackend {
                 // Retry sync with new token
                 let sync = api.sync(&state.access_token).await?;
                 state.vault.process_sync(&sync)?;
-                debug!(ciphers = state.vault.ciphers().len(), "vault resynced after token refresh");
+                debug!(
+                    ciphers = state.vault.ciphers().len(),
+                    "vault resynced after token refresh"
+                );
                 Ok(())
             }
             Err(e) => Err(e),
@@ -605,24 +606,15 @@ impl BitwardenBackend {
             if let (Some(name), Some(value)) = (&field.name, &field.value) {
                 match field.field_type {
                     0 | 2 => {
-                        attributes.insert(
-                            format!("custom.{name}"),
-                            value.as_str().to_string(),
-                        );
+                        attributes.insert(format!("custom.{name}"), value.as_str().to_string());
                     }
                     _ => {} // hidden (1) and linked (3) excluded
                 }
             }
         }
 
-        let created = dc
-            .creation_date
-            .as_ref()
-            .and_then(|s| parse_iso8601(s));
-        let modified = dc
-            .revision_date
-            .as_ref()
-            .and_then(|s| parse_iso8601(s));
+        let created = dc.creation_date.as_ref().and_then(|s| parse_iso8601(s));
+        let modified = dc.revision_date.as_ref().and_then(|s| parse_iso8601(s));
 
         VaultItemMeta {
             id: dc.id.clone(),
@@ -657,10 +649,7 @@ impl BitwardenBackend {
                 .or(dc.login.as_ref().and_then(|l| l.totp.as_deref()))
                 .or(dc.notes.as_deref())
                 .map(to_secret_bytes),
-            CipherType::SecureNote => dc
-                .notes
-                .as_deref()
-                .map(to_secret_bytes),
+            CipherType::SecureNote => dc.notes.as_deref().map(to_secret_bytes),
             CipherType::Card => dc
                 .card
                 .as_ref()
@@ -672,10 +661,9 @@ impl BitwardenBackend {
                 .and_then(|sk| sk.private_key.as_deref())
                 .or(dc.notes.as_deref())
                 .map(to_secret_bytes),
-            CipherType::Identity | CipherType::Unknown(_) => dc
-                .notes
-                .as_deref()
-                .map(to_secret_bytes),
+            CipherType::Identity | CipherType::Unknown(_) => {
+                dc.notes.as_deref().map(to_secret_bytes)
+            }
         };
         bytes.map(SecretBytes::from_zeroizing)
     }
@@ -990,9 +978,10 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
     async fn unlock(&self, input: UnlockInput) -> Result<(), BackendError> {
         let (password, registration) = match input {
             UnlockInput::Password(p) => (p, None),
-            UnlockInput::WithRegistration { password, registration_fields } => {
-                (password, Some(registration_fields))
-            }
+            UnlockInput::WithRegistration {
+                password,
+                registration_fields,
+            } => (password, Some(registration_fields)),
             _ => return Err(BackendError::NotSupported),
         };
 
@@ -1067,10 +1056,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
 
-        let dc = state
-            .vault
-            .cipher_by_id(id)
-            .ok_or(BackendError::NotFound)?;
+        let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
 
         let secret = Self::get_primary_secret(dc);
 
@@ -1084,10 +1070,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
 
-        let dc = state
-            .vault
-            .cipher_by_id(id)
-            .ok_or(BackendError::NotFound)?;
+        let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
 
         Self::get_primary_secret(dc)
             .ok_or_else(|| BackendError::Other(anyhow::anyhow!("no secret for cipher {id}")))
@@ -1126,10 +1109,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
 
-        let dc = state
-            .vault
-            .cipher_by_id(id)
-            .ok_or(BackendError::NotFound)?;
+        let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
 
         Ok(Self::build_item_attributes(&self.config.id, dc))
     }
@@ -1138,13 +1118,9 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
 
-        let dc = state
-            .vault
-            .cipher_by_id(id)
-            .ok_or(BackendError::NotFound)?;
+        let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
 
-        Self::resolve_secret_attr(dc, attr)
-            .ok_or_else(|| BackendError::NotFound)
+        Self::resolve_secret_attr(dc, attr).ok_or_else(|| BackendError::NotFound)
     }
 }
 
@@ -1186,7 +1162,10 @@ fn is_leap_year(year: u64) -> bool {
 
 fn days_before_month(month: u64, leap: bool) -> u64 {
     let days = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let d = days.get((month as usize).wrapping_sub(1)).copied().unwrap_or(0);
+    let d = days
+        .get((month as usize).wrapping_sub(1))
+        .copied()
+        .unwrap_or(0);
     if leap && month > 2 { d + 1 } else { d }
 }
 
@@ -1407,7 +1386,10 @@ mod tests {
         assert!(!meta.locked);
         assert_eq!(meta.attributes.get("type"), Some(&"login".to_string()));
         assert_eq!(meta.attributes.get("username"), Some(&"alice".to_string()));
-        assert_eq!(meta.attributes.get("uri"), Some(&"https://example.com".to_string()));
+        assert_eq!(
+            meta.attributes.get("uri"),
+            Some(&"https://example.com".to_string())
+        );
         assert_eq!(
             meta.attributes.get("xdg:schema"),
             Some(&"org.freedesktop.Secret.Generic".to_string())
@@ -1575,7 +1557,9 @@ mod tests {
     fn get_primary_secret_ssh_key() {
         let mut dc = make_cipher(CipherType::SshKey);
         dc.ssh_key = Some(DecryptedSshKey {
-            private_key: Some(Zeroizing::new("-----BEGIN RSA PRIVATE KEY-----".to_string())),
+            private_key: Some(Zeroizing::new(
+                "-----BEGIN RSA PRIVATE KEY-----".to_string(),
+            )),
             public_key: Some("ssh-rsa AAAA...".to_string()),
             fingerprint: None,
         });
@@ -1797,7 +1781,9 @@ mod tests {
     fn build_item_attributes_ssh_key() {
         let mut dc = make_cipher(CipherType::SshKey);
         dc.ssh_key = Some(DecryptedSshKey {
-            private_key: Some(Zeroizing::new("-----BEGIN RSA PRIVATE KEY-----".to_string())),
+            private_key: Some(Zeroizing::new(
+                "-----BEGIN RSA PRIVATE KEY-----".to_string(),
+            )),
             public_key: Some("ssh-rsa AAAA...".to_string()),
             fingerprint: Some("SHA256:abc123".to_string()),
         });
@@ -1932,7 +1918,11 @@ mod tests {
         );
         // Hidden field → sensitive
         assert!(!attrs.public.contains_key("custom.secret_token"));
-        assert!(attrs.secret_names.contains(&"custom.secret_token".to_string()));
+        assert!(
+            attrs
+                .secret_names
+                .contains(&"custom.secret_token".to_string())
+        );
         // Boolean field → public
         assert_eq!(
             attrs.public.get("custom.enabled"),
@@ -2078,7 +2068,9 @@ mod tests {
     fn resolve_secret_attr_ssh_private_key() {
         let mut dc = make_cipher(CipherType::SshKey);
         dc.ssh_key = Some(DecryptedSshKey {
-            private_key: Some(Zeroizing::new("-----BEGIN OPENSSH PRIVATE KEY-----".to_string())),
+            private_key: Some(Zeroizing::new(
+                "-----BEGIN OPENSSH PRIVATE KEY-----".to_string(),
+            )),
             public_key: Some("ssh-ed25519 AAAA...".to_string()),
             fingerprint: Some("SHA256:xyz".to_string()),
         });

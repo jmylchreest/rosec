@@ -1,4 +1,4 @@
-use crate::dedup::{backend_priority_map, dedup, DedupConfig};
+use crate::dedup::{DedupConfig, backend_priority_map, dedup};
 use crate::{DedupStrategy, DedupTimeFallback, VaultItemMeta};
 
 #[derive(Debug, Clone)]

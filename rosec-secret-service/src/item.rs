@@ -7,8 +7,8 @@ use zbus::fdo::Error as FdoError;
 use zbus::interface;
 
 use crate::service::build_secret_value;
-use crate::state::map_backend_error;
 use crate::session::SessionManager;
+use crate::state::map_backend_error;
 
 #[derive(Clone)]
 pub struct ItemState {
@@ -139,7 +139,10 @@ fn ensure_session(sessions: &SessionManager, session: &str) -> Result<(), FdoErr
 mod tests {
     use super::*;
 
-    use rosec_core::{Attributes, BackendError, BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput, VaultItem};
+    use rosec_core::{
+        Attributes, BackendError, BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput,
+        VaultItem,
+    };
 
     #[derive(Debug)]
     struct MockBackend;
