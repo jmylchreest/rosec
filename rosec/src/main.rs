@@ -370,7 +370,11 @@ fn resolve_binary(name: &str) -> String {
 /// pre-filled map is sent directly to `AuthBackend`.  Used when a backend
 /// returned `RegistrationRequired` during opportunistic unlock so the user is
 /// not asked to re-enter the password they just typed.
+/// `force_tty` suppresses the GUI prompt even when a display is available —
+/// used by `backend auth` and `backend add` which are explicit CLI admin
+/// operations where the user is already at the terminal.
 /// Returns `Ok(())` if the backend was successfully authenticated.
+#[allow(clippy::too_many_arguments)]
 async fn prompt_and_auth(
     backend_id: &str,
     backend_name: &str,
@@ -379,6 +383,7 @@ async fn prompt_and_auth(
     prefill: Option<&HashMap<String, Zeroizing<String>>>,
     proxy: &zbus::Proxy<'_>,
     config: &Config,
+    force_tty: bool,
 ) -> Result<()> {
     let theme = &config.prompt.theme;
 
@@ -507,8 +512,9 @@ async fn prompt_and_auth(
         eprintln!("Unlocking {backend_id}  ({})", backend_name);
     }
 
-    let has_display =
-        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+    let has_display = !force_tty
+        && (std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some());
 
     let collected: HashMap<String, Zeroizing<String>> =
         if has_display {
@@ -1066,6 +1072,7 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
         None,
         &proxy,
         &config,
+        true, // force_tty: backend auth is an explicit CLI admin operation
     )
     .await?;
 
@@ -1194,7 +1201,7 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
                 let config = load_config();
                 let field_descs: Vec<(String, String, String, String, bool)> =
                     proxy.call("GetAuthFields", &(id.as_str(),)).await?;
-                prompt_and_auth(&id, kind, kind, &field_descs, None, &proxy, &config).await?;
+                prompt_and_auth(&id, kind, kind, &field_descs, None, &proxy, &config, true).await?;
                 println!("Backend '{id}' authenticated.");
             } else {
                 println!("rosecd will hot-reload the config automatically if it is running.");
@@ -1321,7 +1328,7 @@ async fn cmd_sync() -> Result<()> {
                 eprintln!(" locked");
                 let field_descs: Vec<(String, String, String, String, bool)> =
                     proxy.call("GetAuthFields", &(backend_id,)).await?;
-                prompt_and_auth(backend_id, name, kind, &field_descs, None, &proxy, &config).await?;
+                prompt_and_auth(backend_id, name, kind, &field_descs, None, &proxy, &config, true).await?;
                 // Retry sync now that the backend is unlocked.
                 eprint!("Syncing '{id}' (retrying)...");
                 match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
@@ -2619,7 +2626,7 @@ async fn cmd_unlock() -> Result<()> {
     for (id, name, kind, prefill) in &remaining {
         let field_descs: Vec<(String, String, String, String, bool)> =
             proxy.call("GetAuthFields", &(id,)).await?;
-        prompt_and_auth(id, name, kind, &field_descs, prefill.as_ref(), &proxy, &config).await?;
+        prompt_and_auth(id, name, kind, &field_descs, prefill.as_ref(), &proxy, &config, false).await?;
         println!("'{id}' unlocked.");
     }
 
