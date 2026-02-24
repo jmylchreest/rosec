@@ -1,0 +1,40 @@
+# cargo-release configuration
+# https://github.com/crate-ci/cargo-release
+#
+# Usage (via Justfile — prefer that over invoking cargo-release directly):
+#   just release-patch        # auto-bump patch from latest tag, dry-run
+#   just release-patch push   # bump, commit, tag, push
+#   just release 1.2.0        # explicit version, dry-run
+#   just release 1.2.0 push   # explicit version, push
+#
+# cargo-release handles:
+#   - Updating version in Cargo.toml (workspace root only, members inherit)
+#   - Committing: "chore: release v{{version}}"
+#   - Tagging:    "v{{version}}"
+#   - Pushing tag + branch (when --execute --push are passed)
+#
+# We do NOT publish to crates.io — this is a binary workspace, not a library.
+
+# Single workspace release — version is set in [workspace.package] and all
+# members use version.workspace = true, so only the root needs bumping.
+shared-version = true
+
+# Do not publish any crates to crates.io
+publish = false
+
+# Tag format — must match the pattern GHA release.yml expects: refs/tags/v*
+tag-name = "v{{version}}"
+tag-message = "v{{version}}"
+
+# Commit message for the version bump commit
+pre-release-commit-message = "chore: release v{{version}}"
+
+# Run these checks before doing anything. Mirrors what GHA CI runs.
+pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
+
+# Do not push by default — the Justfile controls when to push.
+# This prevents accidental pushes when running cargo-release directly.
+push = false
+
+# Do not create a GitHub release — GHA does that on tag push.
+release = false

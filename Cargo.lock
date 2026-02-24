@@ -3008,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "rosec"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-bitwarden"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-bitwarden-sm"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -3107,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-prompt"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "iced",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-secret-service"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "rosecd"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "futures-util",
