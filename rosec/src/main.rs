@@ -440,45 +440,50 @@ async fn prompt_and_auth(
     let has_display =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
-    let collected: HashMap<String, Zeroizing<String>> = if has_display {
-        let program = match config.prompt.backend.as_str() {
-            "builtin" | "" => resolve_binary("rosec-prompt"),
-            custom => custom.to_string(),
+    // Token-based backends (SM) always use TTY regardless of display.
+    // Their credential is a long machine-generated access token — a GUI
+    // password dialog is the wrong UX for pasting a token, and the GUI
+    // field label/placeholder doesn't fit the token format.
+    let collected: HashMap<String, Zeroizing<String>> =
+        if has_display && !is_token_backend(backend_kind) {
+            let program = match config.prompt.backend.as_str() {
+                "builtin" | "" => resolve_binary("rosec-prompt"),
+                custom => custom.to_string(),
+            };
+
+            let spawn_result = std::process::Command::new(&program)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn();
+
+            match spawn_result {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(json.as_bytes())?;
+                    }
+                    let output = child.wait_with_output()?;
+                    if !output.status.success() {
+                        bail!("prompt cancelled");
+                    }
+                    let raw: HashMap<String, String> =
+                        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())?;
+                    raw.into_iter()
+                        .map(|(k, v)| (k, Zeroizing::new(v)))
+                        .collect()
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    // GUI binary not available — fall through to TTY
+                    collect_tty(&fields).await?
+                }
+                Err(e) => bail!("failed to launch prompt: {e}"),
+            }
+        } else {
+            collect_tty(&fields).await?
         };
-
-        let spawn_result = std::process::Command::new(&program)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn();
-
-        match spawn_result {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(json.as_bytes())?;
-                }
-                let output = child.wait_with_output()?;
-                if !output.status.success() {
-                    bail!("prompt cancelled");
-                }
-                let raw: HashMap<String, String> =
-                    serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())?;
-                raw.into_iter()
-                    .map(|(k, v)| (k, Zeroizing::new(v)))
-                    .collect()
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
-            {
-                // GUI binary not available — fall through to TTY
-                collect_tty(&fields).await?
-            }
-            Err(e) => bail!("failed to launch prompt: {e}"),
-        }
-    } else {
-        collect_tty(&fields).await?
-    };
 
     // Call AuthBackend with the collected values.
     // `cred_map` holds credentials as Zeroizing<String> throughout so they are
@@ -1281,6 +1286,15 @@ async fn preemptive_sync(conn: &Connection) -> Result<()> {
     futures_util::future::join_all(futures).await;
 
     Ok(())
+}
+
+/// Returns `true` if the backend kind uses token-based auth rather than a
+/// master password.  Token backends (e.g. `bitwarden-sm`) must always be
+/// prompted individually via TTY — they are incompatible with the opportunistic
+/// password-sharing unlock flow, and the GUI prompt is the wrong UX for a long
+/// machine-generated access token.
+fn is_token_backend(kind: &str) -> bool {
+    kind.ends_with("-sm")
 }
 
 /// Returns `true` if the daemon reports at least one locked backend.
@@ -2485,15 +2499,22 @@ async fn cmd_unlock() -> Result<()> {
         return Ok(());
     }
 
-    // Opportunistic unlock: collect a password once, try it against all locked
-    // backends simultaneously.  Backends that fail (wrong password or no stored
-    // credential) are deferred and prompted for individually afterward.
-    // This means the user enters their password once if all backends share it,
-    // or as few times as there are distinct passwords.
+    // Opportunistic unlock: collect a password once, try it against all
+    // password-compatible locked backends simultaneously.  Backends that fail
+    // (wrong password or no stored credential) are deferred and prompted for
+    // individually afterward.  This means the user enters their password once
+    // if all backends share it, or as few times as there are distinct passwords.
     //
-    // Auto-unlock backends (e.g. Bitwarden SM) are handled by the daemon itself
-    // and will not appear in this list — they are already unlocked by `recover()`.
-    let remaining = opportunistic_unlock(&locked, &proxy, &config).await?;
+    // Token-based backends (e.g. Bitwarden SM, kind ends with "-sm") are
+    // excluded from the opportunistic step — they use a machine access token,
+    // not a master password, and must always be prompted individually via TTY.
+    let (token_backends, password_backends): (Vec<_>, Vec<_>) = locked
+        .iter()
+        .cloned()
+        .partition(|(_, _, kind)| is_token_backend(kind));
+
+    let mut remaining = opportunistic_unlock(&password_backends, &proxy, &config).await?;
+    remaining.extend(token_backends);
 
     // Any that still failed get their own targeted prompt.
     for (id, name, kind) in &remaining {

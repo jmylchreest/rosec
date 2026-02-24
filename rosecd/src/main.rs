@@ -312,8 +312,10 @@ async fn run() -> Result<()> {
 
             let autolock = autolock_state.live_config().autolock;
 
-            // Check idle timeout
+            // Check idle timeout.
+            // 0 means disabled (same as omitting the field); skip the check.
             if let Some(idle_min) = autolock.idle_timeout_minutes
+                && idle_min != 0
                 && autolock_state.is_idle_expired(idle_min)
             {
                 tracing::info!(idle_minutes = idle_min, "idle timeout expired, locking");
@@ -323,8 +325,10 @@ async fn run() -> Result<()> {
                 continue;
             }
 
-            // Check max-unlocked timeout
+            // Check max-unlocked timeout.
+            // 0 means disabled (same as omitting the field); skip the check.
             if let Some(max_min) = autolock.max_unlocked_minutes
+                && max_min != 0
                 && autolock_state.is_max_unlocked_expired(max_min)
             {
                 tracing::info!(
