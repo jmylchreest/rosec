@@ -71,6 +71,12 @@ pub struct ServiceState {
     metadata_cache: Arc<Mutex<HashMap<String, VaultItemMeta>>>,
     /// Prevents multiple simultaneous unlock attempts for the same backend.
     unlock_in_progress: tokio::sync::Mutex<()>,
+    /// Per-backend sync coalescing: ensures at most one active sync per backend.
+    ///
+    /// Keyed by backend ID.  Lazily populated on first sync call.  Callers that
+    /// need the result (D-Bus `SyncBackend`) await the lock; background callers
+    /// (timer, SignalR nudge) use `try_lock` and skip if already in progress.
+    sync_in_progress: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Timestamp of the last client activity (D-Bus method call).
     last_activity: Mutex<Option<SystemTime>>,
     /// Timestamp when any backend was first unlocked (for max-unlocked policy).
@@ -180,6 +186,7 @@ impl ServiceState {
             last_sync: Arc::new(Mutex::new(None)),
             conn,
             unlock_in_progress: tokio::sync::Mutex::new(()),
+            sync_in_progress: std::sync::Mutex::new(HashMap::new()),
             last_activity: Mutex::new(None),
             unlocked_since: Mutex::new(None),
             tokio_handle,
@@ -1033,17 +1040,47 @@ impl ServiceState {
         }
     }
 
+    /// Return (or lazily create) the per-backend `tokio::sync::Mutex` used to
+    /// coalesce concurrent sync operations.
+    ///
+    /// Two sync callers for the same backend will share one `Arc<Mutex<()>>`.
+    /// An `await` caller serialises behind the in-flight sync; a `try_lock`
+    /// caller (background timer, SignalR nudge) skips without redundant work.
+    fn sync_mutex_for(&self, backend_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self
+            .sync_in_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.entry(backend_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Sync a specific backend against the remote server, then rebuild the cache.
+    ///
+    /// Uses a per-backend mutex to coalesce concurrent calls:
+    /// - The caller **awaits** the lock, so if another sync is already running
+    ///   it blocks until that one finishes (and returns immediately after,
+    ///   since the cache is now fresh).
+    /// - Background callers (timer, SignalR) should use `try_sync_backend`
+    ///   instead to skip rather than wait.
+    ///
     /// Dispatches to Tokio so that network and cache futures run on the Tokio reactor.
     pub async fn sync_backend(self: &Arc<Self>, backend_id: &str) -> Result<u32, FdoError> {
         let backend = self
             .backend_by_id(backend_id)
             .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
 
+        let sync_mtx = self.sync_mutex_for(backend_id);
+        // Await acquisition here, then move the owned guard into the spawned
+        // task so it is held for the full sync+rebuild duration.
+        let sync_guard = sync_mtx.lock_owned().await;
         let this = Arc::clone(self);
         let backend_id = backend_id.to_string();
         self.tokio_handle
             .spawn(async move {
+                let _sync_guard = sync_guard; // held until task completes
+
                 // For auto-unlock backends (e.g. SM), sync() handles its own
                 // token loading — calling ensure_backend_unlocked first would
                 // trigger recover() (a full fetch) immediately before sync()
@@ -1064,6 +1101,50 @@ impl ServiceState {
             })
             .await
             .map_err(|e| FdoError::Failed(format!("sync task panicked: {e}")))?
+    }
+
+    /// Attempt a background sync for a specific backend, skipping if one is
+    /// already in progress.
+    ///
+    /// Intended for callers that have nothing to gain from waiting — the
+    /// background refresh timer and the SignalR notification handler.  If a
+    /// sync is already running the in-flight result will be fresh enough; no
+    /// duplicate HTTP request is issued.
+    ///
+    /// Returns `true` if a sync was started, `false` if one was already running.
+    pub async fn try_sync_backend(self: &Arc<Self>, backend_id: &str) -> Result<bool, FdoError> {
+        let backend = self
+            .backend_by_id(backend_id)
+            .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+
+        let sync_mtx = self.sync_mutex_for(backend_id);
+
+        // Non-blocking: attempt to acquire the guard here, then move it into
+        // the spawned task.  The guard is held for the full sync+rebuild
+        // duration so no concurrent caller can slip in between.
+        let sync_guard = match sync_mtx.try_lock_owned() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::debug!(backend = %backend_id, "sync already in progress, skipping");
+                return Ok(false);
+            }
+        };
+
+        let this = Arc::clone(self);
+        let backend_id = backend_id.to_string();
+        self.tokio_handle
+            .spawn(async move {
+                let _sync_guard = sync_guard; // held until task completes
+                if !backend.can_auto_unlock() {
+                    this.ensure_backend_unlocked(&backend_id).await?;
+                }
+                backend.sync().await.map_err(map_backend_error)?;
+                this.rebuild_cache_inner().await?;
+                Ok::<_, FdoError>(())
+            })
+            .await
+            .map_err(|e| FdoError::Failed(format!("sync task panicked: {e}")))?
+            .map(|_| true)
     }
 
     /// Ensure a *single* backend is unlocked.

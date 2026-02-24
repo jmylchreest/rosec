@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     match cmd {
         // backend / backends are full aliases for the same subcommand tree
         "backend" | "backends" => cmd_backend(&args[1..]).await,
+        "config" => cmd_config(&args[1..]),
         "status" => cmd_status().await,
         "sync" | "refresh" => cmd_sync().await,
         "search" => cmd_search(&args[1..]).await,
@@ -63,9 +64,14 @@ COMMANDS:
       add <kind> [options]              Add a backend to the config file
       remove <id>                       Remove a backend from the config file
 
+    config <subcommand>                 Read or modify config.toml
+      show                              Print the current effective configuration
+      get <key>                         Print the value of one setting (e.g. autolock.idle_timeout_minutes)
+      set <key> <value>                 Update a setting in config.toml (daemon hot-reloads automatically)
+
     status                              Show daemon status
     sync                                Sync vault with remote server (alias: refresh)
-    search [--format=<fmt>] [--show-path] [key=value]...
+    search [-s] [--format=<fmt>] [--show-path] [key=value]...
                                         Search items by attributes (no args = list all)
     get <id>                            Print the secret value only (pipeable)
     inspect <id>                        Show full item detail: label, attributes, secret
@@ -117,6 +123,7 @@ EXAMPLES:
     rosec search --format=json type=login                   # JSON output (includes path)
     rosec search --format=kv uri=github.com                 # key=value output
     rosec search --show-path type=login                     # table with D-Bus path column
+    rosec search -s type=login                             # sync/unlock, then search
     rosec get a1b2c3d4e5f60718                              # print secret value only (pipeable)
     rosec get a1b2c3d4e5f60718 | xclip -sel clip            # copy secret to clipboard
     rosec inspect a1b2c3d4e5f60718                          # full label + attributes + secret
@@ -124,6 +131,38 @@ EXAMPLES:
     rosec inspect -s --all-attrs a1b2c3d4e5f60718           # include sensitive attrs (password, totp…)
     rosec inspect --all-attrs --format=json a1b2c3d4e5f60718 # JSON with all attrs
     rosec inspect /org/freedesktop/secrets/collection/default/… # full D-Bus path"
+    );
+}
+
+fn print_search_help() {
+    println!(
+        "\
+rosec search - search vault items by attribute
+
+USAGE:
+    rosec search [flags] [key=value]...
+
+FLAGS:
+    -s, --sync          Sync backends before searching; also unlocks if needed
+    --format=<fmt>      Output format: table (default), kv, json
+    --show-path         Include the full D-Bus object path in output
+    --help, -h          Show this help
+
+SEARCH FILTERS:
+    Pass one or more key=value pairs to filter by public attributes (AND semantics).
+    Glob metacharacters (*, ?, [...]) are accepted.
+    The special key 'name' matches the item label.
+
+EXAMPLES:
+    rosec search                                    list all items
+    rosec search -s                                 sync first, then list all
+    rosec search type=login                         only login items
+    rosec search username=alice                     items with username 'alice'
+    rosec search type=login username=alice          combine filters
+    rosec search name=\"GitHub*\"                     glob on item name
+    rosec search --format=json type=login           JSON output
+    rosec search --format=kv uri=github.com         key=value output
+    rosec search --show-path type=login             table with D-Bus path column"
     );
 }
 
@@ -1188,7 +1227,7 @@ async fn cmd_sync() -> Result<()> {
 ///
 /// Locked backends are skipped — the caller handles unlock via the Prompt flow
 /// and can call this again afterwards to sync the newly-unlocked backends.
-async fn sync_before_get(conn: &Connection) -> Result<()> {
+async fn preemptive_sync(conn: &Connection) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1438,9 +1477,10 @@ fn glob_matches(item: &ItemSummary, attrs: &HashMap<String, String>) -> bool {
 }
 
 async fn cmd_search(args: &[String]) -> Result<()> {
-    // Parse --format flag, --show-path flag, and k=v attribute filters from args.
+    // Parse --format flag, --show-path flag, --sync flag, and k=v filters.
     let mut format = OutputFormat::Table;
     let mut show_path = false;
+    let mut sync = false;
     let mut all_attrs: HashMap<String, String> = HashMap::new();
 
     for arg in args {
@@ -1457,6 +1497,11 @@ async fn cmd_search(args: &[String]) -> Result<()> {
             std::process::exit(1);
         } else if arg == "--show-path" {
             show_path = true;
+        } else if arg == "--sync" || arg == "-s" {
+            sync = true;
+        } else if arg == "--help" || arg == "-h" {
+            print_search_help();
+            return Ok(());
         } else if let Some((key, value)) = arg.split_once('=') {
             all_attrs.insert(key.to_string(), value.to_string());
         } else {
@@ -1470,6 +1515,12 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     if rosecd {
         warn_if_no_backends(&conn).await;
     }
+
+    // If --sync was requested, ensure the daemon has fresh data first.
+    if sync {
+        preemptive_sync(&conn).await?;
+    }
+
     let has_globs = all_attrs.values().any(|v| is_glob(v)) || all_attrs.contains_key("name");
 
     // Strategy:
@@ -1477,10 +1528,36 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     //     when rosecd is running; otherwise fall back to spec-compliant
     //     SearchItems({}) + client-side glob (works against GNOME Keyring, KWallet, etc.)
     //   - All-exact attrs → always use spec-compliant SearchItems directly.
-    let (unlocked, locked) = if has_globs {
-        search_with_glob_fallback(&conn, &all_attrs, rosecd).await?
+    let do_search = |conn: &Connection| {
+        let conn = conn.clone();
+        let all_attrs = all_attrs.clone();
+        async move {
+            if has_globs {
+                search_with_glob_fallback(&conn, &all_attrs, rosecd).await
+            } else {
+                search_exact(&conn, &all_attrs).await
+            }
+        }
+    };
+
+    let (unlocked, locked) = match do_search(&conn).await {
+        Ok(result) => result,
+        Err(e) if sync => {
+            // Search failed (e.g. all backends locked) — unlock then retry.
+            trigger_unlock(&conn).await?;
+            preemptive_sync(&conn).await?;
+            do_search(&conn).await.map_err(|_| e)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    // With --sync, if everything came back locked, trigger unlock and retry.
+    let (unlocked, locked) = if sync && unlocked.is_empty() && !locked.is_empty() {
+        trigger_unlock(&conn).await?;
+        preemptive_sync(&conn).await?;
+        do_search(&conn).await?
     } else {
-        search_exact(&conn, &all_attrs).await?
+        (unlocked, locked)
     };
 
     if unlocked.is_empty() && locked.is_empty() {
@@ -1850,7 +1927,7 @@ async fn cmd_get(args: &[String]) -> Result<()> {
 
     // If --sync was requested, ensure the daemon has fresh data before resolving.
     if sync {
-        sync_before_get(&conn).await?;
+        preemptive_sync(&conn).await?;
     }
 
     let resolve_result = resolve_item_path(&conn, raw).await;
@@ -1864,7 +1941,7 @@ async fn cmd_get(args: &[String]) -> Result<()> {
         Err(e) if sync => {
             // Item not found — try unlocking, syncing, and re-resolving.
             trigger_unlock(&conn).await?;
-            sync_before_get(&conn).await?;
+            preemptive_sync(&conn).await?;
             resolve_item_path(&conn, raw).await.map_err(|_| e)? // If still not found, return the original error.
         }
         Err(e) => return Err(e),
@@ -1877,7 +1954,7 @@ async fn cmd_get(args: &[String]) -> Result<()> {
         // Re-sync the just-unlocked backends so the freshly-available items
         // are pulled from the remote and the metadata cache is populated.
         if sync {
-            sync_before_get(&conn).await?;
+            preemptive_sync(&conn).await?;
         }
     }
 
@@ -2080,7 +2157,7 @@ async fn cmd_inspect(args: &[String]) -> Result<()> {
     let conn = conn().await?;
 
     if sync {
-        sync_before_get(&conn).await?;
+        preemptive_sync(&conn).await?;
     }
 
     // Resolve the item; if not found and --sync is set, try unlock + re-sync first.
@@ -2089,7 +2166,7 @@ async fn cmd_inspect(args: &[String]) -> Result<()> {
         Err(e) => {
             // Item not in cache — trigger unlock (which may populate it) then retry.
             trigger_unlock(&conn).await?;
-            sync_before_get(&conn).await?;
+            preemptive_sync(&conn).await?;
             resolve_item_path(&conn, raw).await.map_err(|_| e)?
         }
     };
@@ -2097,7 +2174,7 @@ async fn cmd_inspect(args: &[String]) -> Result<()> {
     if is_locked {
         trigger_unlock(&conn).await?;
         if sync {
-            sync_before_get(&conn).await?;
+            preemptive_sync(&conn).await?;
         }
     }
 
@@ -2509,4 +2586,218 @@ async fn opportunistic_unlock(
     }
 
     Ok(failed)
+}
+
+// ---------------------------------------------------------------------------
+// rosec config — read/write config.toml
+// ---------------------------------------------------------------------------
+
+/// Supported dotted-path config keys and their human description.
+///
+/// Only settings that are safe to change at runtime (the daemon hot-reloads
+/// config.toml) and genuinely useful from the CLI are listed here.
+/// Theme colours and prompt binary paths are intentionally excluded —
+/// hand-editing TOML is cleaner for those.
+static CONFIG_KEYS: &[(&str, &str)] = &[
+    (
+        "service.refresh_interval_secs",
+        "Vault re-sync interval in seconds (0 = disabled)",
+    ),
+    (
+        "service.dedup_strategy",
+        "Deduplication strategy: newest | priority",
+    ),
+    (
+        "service.dedup_time_fallback",
+        "Tie-break field when strategy=newest: created | none",
+    ),
+    (
+        "autolock.on_logout",
+        "Lock vault when the session ends (true | false)",
+    ),
+    (
+        "autolock.on_session_lock",
+        "Lock vault when the screen locks (true | false)",
+    ),
+    (
+        "autolock.idle_timeout_minutes",
+        "Lock after N minutes of inactivity (0 or omit = disabled)",
+    ),
+    (
+        "autolock.max_unlocked_minutes",
+        "Hard cap: lock after N minutes unlocked (0 or omit = disabled)",
+    ),
+];
+
+fn print_config_help() {
+    println!(
+        "\
+rosec config - read or modify config.toml
+
+USAGE:
+    rosec config show
+    rosec config get <key>
+    rosec config set <key> <value>
+
+SUBCOMMANDS:
+    show            Print the current effective configuration as TOML
+    get <key>       Print the current value of a single setting
+    set <key> <value>
+                    Update a setting.  The daemon hot-reloads config.toml
+                    automatically — no restart required.
+
+SETTABLE KEYS:"
+    );
+    for (key, desc) in CONFIG_KEYS {
+        println!("    {key:<40}  {desc}");
+    }
+    println!(
+        "
+EXAMPLES:
+    rosec config show
+    rosec config get autolock.idle_timeout_minutes
+    rosec config set autolock.idle_timeout_minutes 30
+    rosec config set autolock.on_session_lock false
+    rosec config set service.refresh_interval_secs 120"
+    );
+}
+
+fn cmd_config(args: &[String]) -> Result<()> {
+    let sub = args.first().map(String::as_str).unwrap_or("help");
+    match sub {
+        "show" => cmd_config_show(),
+        "get" => {
+            let key = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("missing key  (try `rosec config --help`)")
+            })?;
+            cmd_config_get(key)
+        }
+        "set" => {
+            let key = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("missing key  (try `rosec config --help`)")
+            })?;
+            let value = args.get(2).ok_or_else(|| {
+                anyhow::anyhow!("missing value  (try `rosec config --help`)")
+            })?;
+            cmd_config_set(key, value)
+        }
+        "help" | "--help" | "-h" => {
+            print_config_help();
+            Ok(())
+        }
+        other => {
+            eprintln!("unknown config subcommand: {other}");
+            print_config_help();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_config_show() -> Result<()> {
+    let path = config_path();
+    if !path.exists() {
+        println!("# No config file found at {}", path.display());
+        println!("# Showing compiled-in defaults:\n");
+        let default_toml = toml::to_string_pretty(&Config::default())
+            .unwrap_or_else(|_| "# (serialization error)".to_string());
+        println!("{default_toml}");
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+    print!("{raw}");
+    Ok(())
+}
+
+fn cmd_config_get(key: &str) -> Result<()> {
+    // Validate the key is in the supported list.
+    if !CONFIG_KEYS.iter().any(|(k, _)| *k == key) {
+        eprintln!("unknown config key: {key}");
+        eprintln!("run `rosec config --help` to see supported keys");
+        std::process::exit(1);
+    }
+
+    let cfg = load_config();
+    let value = config_get_value(&cfg, key)?;
+    println!("{value}");
+    Ok(())
+}
+
+/// Read a single dotted-path value from a loaded `Config` as a display string.
+fn config_get_value(cfg: &Config, key: &str) -> Result<String> {
+    Ok(match key {
+        "service.refresh_interval_secs" => cfg
+            .service
+            .refresh_interval_secs
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "60".to_string()),
+        "service.dedup_strategy" => {
+            format!("{:?}", cfg.service.dedup_strategy).to_lowercase()
+        }
+        "service.dedup_time_fallback" => {
+            format!("{:?}", cfg.service.dedup_time_fallback).to_lowercase()
+        }
+        "autolock.on_logout" => cfg.autolock.on_logout.to_string(),
+        "autolock.on_session_lock" => cfg.autolock.on_session_lock.to_string(),
+        "autolock.idle_timeout_minutes" => cfg
+            .autolock
+            .idle_timeout_minutes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "0".to_string()),
+        "autolock.max_unlocked_minutes" => cfg
+            .autolock
+            .max_unlocked_minutes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "0".to_string()),
+        other => anyhow::bail!("unhandled key: {other}"),
+    })
+}
+
+/// Validate a config value before writing it, giving the user a clear error
+/// rather than silently writing a value the daemon will reject on reload.
+fn validate_config_value(key: &str, value: &str) -> Result<()> {
+    match key {
+        "service.dedup_strategy" => {
+            if !matches!(value, "newest" | "priority") {
+                anyhow::bail!("invalid value '{value}': must be 'newest' or 'priority'");
+            }
+        }
+        "service.dedup_time_fallback" => {
+            if !matches!(value, "created" | "none") {
+                anyhow::bail!("invalid value '{value}': must be 'created' or 'none'");
+            }
+        }
+        "autolock.on_logout" | "autolock.on_session_lock" => {
+            if !matches!(value, "true" | "false") {
+                anyhow::bail!("invalid value '{value}': must be 'true' or 'false'");
+            }
+        }
+        "service.refresh_interval_secs"
+        | "autolock.idle_timeout_minutes"
+        | "autolock.max_unlocked_minutes" => {
+            value.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("invalid value '{value}': must be a non-negative integer")
+            })?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn cmd_config_set(key: &str, value: &str) -> Result<()> {
+    // Validate the key is in the supported list.
+    if !CONFIG_KEYS.iter().any(|(k, _)| *k == key) {
+        eprintln!("unknown config key: {key}");
+        eprintln!("run `rosec config --help` to see supported keys");
+        std::process::exit(1);
+    }
+
+    // Validate the value before touching the file.
+    validate_config_value(key, value)?;
+
+    let path = config_path();
+    config_edit::set_value(&path, key, value)?;
+
+    println!("{key} = {value}");
+    Ok(())
 }

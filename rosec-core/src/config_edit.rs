@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
-use toml_edit::{DocumentMut, Item, Table, value};
+use anyhow::{bail, Context, Result};
+use toml_edit::{value, DocumentMut, Item, Table};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -168,6 +168,52 @@ pub fn optional_options_for_kind(kind: &str) -> &'static [(&'static str, &'stati
 
 /// The list of backend type strings the daemon knows about.
 pub const KNOWN_KINDS: &[&str] = &["bitwarden", "bitwarden-sm"];
+
+/// Set a single dotted-path value in the config file.
+///
+/// The key must be of the form `"section.field"` (exactly one dot).
+/// The file is created if it does not exist.  Existing comments and
+/// unrelated sections are preserved via `toml_edit`.
+///
+/// `value_str` is always written as the appropriate TOML type:
+/// - `"true"` / `"false"` → boolean
+/// - All-digit string → integer
+/// - Anything else → string
+pub fn set_value(config_path: &Path, key: &str, value_str: &str) -> Result<()> {
+    let (section, field) = key
+        .split_once('.')
+        .with_context(|| format!("key must be 'section.field', got: {key}"))?;
+
+    let raw = read_or_empty(config_path)?;
+    let mut doc: DocumentMut = raw.parse().context("failed to parse config as TOML")?;
+
+    // Ensure the section table exists.
+    let table = doc
+        .entry(section)
+        .or_insert_with(|| {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(false);
+            Item::Table(t)
+        })
+        .as_table_mut()
+        .with_context(|| format!("'{section}' exists but is not a table"))?;
+
+    // Parse the value into the most specific TOML type.
+    let item = parse_toml_value(value_str);
+    table[field] = item;
+
+    write_doc(config_path, &doc)
+}
+
+/// Parse a string into a `toml_edit::Item`, choosing the most specific type.
+fn parse_toml_value(s: &str) -> Item {
+    match s {
+        "true" => value(true),
+        "false" => value(false),
+        s if s.parse::<i64>().is_ok() => value(s.parse::<i64>().unwrap()),
+        s => value(s),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

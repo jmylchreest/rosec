@@ -139,11 +139,16 @@ async fn main() -> Result<()> {
 
                 if locked && backend.can_auto_unlock() {
                     // SM / token backends: silently sync (includes re-auth).
+                    // Use try_sync_backend: background caller, skip if a D-Bus
+                    // SyncBackend call (or another timer tick) is already running.
                     tracing::debug!(backend = %backend_id, "background: syncing locked auto-unlock backend");
-                    match cache_rebuild_state.sync_backend(&backend_id).await {
-                        Ok(count) => {
-                            tracing::debug!(backend = %backend_id, count, "background: auto-unlock+sync ok");
+                    match cache_rebuild_state.try_sync_backend(&backend_id).await {
+                        Ok(true) => {
+                            tracing::debug!(backend = %backend_id, "background: auto-unlock+sync ok");
                             did_any_work = true;
+                        }
+                        Ok(false) => {
+                            tracing::debug!(backend = %backend_id, "background: sync skipped (already in progress)");
                         }
                         Err(e) => {
                             tracing::debug!(backend = %backend_id, error = %e,
@@ -155,10 +160,15 @@ async fn main() -> Result<()> {
                     match backend.check_remote_changed().await {
                         Ok(true) => {
                             tracing::debug!(backend = %backend_id, "background: remote changed, syncing");
-                            match cache_rebuild_state.sync_backend(&backend_id).await {
-                                Ok(count) => {
-                                    tracing::debug!(backend = %backend_id, count, "background: sync ok");
+                            // Use try_sync_backend: skip if a D-Bus caller or
+                            // another timer tick already has the sync lock.
+                            match cache_rebuild_state.try_sync_backend(&backend_id).await {
+                                Ok(true) => {
+                                    tracing::debug!(backend = %backend_id, "background: sync ok");
                                     did_any_work = true;
+                                }
+                                Ok(false) => {
+                                    tracing::debug!(backend = %backend_id, "background: sync skipped (already in progress)");
                                 }
                                 Err(e) => {
                                     let err_str = e.to_string();

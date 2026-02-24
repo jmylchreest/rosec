@@ -318,3 +318,74 @@ sign → return signature`, with the private key never touching rosecd's memory.
 - Confirm prompt UX: reuse `rosec-prompt` (iced GUI) or a simpler
   notification-style dialog?  The latter is less intrusive for frequent
   operations.
+
+---
+
+## Real-time vault sync (SignalR / WebSocket)
+
+### Background
+
+rosec currently polls on a fixed `refresh_interval_secs` timer (default 60 s).
+Bitwarden non-mobile clients use a persistent SignalR WebSocket connection to
+`/notifications/hub` on the server.  The server pushes a lightweight
+"something changed" notification; the client responds by calling `/api/sync` to
+fetch the actual data.  This provides near-instant propagation of vault changes
+without constant polling.
+
+The flow:
+
+1. Client establishes a WebSocket to `wss://<server>/notifications/hub`.
+2. Server sends a SignalR handshake, then `SyncCipherUpdated` / `SyncVault` /
+   `LogOut` messages as events occur.
+3. On any sync notification the client calls `GET /api/sync` to refresh.
+4. The WebSocket is kept alive with SignalR ping frames; the client reconnects
+   on disconnect.
+
+Vaultwarden supports the same protocol; the official Bitwarden cloud uses it
+exclusively for non-mobile clients.
+
+### Why it matters for rosec
+
+With a 60 s poll interval, a password changed in the Bitwarden web vault takes
+up to a minute to appear in rosec.  Applications that cache the secret (e.g.
+`pass`, shell scripts) may use a stale value even longer.  Real-time sync
+closes this window immediately.
+
+### Implementation notes
+
+- No mature Rust SignalR client crate exists.  The protocol is simple enough to
+  implement directly: HTTP upgrade to WebSocket, send the SignalR handshake JSON
+  (`{"protocol":"json","version":1}`), then read newline-delimited JSON frames.
+  The [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) crate
+  handles the WebSocket layer.
+- Access token refresh must be wired into the WebSocket reconnect path: if the
+  session token expires the server closes the connection, and the client must
+  re-authenticate before reconnecting.
+- The existing `refresh_interval_secs` timer becomes a fallback for servers
+  that do not support SignalR (uncommon self-hosted deployments).
+- On a `LogOut` notification the daemon should lock the vault immediately,
+  matching the behaviour of the official client.
+
+### Config sketch
+
+No new top-level section is needed.  The feature is per-backend:
+
+```toml
+[[backend]]
+id   = "bitwarden"
+type = "bitwarden"
+
+[backend.options]
+email           = "user@example.com"
+realtime_sync   = true   # default: true when server supports it
+```
+
+Disabling is useful if the WebSocket connection causes issues (e.g. aggressive
+corporate proxies that terminate long-lived connections).
+
+### Relevant crates
+
+- [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) — async
+  WebSocket client (MIT).  Already in the broader Rust ecosystem; lightweight.
+- No SignalR crate is needed — the subset used by Bitwarden is simple enough to
+  parse directly from newline-delimited JSON frames.
