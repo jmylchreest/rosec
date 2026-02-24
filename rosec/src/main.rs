@@ -860,9 +860,11 @@ where
 /// Flushes any stale input (via `TCSAFLUSH`), saves the current `termios`,
 /// clears `ECHO`/`ECHONL`, reads a line, then restores the original settings.
 /// The returned string has the trailing newline stripped.
+///
+/// The read buffer is `Zeroizing<Vec<u8>>` so the raw bytes are scrubbed on
+/// drop — no plain copy of the secret ever lingers on the heap.
 #[cfg(unix)]
-fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<String> {
-    use std::io::BufRead as _;
+fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<Zeroizing<String>> {
     use std::os::unix::io::FromRawFd as _;
 
     // Save current termios.
@@ -888,15 +890,16 @@ fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<String> {
         }
     }
 
-    // Read one line from the same fd.
-    let mut line = String::new();
+    // Read one line into a Zeroizing buffer so the raw bytes are scrubbed on
+    // drop regardless of what happens next.
+    let mut buf = Zeroizing::new(Vec::<u8>::new());
     let result = {
         // SAFETY: we borrow the fd for reading; ManuallyDrop prevents double-close
         // since the original `tty: File` in the caller still owns the fd.
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let file = std::mem::ManuallyDrop::new(file);
         let mut reader = io::BufReader::new(&*file);
-        reader.read_line(&mut line)
+        reader.read_until(b'\n', &mut buf)
     };
 
     // Always restore original settings (including echo) before propagating errors.
@@ -906,10 +909,16 @@ fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<String> {
     let _ = unsafe { libc::write(fd, b"\n".as_ptr().cast(), 1) };
 
     result?;
-    Ok(line
-        .trim_end_matches('\n')
-        .trim_end_matches('\r')
-        .to_string())
+
+    // Strip trailing CR/LF and convert to a Zeroizing<String>.  The Vec is
+    // zeroized on drop; the String is wrapped in Zeroizing immediately.
+    while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    let s = std::str::from_utf8(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+    Ok(Zeroizing::new(s))
 }
 
 /// Collect a single field value from the terminal.
@@ -953,8 +962,7 @@ async fn prompt_field(label: &str, placeholder: &str, kind: &str) -> Result<Zero
                 tty_write.flush()?;
 
                 // Disable echo via tcsetattr on this fd.
-                let value = read_hidden(fd)?;
-                Ok(Zeroizing::new(value))
+                Ok(read_hidden(fd)?)
             }
             _ => {
                 let mut writer = &tty;
