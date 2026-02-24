@@ -90,6 +90,45 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Wire up real-time notification callbacks for each Bitwarden backend.
+    // Must be done after `state` is created because the callbacks need to
+    // call back into `ServiceState`.
+    for backend in state.backends_ordered() {
+        // Downcast to BitwardenBackend — only that type supports set_realtime_callbacks.
+        if let Some(bw) = backend
+            .as_any()
+            .downcast_ref::<rosec_bitwarden::BitwardenBackend>()
+        {
+            let backend_id = bw.id().to_string();
+            let sync_state = Arc::clone(&state);
+            let lock_state = Arc::clone(&state);
+            let lock_id = backend_id.clone();
+
+            bw.set_realtime_callbacks(
+                Arc::new(move || {
+                    let s = Arc::clone(&sync_state);
+                    let id = backend_id.clone();
+                    tokio::spawn(async move {
+                        match s.try_sync_backend(&id).await {
+                            Ok(true) => tracing::debug!(backend = %id, "notifications: sync triggered"),
+                            Ok(false) => tracing::debug!(backend = %id, "notifications: sync already in progress"),
+                            Err(e) => tracing::debug!(backend = %id, error = %e, "notifications: sync trigger failed"),
+                        }
+                    });
+                }),
+                Arc::new(move || {
+                    let s = Arc::clone(&lock_state);
+                    let id = lock_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = s.auto_lock().await {
+                            tracing::warn!(backend = %id, error = %e, "notifications: auto-lock failed");
+                        }
+                    });
+                }),
+            );
+        }
+    }
+
     tracing::info!("rosecd ready on session bus");
 
     // Config file watcher — hot-reload backends when config.toml changes.
@@ -801,6 +840,19 @@ async fn build_single_backend(
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            let realtime_sync = entry
+                .options
+                .get("realtime_sync")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let notifications_poll_interval_secs = entry
+                .options
+                .get("notifications_poll_interval_secs")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.max(1))
+                .unwrap_or(3600);
+
             let bw_config = rosec_bitwarden::BitwardenConfig {
                 id: entry.id.clone(),
                 email,
@@ -808,6 +860,8 @@ async fn build_single_backend(
                 base_url,
                 api_url,
                 identity_url,
+                realtime_sync,
+                notifications_poll_interval_secs,
             };
 
             Ok(Arc::new(

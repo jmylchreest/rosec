@@ -1,5 +1,6 @@
 //! VaultBackend implementation for Bitwarden.
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use rosec_core::{
@@ -14,6 +15,7 @@ use zeroize::Zeroizing;
 use crate::api::{ApiClient, ServerUrls, TwoFactorSubmission};
 use crate::crypto;
 use crate::error::BitwardenError;
+use crate::notifications::{self, NotificationsConfig};
 use crate::oauth_cred;
 use crate::vault::{CipherType, DecryptedCipher, VaultState};
 
@@ -293,6 +295,30 @@ pub struct BitwardenConfig {
     /// Explicit identity URL override (highest priority).
     /// Must be set together with `api_url` to take effect.
     pub identity_url: Option<String>,
+    /// Enable real-time sync via SignalR WebSocket (default: `true`).
+    ///
+    /// When `true`, the backend connects to the Bitwarden notifications hub
+    /// (`/notifications/hub`) on unlock and listens for server-push events.
+    /// On receiving a cipher-update or sync nudge, the `on_sync` callback is
+    /// invoked.  Set to `false` to fall back to polling-only behaviour.
+    pub realtime_sync: bool,
+    /// Fallback poll interval in seconds (default: `3600`).
+    ///
+    /// How often the background timer fires to re-sync the vault even when no
+    /// SignalR nudge has been received.  If `realtime_sync = true`, this acts
+    /// as a safety net; if `realtime_sync = false`, it is the only sync trigger.
+    pub notifications_poll_interval_secs: u64,
+}
+
+/// Handle to a running notifications background task.
+///
+/// Dropping this cancels the task: the watch sender is dropped, which closes
+/// the channel and causes the task to exit on its next cancellation check.
+struct NotificationsHandle {
+    /// Dropping this sender signals the notifications task to stop.
+    _cancel_tx: tokio::sync::watch::Sender<()>,
+    /// Join handle for the spawned task (used only for clean shutdown).
+    _task: tokio::task::JoinHandle<()>,
 }
 
 /// Bitwarden vault backend for rosec.
@@ -304,6 +330,12 @@ pub struct BitwardenBackend {
     config: BitwardenConfig,
     api: ApiClient,
     state: Mutex<Option<AuthState>>,
+    /// Active notifications task, if any.  `None` when locked or
+    /// `realtime_sync = false`.  Replaced on each unlock.
+    notifications: Mutex<Option<NotificationsHandle>>,
+    /// Callbacks set after construction (once `ServiceState` is available).
+    on_sync: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
+    on_lock: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
 }
 
 /// Internal authenticated state.
@@ -334,10 +366,20 @@ impl BitwardenBackend {
     /// 4. Default → official US cloud.
     pub fn new(config: BitwardenConfig) -> Result<Self, BitwardenError> {
         let urls = match (&config.api_url, &config.identity_url) {
-            (Some(api), Some(identity)) => ServerUrls {
-                api_url: api.clone(),
-                identity_url: identity.clone(),
-            },
+            (Some(api), Some(identity)) => {
+                // Derive notifications URL from api_url by stripping a trailing
+                // "/api" segment and appending "/notifications", or fall back to
+                // an adjacent path if the URL doesn't end in "/api".
+                let notifications_url = api
+                    .strip_suffix("/api")
+                    .map(|base| format!("{base}/notifications"))
+                    .unwrap_or_else(|| format!("{api}/notifications"));
+                ServerUrls {
+                    api_url: api.clone(),
+                    identity_url: identity.clone(),
+                    notifications_url,
+                }
+            }
             _ => match &config.base_url {
                 Some(base) => ServerUrls::from_base(base),
                 None => match config.region {
@@ -353,7 +395,23 @@ impl BitwardenBackend {
             config,
             api,
             state: Mutex::new(None),
+            notifications: Mutex::new(None),
+            on_sync: std::sync::Mutex::new(None),
+            on_lock: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Set the callbacks used by the real-time notifications task.
+    ///
+    /// Must be called after construction, once `ServiceState` is available.
+    /// Safe to call even when `realtime_sync = false` (no-op in that case).
+    pub fn set_realtime_callbacks(
+        &self,
+        on_sync: Arc<dyn Fn() + Send + Sync + 'static>,
+        on_lock: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) {
+        *self.on_sync.lock().expect("on_sync mutex poisoned") = Some(on_sync);
+        *self.on_lock.lock().expect("on_lock mutex poisoned") = Some(on_lock);
     }
 
     /// Perform the full authentication + sync flow.
@@ -909,6 +967,10 @@ impl BitwardenBackend {
 
 #[async_trait::async_trait]
 impl VaultBackend for BitwardenBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     /// Returns the instance ID from config (e.g. `"personal"`, `"work"`).
     /// This is what distinguishes multiple Bitwarden accounts from each other.
     fn id(&self) -> &str {
@@ -999,14 +1061,56 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
             .map_err(BackendError::from)?;
 
         let ciphers = auth_state.vault.ciphers().len();
-        let mut guard = self.state.lock().await;
-        *guard = Some(auth_state);
+
+        // Start the notifications task before storing auth state so the
+        // access token is still accessible here (not moved into AuthState).
+        let notifications_handle = if self.config.realtime_sync {
+            let access_token = auth_state.access_token.clone();
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
+            let on_sync = self
+                .on_sync
+                .lock()
+                .expect("on_sync mutex poisoned")
+                .clone();
+            let on_lock = self
+                .on_lock
+                .lock()
+                .expect("on_lock mutex poisoned")
+                .clone();
+            let task = notifications::start(NotificationsConfig {
+                notifications_url: self.api.notifications_url().to_string(),
+                access_token,
+                backend_id: self.config.id.clone(),
+                on_sync,
+                on_lock,
+                cancel_rx,
+            });
+            Some(NotificationsHandle {
+                _cancel_tx: cancel_tx,
+                _task: task,
+            })
+        } else {
+            None
+        };
+
+        let mut state_guard = self.state.lock().await;
+        *state_guard = Some(auth_state);
+        drop(state_guard);
+
+        let mut notif_guard = self.notifications.lock().await;
+        *notif_guard = notifications_handle;
+        drop(notif_guard);
 
         info!(ciphers, "Bitwarden vault unlocked");
         Ok(())
     }
 
     async fn lock(&self) -> Result<(), BackendError> {
+        // Stop the notifications task first (drop cancels it).
+        let mut notif_guard = self.notifications.lock().await;
+        *notif_guard = None;
+        drop(notif_guard);
+
         let mut guard = self.state.lock().await;
         *guard = None;
         info!("Bitwarden vault locked");
@@ -1207,6 +1311,8 @@ mod tests {
             base_url: None,
             api_url: None,
             identity_url: None,
+            realtime_sync: false, // no network in unit tests
+            notifications_poll_interval_secs: 3600,
         }
     }
 

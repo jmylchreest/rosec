@@ -321,6 +321,439 @@ sign → return signature`, with the private key never touching rosecd's memory.
 
 ---
 
+## WASM backend host (`rosec-wasm`)
+
+### Motivation
+
+Several password managers (1Password, Proton Pass, Dashlane, etc.) either have
+official Go SDKs or are best reached by community Go libraries.  Rather than
+writing a bespoke Rust HTTP+crypto client for every provider, a WASM plugin host
+would let backends be written in **any language that compiles to WASM** — Go
+(via TinyGo), Rust, Python, or C — and loaded at runtime as sandboxed modules.
+
+This gives rosec a general-purpose extension mechanism:
+
+- Third-party backends without modifying the rosec source tree.
+- Backend logic written in Go (e.g. wrapping the official 1Password Go SDK or
+  the Proton Pass Go library) compiled to `.wasm` and dropped into a directory.
+- Tight sandboxing: the WASM module cannot access the filesystem, network, or
+  process memory beyond what the host explicitly grants through capabilities.
+- ABI stability: the WIT interface between host and guest is versioned and
+  language-agnostic.
+
+### Two viable embedding approaches
+
+#### Option A — WASI Component Model + wasmtime (recommended)
+
+The [WebAssembly Component Model](https://component-model.bytecodealliance.org/)
+(WASI Preview 2 / `wasip2`) is the emerging standard for polyglot WASM plugins.
+Interfaces are defined in **WIT** (WASM Interface Type), and `wit-bindgen`
+generates host and guest bindings automatically.
+
+**How it works:**
+
+1. Define a `vault-backend` WIT world in `rosec-wasm/wit/vault-backend.wit`:
+
+```wit
+package rosec:vault-backend@0.1.0;
+
+world vault-backend {
+    /// Called once with the raw TOML options table for this backend entry.
+    export init: func(options: list<tuple<string, string>>) -> result<_, string>;
+
+    /// Return current lock state.
+    export is-locked: func() -> bool;
+
+    /// Unlock with a password or token.
+    export unlock: func(credential: string) -> result<_, string>;
+
+    /// Lock and clear in-memory secrets.
+    export lock: func();
+
+    /// Return all vault items as a flat JSON array.
+    export list-items: func() -> result<string, string>;
+
+    /// Sync from the remote source.
+    export sync: func() -> result<_, string>;
+}
+```
+
+2. The host (`rosec-wasm`) embeds `wasmtime` and, on startup, instantiates each
+   `.wasm` file found in the configured plugin directory.  Each instantiated
+   component becomes a `VaultBackend` adaptor.
+
+3. A Go backend author writes a TinyGo program, imports `wit-bindgen`-generated
+   Go bindings, implements the exported functions, and compiles:
+
+```bash
+tinygo build -target=wasip2 -o 1password.wasm ./cmd/1password-plugin/
+```
+
+The resulting `.wasm` is placed in `~/.config/rosec/plugins/` and referenced
+from `config.toml`:
+
+```toml
+[[backend]]
+id   = "1password"
+type = "wasm"
+
+[backend.options]
+plugin = "~/.config/rosec/plugins/1password.wasm"
+connect_url = "https://op-connect.internal:8080"
+token       = "..."     # stored encrypted by the host
+```
+
+**Go/TinyGo status (Feb 2026):**
+TinyGo v0.34+ supports the `wasip2` target and the Component Model natively
+(via `wasm-tools` component wrapping).  Standard Go (`GOOS=wasip1`) targets
+WASI Preview 1 (core modules, not components); `GOOS=wasip2` is tracked in
+[golang/go#65333](https://github.com/golang/go/issues/65333) and not yet
+shipped.  TinyGo is therefore the recommended Go compiler for guest plugins
+today; it supports most of the standard library needed for HTTP clients.
+
+**Rust crates needed (host):**
+
+| Crate | Role | License |
+|---|---|---|
+| `wasmtime` | WASM/WASI runtime + Component Model embedding | Apache-2.0 |
+| `wasmtime-wasi` | WASI Preview 2 host implementation | Apache-2.0 |
+| `wit-bindgen` | Generate Rust host bindings from WIT | Apache-2.0/MIT |
+
+**Security properties:**
+- The WASM sandbox prevents the plugin from reading `/proc`, opening arbitrary
+  file descriptors, or forking processes.
+- Network access is capability-gated: the host can grant the plugin a pre-opened
+  `wasi:http/outgoing-handler` (HTTP client only, no raw sockets).
+- Filesystem access: the host grants only an explicit pre-opened directory (for
+  token cache), nothing else.
+- Secrets returned from the guest (`list-items`) are JSON strings in guest
+  memory; the host copies them out and then zeroizes the host-side buffer after
+  parsing, before storing in `Zeroizing<Vec<u8>>`.
+
+#### Option B — Extism (simpler, less formal)
+
+[Extism](https://extism.org) is a higher-level plugin framework built on
+Wasmtime.  It provides a unified host SDK and per-language PDKs (Plug-in
+Development Kits) with a simple `input → output` call model.
+
+**Advantages over raw Component Model:**
+- Simpler API: no WIT file, no `wit-bindgen` step.
+- Go PDK (`extism/go-pdk`) compiles via TinyGo to a working `.wasm` today.
+- Host SDK (`extism` Rust crate) is a single dependency with an ergonomic API.
+- Good documentation and a larger community of plugin authors.
+
+**Disadvantages:**
+- Uses a custom ABI (not the standard Component Model) — interoperability with
+  non-Extism hosts is zero.
+- Extism's data model is byte-buffer–based; structured types must be
+  JSON-serialised manually (no generated type bindings).
+- Less capability-granular than WASI Preview 2 — HTTP is allowed or not, rather
+  than per-origin.
+
+**Sketch:**
+
+```rust
+// Host (rosec-wasm/src/extism_backend.rs)
+use extism::{Plugin, Manifest, Wasm};
+
+let wasm = Wasm::file("~/.config/rosec/plugins/1password.wasm");
+let manifest = Manifest::new([wasm]).with_allowed_host("op-connect.internal");
+let mut plugin = Plugin::new(&manifest, [], true)?;
+
+let items_json: String = plugin.call("list_items", options_json)?;
+```
+
+```go
+// Guest (Go / TinyGo, compiled with extism/go-pdk)
+package main
+
+import (
+    "github.com/extism/go-pdk"
+    "encoding/json"
+)
+
+//go:export list_items
+func listItems() int32 {
+    cfg := pdk.GetConfig("connect_url")
+    // ... fetch and decrypt items from 1Password Connect ...
+    out, _ := json.Marshal(items)
+    pdk.OutputString(string(out))
+    return 0
+}
+func main() {}
+```
+
+### Recommended path
+
+Start with **Extism** (Option B) to prove the concept quickly — the Go PDK
+works today with TinyGo and the Rust host SDK is mature.  Migrate to the
+**Component Model** (Option A) once `GOOS=wasip2` lands in standard Go (likely
+Go 1.25–1.26) and the toolchain stabilises, giving a formally typed interface
+and standard WASI capability model.
+
+### Config sketch
+
+```toml
+[[backend]]
+id   = "1password-wasm"
+type = "wasm"
+
+[backend.options]
+# Path to the compiled .wasm plugin.  Relative paths are resolved from
+# $XDG_CONFIG_HOME/rosec/plugins/.
+plugin = "1password.wasm"
+
+# All remaining options are forwarded to the plugin's init() call as a
+# flat string→string map.  The plugin is responsible for interpreting them.
+connect_url = "https://op-connect.internal:8080"
+# token is stored encrypted by the host using the same credential store
+# as the bitwarden backend; the plugin receives the decrypted value.
+token       = "eyJ..."
+```
+
+### Security considerations
+
+- **Plugin provenance**: plugins are unsigned arbitrary code.  The host must
+  warn loudly if a plugin path is world-writable.  A future `plugin_sha256`
+  config field could pin expected content hashes.
+- **Secret exposure**: the host decrypts stored credentials before passing them
+  to the plugin's `init()` call.  The decrypted bytes live in the host's
+  address space only long enough to copy into WASM linear memory, then are
+  zeroized.  The plugin itself never has access to the host's key material.
+- **No `wasi:filesystem` for plugins**: plugins receive only a virtual temp
+  directory and the specific HTTP hosts they declare.  They cannot read
+  `~/.config/rosec/` or the host's secret store.
+- **Output sanitisation**: JSON returned by the plugin is parsed by the host
+  before being stored in the vault cache.  Malformed output returns an error;
+  it does not crash the daemon.
+
+### Relevant crates
+
+| Crate | Purpose | License |
+|---|---|---|
+| `wasmtime` | WASI Component Model runtime | Apache-2.0 |
+| `wasmtime-wasi` | WASI host implementation | Apache-2.0 |
+| `extism` | Higher-level plugin host (Option B) | BSD-3 |
+| `wit-bindgen` | WIT → Rust binding codegen (Option A) | Apache-2.0/MIT |
+
+---
+
+## 1Password backend (`rosec-1password`)
+
+### Motivation
+
+[1Password](https://1password.com) is one of the most widely used password
+managers, particularly in team and enterprise contexts.  Adding a rosec backend
+for it would let users access 1Password secrets through the standard Secret
+Service API alongside Bitwarden or other backends.
+
+Two integration paths exist, with very different trade-offs:
+
+### Option A — 1Password Connect (recommended first target)
+
+1Password Connect is a self-hosted REST server that exposes vault contents over
+a simple, fully-documented HTTP API authenticated with a static bearer token.
+
+**Requirements:**
+- A 1Password Teams or Business plan (Connect is not available on Personal).
+- A Connect server deployed on your own infrastructure (Docker image provided
+  by 1Password).
+- A Connect server access token scoped to the vaults you want to expose.
+
+**Authentication:**
+All requests carry an `Authorization: Bearer <token>` header.  There is no
+session negotiation, no SRP, no KDF — the token is static and issued from the
+1Password web portal.  The token is stored encrypted at rest (same pattern as
+`rosec-bitwarden`'s OAuth credential store).
+
+**Key API endpoints:**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/vaults` | List accessible vaults |
+| `GET /v1/vaults/{vaultId}/items` | List items in a vault |
+| `GET /v1/vaults/{vaultId}/items/{itemId}` | Fetch a single item (with fields) |
+| `GET /v1/vaults/{vaultId}/items?filter=title eq "..."` | Server-side search |
+
+The response schema is a well-documented JSON format.  Items have typed fields
+(username, password, TOTP, URL, custom, etc.) that map cleanly onto the rosec
+attribute model.
+
+**Why this path is attractive:**
+- The API is stable, publicly documented, and versioned.
+- No proprietary binary is required.
+- Pure HTTP — reqwest already a workspace dep, no new crypto.
+- A Rust crate exists: [`connect-1password`](https://crates.io/crates/connect-1password)
+  (Apache-2.0/MIT), though the implementation is simple enough to do directly
+  from the published OpenAPI spec.
+- `can_auto_unlock()` returns `true` — the bearer token IS the credential; no
+  master-password prompt is needed.
+
+**Limitations:**
+- Requires a 1Password Business/Teams plan and self-hosted Connect server.
+- Not usable for personal 1Password accounts on the cloud.
+- Items are transmitted decrypted by the Connect server — the security boundary
+  is the Connect server itself, not end-to-end encryption.
+
+### Option B — Service Accounts / SDK (personal cloud accounts)
+
+1Password Service Accounts are JWT-based machine credentials that authenticate
+directly against the 1Password cloud.  The official 1Password SDKs (Go, JS,
+Python) are thin wrappers around a proprietary core library (`libop_uniffi_core`)
+that handles the end-to-end encrypted vault protocol client-side.
+
+A community crate [`corteq-onepassword`](https://crates.io/crates/corteq-onepassword)
+provides FFI bindings to this core library for Rust.  However:
+
+- The underlying `libop_uniffi_core` is **proprietary** (1Password's own
+  license, similar situation to Bitwarden's SM SDK).
+- It ships as a pre-built binary (`libop_uniffi_core.so`) that must be linked
+  at runtime — not a pure Rust solution.
+- The license terms for redistribution and use in open-source projects are
+  unclear.
+
+For these reasons, Option B would follow the same pattern as `rosec-bitwarden-sm`:
+a separate workspace crate (`rosec-1password-sa`) gated behind a feature flag,
+with its own license declaration, letting packagers exclude it cleanly.
+
+### Implementation plan (Option A first)
+
+1. New workspace crate `rosec-1password` (MIT, no feature gate needed — pure HTTP).
+2. `OnePasswordConfig` with `id`, `connect_url`, `token` (stored encrypted).
+3. `OnePasswordBackend` implementing `VaultBackend`:
+   - `can_auto_unlock() = true` (token-based, no interactive prompt).
+   - `unlock()` validates the token against `GET /v1/vaults` and caches the
+     vault list.
+   - `sync()` re-fetches vault item lists.
+   - `get_secret()` fetches the item and returns the primary secret field
+     (password, or first secret-type field).
+4. Field → attribute mapping:
+   - `type` = item category (login, password, creditCard, identity, etc.)
+   - `username`, `password`, `totp`, `uri` — standard Login fields
+   - `custom.<field_label>` — custom fields (concealed → sensitive, text → public)
+   - `notes` — always sensitive
+
+### Relevant crates
+
+- [`connect-1password`](https://crates.io/crates/connect-1password) — Rust
+  Connect SDK (Apache-2.0/MIT); evaluating for reuse vs direct reqwest calls.
+- [`corteq-onepassword`](https://crates.io/crates/corteq-onepassword) — FFI
+  wrapper for the official SDK core (Option B only; proprietary core dep).
+- [`reqwest`](https://crates.io/crates/reqwest) — already a workspace dep.
+
+### Open questions
+
+- Should `rosec-1password` support both Connect and Service Accounts in a single
+  crate (distinguished by `type = "1password-connect"` vs `"1password-sa"`)?
+  Probably yes for user clarity, but Option B needs a separate crate for the
+  license isolation.
+- Does 1Password Connect support a change-notification mechanism (webhooks or
+  SSE) similar to Bitwarden's SignalR hub?  If so, a `notifications.rs` task
+  could provide real-time sync.  Otherwise polling is sufficient given the
+  Connect use case (infrastructure automation rather than interactive desktop
+  use).
+
+---
+
+## Proton Pass backend (`rosec-proton-pass`)
+
+### Motivation
+
+[Proton Pass](https://proton.me/pass) is a privacy-focused password manager
+from the team behind ProtonMail.  It stores vaults end-to-end encrypted on
+Proton's servers and offers apps for all major platforms.  Adding it as a
+rosec backend would let users who choose Proton's ecosystem access their
+secrets through the standard Secret Service API — the same way the Bitwarden
+backend works today.
+
+### Authentication model
+
+Proton Pass uses Proton's SRP-based authentication (Secure Remote Password
+with an extra client-proof step).  The client derives a session key from the
+user's password using PBKDF2 (or Argon2id on newer accounts), then exchanges
+proofs with the identity server to obtain an access token.  Two-factor
+authentication (TOTP or hardware key) is supported at this step.
+
+The session token is short-lived.  The client must refresh it using a refresh
+token, or re-authenticate when the session expires.  The device must be
+registered (similar to Bitwarden's device verification flow) before it can
+receive an access token.
+
+### Vault encryption
+
+Vault data is doubly encrypted:
+
+1. **Address key**: derived from the primary key material, used to decrypt the
+   vault "share" keys.
+2. **Item keys**: per-item symmetric keys encrypted with the share key.  All
+   cipher text uses PGP (OpenPGP message format) with the item key.
+
+This means the Rust implementation needs:
+- SRP proof computation (PBKDF2 / Argon2 + modular exponentiation)
+- OpenPGP decryption for item content (the
+  [`pgp`](https://crates.io/crates/pgp) crate, MIT)
+- AES-GCM / AES-CBC for the inner share-key layer
+
+The `rosec-proton-pass` crate would mirror the structure of `rosec-bitwarden`:
+separate modules for the HTTP client, crypto, vault state, and
+`VaultBackend` implementation.
+
+### API surface
+
+Proton Pass does not publish an official API specification, but the protocol
+is partially documented by reverse engineering and community projects (notably
+[pass-rust-core](https://github.com/ProtonMail/pass-rust-core) and the
+[gopass-bridge](https://github.com/nicholasgasior/gopass-bridge) project).
+The key endpoints are:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /auth/v4/info` | SRP server challenge |
+| `POST /auth/v4` | SRP proof exchange → access + refresh tokens |
+| `GET /pass/v1/share` | List vault shares |
+| `GET /pass/v1/share/{shareId}/item` | List encrypted items in a share |
+| `GET /core/v4/keys` | Fetch user key material |
+
+### Implementation considerations
+
+- **License**: The `rosec-proton-pass` crate would be MIT-licensed (matching
+  the rest of rosec).  The SRP and OpenPGP implementations it uses are all
+  OSI-approved.  No proprietary SDK is required.
+- **Feature flag**: gate behind `proton-pass` feature, same pattern as
+  `bitwarden-sm`, so users who do not use Proton Pass incur no extra
+  dependencies.
+- **Credentials storage**: the session access/refresh token pair should be
+  stored encrypted at rest using the same `oauth_cred` pattern used by the
+  Bitwarden backend (derive a storage key from the master password, then
+  HMAC-authenticated AES-CBC).
+- **SRP crate**: [`srp`](https://crates.io/crates/srp) (MIT/Apache-2) handles
+  the SRP proof computation; Proton uses a custom group (2048-bit MODP).
+- **Two-factor**: TOTP tokens can be submitted as an additional field in the
+  auth flow, using the same `TwoFactorSubmission` pattern as Bitwarden.
+- **Read-only**: rosec is read-only; write operations (creating/updating items)
+  are out of scope.
+
+### Relevant crates
+
+- [`pgp`](https://crates.io/crates/pgp) — pure Rust OpenPGP (MIT)
+- [`srp`](https://crates.io/crates/srp) — SRP-6a implementation (MIT/Apache-2)
+- [`aes-gcm`](https://crates.io/crates/aes-gcm) — AES-GCM (MIT/Apache-2)
+- [`reqwest`](https://crates.io/crates/reqwest) — already a workspace dep
+
+### Open questions
+
+- Proton's API is not versioned in a stable, public way — the implementation
+  would need to track API changes.  Community projects like
+  [pass-rust-core](https://github.com/ProtonMail/pass-rust-core) are the
+  primary reference.
+- Does Proton Pass have a device-registration step analogous to Bitwarden's
+  personal API key flow?  If so, the `RegistrationInfo` trait method covers it.
+- Real-time sync: Proton Pass uses Server-Sent Events (SSE) rather than
+  SignalR.  A similar `notifications.rs` task could listen on the SSE stream
+  and call `try_sync_backend` on events.
+
+---
+
 ## Real-time vault sync (SignalR / WebSocket)
 
 ### Background

@@ -282,6 +282,14 @@ pub struct ItemAttributes {
 
 #[async_trait::async_trait]
 pub trait VaultBackend: Send + Sync {
+    /// Return `self` as `&dyn std::any::Any` to allow downcasting to concrete types.
+    ///
+    /// Implementations should return `self` directly:
+    /// ```ignore
+    /// fn as_any(&self) -> &dyn std::any::Any { self }
+    /// ```
+    fn as_any(&self) -> &dyn std::any::Any;
+
     fn id(&self) -> &str;
     fn name(&self) -> &str;
 

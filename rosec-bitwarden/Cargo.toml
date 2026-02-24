@@ -18,6 +18,9 @@ async-trait = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 
+# Real-time notifications
+signalr-client = "0.2.1"
+
 # HTTP client
 reqwest = { workspace = true }
 

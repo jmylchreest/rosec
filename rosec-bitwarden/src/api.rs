@@ -18,6 +18,13 @@ use crate::error::BitwardenError;
 pub struct ServerUrls {
     pub api_url: String,
     pub identity_url: String,
+    /// Base URL for the real-time notifications hub (`/notifications`).
+    ///
+    /// The hub WebSocket endpoint is `{notifications_url}/hub`.
+    /// For official Bitwarden cloud, this is a separate subdomain
+    /// (`notifications.bitwarden.com`).  For self-hosted / Vaultwarden it is
+    /// derived from `base_url` as `{base}/notifications`.
+    pub notifications_url: String,
 }
 
 impl ServerUrls {
@@ -27,6 +34,7 @@ impl ServerUrls {
         Self {
             api_url: format!("{base}/api"),
             identity_url: format!("{base}/identity"),
+            notifications_url: format!("{base}/notifications"),
         }
     }
 
@@ -35,6 +43,7 @@ impl ServerUrls {
         Self {
             api_url: "https://api.bitwarden.com".to_string(),
             identity_url: "https://identity.bitwarden.com".to_string(),
+            notifications_url: "https://notifications.bitwarden.com".to_string(),
         }
     }
 
@@ -43,6 +52,7 @@ impl ServerUrls {
         Self {
             api_url: "https://api.bitwarden.eu".to_string(),
             identity_url: "https://identity.bitwarden.eu".to_string(),
+            notifications_url: "https://notifications.bitwarden.eu".to_string(),
         }
     }
 }
@@ -70,6 +80,13 @@ impl ApiClient {
             urls,
             device_id,
         })
+    }
+
+    /// Return the notifications hub base URL for this server configuration.
+    ///
+    /// The actual WebSocket endpoint is `{notifications_url}/hub`.
+    pub fn notifications_url(&self) -> &str {
+        &self.urls.notifications_url
     }
 
     /// Step 1: Prelogin — get KDF parameters for the user.

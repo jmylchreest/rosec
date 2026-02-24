@@ -38,6 +38,7 @@ pub mod backend;
 pub mod cipher;
 pub mod crypto;
 pub mod error;
+pub mod notifications;
 pub mod oauth_cred;
 pub mod vault;
 

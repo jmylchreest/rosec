@@ -197,6 +197,10 @@ impl SmBackend {
 
 #[async_trait::async_trait]
 impl VaultBackend for SmBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn id(&self) -> &str {
         &self.config.id
     }

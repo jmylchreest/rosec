@@ -1588,6 +1588,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl VaultBackend for MockBackend {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         fn id(&self) -> &str {
             "mock"
         }
