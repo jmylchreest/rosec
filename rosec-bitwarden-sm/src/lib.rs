@@ -338,10 +338,22 @@ stored locally — you will not need to enter it again.",
             new_token
         } else {
             // Normal unlock: derive key from password and decrypt stored token.
-            let cred = rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key)
-                .map_err(|e| BackendError::Unavailable(format!("failed to load SM token: {e}")))?
-                .ok_or(BackendError::RegistrationRequired)?;
-            cred.client_secret
+            // A decryption/MAC failure means the stored credential was encrypted
+            // with a different key (e.g. the old machine-key-only KDF before the
+            // passphrase-in-KDF change).  Treat it the same as "no credential
+            // stored" — the user must re-enter the access token via the
+            // registration flow.  Log the underlying reason at debug level so
+            // it is visible when tracing is enabled, but do not surface it to
+            // the user (it would be confusing and contains no actionable detail).
+            match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
+                Ok(Some(cred)) => cred.client_secret,
+                Ok(None) => return Err(BackendError::RegistrationRequired),
+                Err(e) => {
+                    debug!(backend = %self.config.id,
+                        "credential decryption failed, re-registration required: {e}");
+                    return Err(BackendError::RegistrationRequired);
+                }
+            }
         };
 
         let auth = self.do_unlock(token.as_str()).await?;

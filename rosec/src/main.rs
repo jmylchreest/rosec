@@ -774,22 +774,29 @@ async fn collect_tty(fields: &[PromptField<'_>]) -> Result<HashMap<String, Zeroi
 /// Prints braille spinner frames at ~80 ms intervals until the future resolves,
 /// then clears the spinner line.  If stderr is not a terminal the spinner is
 /// skipped and `fut` runs silently.
+///
+/// Uses an `Arc<AtomicBool>` stop flag so the `spawn_blocking` thread exits
+/// cleanly — `JoinHandle::abort()` has no effect on blocking tasks.
 async fn with_spinner<F, T>(msg: &str, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
     use std::io::IsTerminal as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     if !std::io::stderr().is_terminal() {
         return fut.await;
     }
 
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let msg = msg.to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
 
-    // Spawn the spinner loop as a task; cancel it when the future completes.
     let spinner = tokio::task::spawn_blocking(move || {
         let mut i = 0usize;
-        loop {
+        while !stop_clone.load(Ordering::Relaxed) {
             let frame = FRAMES[i % FRAMES.len()];
             // \r returns to start of line; spaces overwrite previous content.
             eprint!("\r{frame} {msg}   ");
@@ -801,7 +808,9 @@ where
 
     let result = fut.await;
 
-    spinner.abort();
+    // Signal the spinner thread to stop and wait for it to exit cleanly.
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.await;
     // Clear the spinner line.
     eprint!("\r\x1b[2K");
     let _ = std::io::stderr().flush();
