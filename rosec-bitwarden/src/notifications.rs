@@ -9,7 +9,8 @@
 //!
 //! Bitwarden uses the SignalR JSON hub protocol:
 //! - Negotiate: `POST {notifications_url}/hub/negotiate?negotiateVersion=1`
-//! - Connect:   `wss://{notifications_host}/hub?access_token=<jwt>`
+//!   with `Authorization: Bearer <jwt>` header
+//! - Connect:   `wss://{notifications_host}/hub`
 //! - After HTTP upgrade: JSON handshake `{"protocol":"json","version":1}\x1e`
 //! - Messages are `\x1e`-delimited JSON frames.
 //!
@@ -61,8 +62,8 @@ pub struct NotificationsConfig {
     /// `https://notifications.bitwarden.com`.
     /// The hub path `/hub` is appended automatically.
     pub notifications_url: String,
-    /// Current JWT access token — embedded as `?access_token=<jwt>` in
-    /// both the negotiate POST and the WebSocket URL.
+    /// Current JWT access token — sent as `Authorization: Bearer <jwt>` on
+    /// the negotiate POST.  Never embedded in a URL.
     pub access_token: zeroize::Zeroizing<String>,
     /// Backend instance ID (for log messages only).
     pub backend_id: String,
@@ -174,9 +175,14 @@ async fn notifications_loop(mut config: NotificationsConfig) {
                 // First-connect failure: the server likely doesn't support
                 // this hub endpoint (old Vaultwarden, aggressive proxy, …).
                 // Degrade to poll-only rather than retrying indefinitely.
+                //
+                // NOTE: `reason` may originate from the signalr-client crate
+                // and could theoretically contain URL fragments.  Redact any
+                // `access_token=…` query parameter defensively.
+                let safe_reason = redact_token(&reason);
                 warn!(
                     backend = %backend_id,
-                    %reason,
+                    reason = %safe_reason,
                     "notifications: initial connection failed, falling back to poll-only"
                 );
                 return;
@@ -198,31 +204,42 @@ enum SessionResult {
 async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
     let backend_id = &config.backend_id;
 
-    // Build the hub path including the access token query param.
-    // signalr-client constructs the full URL as `{schema}://{domain}/{hub}`,
-    // so `hub` must include the path and query string after the domain.
-    let (domain, hub_with_token) =
-        match split_for_signalr(&config.notifications_url, &config.access_token) {
-            Ok(pair) => pair,
-            Err(e) => return SessionResult::ConnectFailed(e),
-        };
+    // Split the notifications URL into domain + clean hub path (no token).
+    // The signalr-client crate builds:
+    //   negotiate URL  →  `{schema}://{domain}/{hub}/negotiate?negotiateVersion=1`
+    //   WebSocket URL  →  `{ws_schema}://{domain}/{hub}`
+    // A `?access_token=…` suffix in `hub` would corrupt the negotiate URL by
+    // appending `/negotiate?…` after a query string.  We pass the token as an
+    // `Authorization: Bearer` header on the negotiate POST instead.
+    let (domain, hub) = match split_for_signalr(&config.notifications_url) {
+        Ok(pair) => pair,
+        Err(e) => return SessionResult::ConnectFailed(e),
+    };
 
     let is_secure = config.notifications_url.starts_with("https://");
 
     debug!(
         backend = %backend_id,
         %domain,
-        hub = %hub_with_token,
+        %hub,
         "notifications: connecting to hub"
     );
 
     // Channel used by DropSignaller to tell us when the WS drops.
     let (drop_tx, mut drop_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    let connect_result = SignalRClient::connect_with(&domain, &hub_with_token, |c| {
+    // Take the token by value so it can be moved into the closure without
+    // keeping a borrow on `config`.  We clone only what we need here.
+    let bearer_token = config.access_token.as_str().to_owned();
+
+    let connect_result = SignalRClient::connect_with(&domain, &hub, |c| {
         if !is_secure {
             c.unsecure();
         }
+        // Pass the JWT as a Bearer header on the negotiate POST.
+        // This is the standard SignalR authentication path and avoids
+        // embedding the token in the negotiate URL.
+        c.authenticate_bearer(bearer_token.clone());
         // Disable automatic reconnection — we manage retries ourselves so we
         // can check cancellation and apply our own backoff.
         c.with_reconnection_policy(ReconnectionConfig {
@@ -316,19 +333,49 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
 // URL helpers
 // ---------------------------------------------------------------------------
 
+/// Replace any `access_token=<value>` occurrence in `s` with a placeholder.
+///
+/// Used to sanitise error strings that may have been built from URLs by the
+/// `signalr-client` crate before they reach log output.
+fn redact_token(s: &str) -> std::borrow::Cow<'_, str> {
+    // Simple scan: find the key, then replace everything up to the next `&`
+    // or end-of-string with a fixed placeholder.
+    if !s.contains("access_token=") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    // Replace all occurrences with a regex-free approach.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find("access_token=") {
+        out.push_str(&rest[..pos]);
+        out.push_str("access_token=<redacted>");
+        let after = &rest[pos + "access_token=".len()..];
+        // Skip to the next `&` (query param separator) or end of string.
+        let skip = after.find('&').unwrap_or(after.len());
+        rest = &after[skip..];
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Split a `https://host/base` notifications URL into the
-/// `(domain, hub_path_with_token)` pair that `SignalRClient::connect_with`
-/// expects.
+/// `(domain, hub_path)` pair that `SignalRClient::connect_with` expects.
+///
+/// The returned hub path is **clean** — no `?access_token=…` suffix.
+/// Bearer authentication for the negotiate POST is configured separately
+/// via `authenticate_bearer`.  The `signalr-client` crate constructs:
+///
+/// - negotiate URL: `{schema}://{domain}/{hub}/negotiate?negotiateVersion=1`
+/// - WebSocket URL: `{ws_schema}://{domain}/{hub}`
+///
+/// The hub path must not contain a `?` or the negotiate URL becomes invalid.
 ///
 /// Examples:
-/// - `("https://notifications.bitwarden.com", "TOKEN")`
-///   → `("notifications.bitwarden.com", "hub?access_token=TOKEN")`
-/// - `("https://vault.example.com/notifications", "TOKEN")`
-///   → `("vault.example.com", "notifications/hub?access_token=TOKEN")`
-fn split_for_signalr(
-    notifications_url: &str,
-    access_token: &str,
-) -> Result<(String, String), String> {
+/// - `"https://notifications.bitwarden.com"`
+///   → `("notifications.bitwarden.com", "hub")`
+/// - `"https://vault.example.com/notifications"`
+///   → `("vault.example.com", "notifications/hub")`
+fn split_for_signalr(notifications_url: &str) -> Result<(String, String), String> {
     // Strip schema prefix.
     let without_schema = notifications_url
         .strip_prefix("https://")
@@ -338,13 +385,12 @@ fn split_for_signalr(
         })?;
 
     // Split on the first `/` to separate `host[:port]` from path.
-    let (domain, base_path) = match without_schema.split_once('/') {
+    let (domain, hub_path) = match without_schema.split_once('/') {
         Some((d, p)) => (d.to_string(), format!("{p}/hub")),
         None => (without_schema.to_string(), "hub".to_string()),
     };
 
-    let hub_with_token = format!("{base_path}?access_token={access_token}");
-    Ok((domain, hub_with_token))
+    Ok((domain, hub_path))
 }
 
 #[cfg(test)]
@@ -353,23 +399,46 @@ mod tests {
 
     #[test]
     fn split_official_us() {
-        let (domain, hub) =
-            split_for_signalr("https://notifications.bitwarden.com", "TOKEN123").unwrap();
+        let (domain, hub) = split_for_signalr("https://notifications.bitwarden.com").unwrap();
         assert_eq!(domain, "notifications.bitwarden.com");
-        assert_eq!(hub, "hub?access_token=TOKEN123");
+        assert_eq!(hub, "hub");
     }
 
     #[test]
     fn split_self_hosted() {
         let (domain, hub) =
-            split_for_signalr("https://vault.example.com/notifications", "TOKEN123").unwrap();
+            split_for_signalr("https://vault.example.com/notifications").unwrap();
         assert_eq!(domain, "vault.example.com");
-        assert_eq!(hub, "notifications/hub?access_token=TOKEN123");
+        assert_eq!(hub, "notifications/hub");
     }
 
     #[test]
     fn split_invalid_schema() {
-        let result = split_for_signalr("ftp://bad.example.com", "TOKEN");
+        let result = split_for_signalr("ftp://bad.example.com");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn redact_token_replaces_value() {
+        let input = "negotiate with https://host/hub?access_token=eyJsecret123 failed";
+        let out = redact_token(input);
+        assert!(!out.contains("eyJsecret123"));
+        assert!(out.contains("access_token=<redacted>"));
+    }
+
+    #[test]
+    fn redact_token_no_token_unchanged() {
+        let input = "some error without any token";
+        let out = redact_token(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn redact_token_multiple_params() {
+        let input = "url?access_token=abc123&other=value&access_token=xyz";
+        let out = redact_token(input);
+        assert!(!out.contains("abc123"));
+        assert!(!out.contains("xyz"));
+        assert!(out.contains("other=value"));
     }
 }
