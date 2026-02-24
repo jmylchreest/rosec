@@ -311,6 +311,10 @@ struct PromptField<'a> {
     label: &'a str,
     kind: &'a str,
     placeholder: &'a str,
+    /// When `true`, `collect_tty` prompts a second time for confirmation and
+    /// loops until both entries match.  Ignored by the GUI prompt path.
+    #[serde(skip)]
+    confirm: bool,
 }
 
 #[derive(Serialize)]
@@ -394,6 +398,7 @@ async fn prompt_and_auth(
             label: label.as_str(),
             kind: kind.as_str(),
             placeholder: placeholder.as_str(),
+            confirm: false,
         })
         .collect();
 
@@ -482,6 +487,25 @@ async fn prompt_and_auth(
             eprintln!();
             eprintln!("{instructions}");
             eprintln!();
+
+            // The prefilled password hasn't been verified — confirm it before saving.
+            let confirm_fields: Vec<PromptField<'_>> = field_descs
+                .iter()
+                .filter(|(_, _, kind, _, _)| kind == "password" || kind == "secret")
+                .map(|(id, label, kind, placeholder, _)| PromptField {
+                    id: id.as_str(),
+                    label: label.as_str(),
+                    kind: kind.as_str(),
+                    placeholder: placeholder.as_str(),
+                    confirm: true,
+                })
+                .collect();
+            if !confirm_fields.is_empty() {
+                eprintln!("Please confirm your password (it cannot be verified until after setup):");
+                let confirmed = collect_tty(&confirm_fields).await?;
+                cred_map.extend(confirmed);
+            }
+
             let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
                 .iter()
                 .map(|(id, label, kind, placeholder, _)| PromptField {
@@ -489,6 +513,7 @@ async fn prompt_and_auth(
                     label: label.as_str(),
                     kind: kind.as_str(),
                     placeholder: placeholder.as_str(),
+                    confirm: false,
                 })
                 .collect();
             let reg_extra = collect_tty(&reg_only_fields).await?;
@@ -584,9 +609,27 @@ async fn prompt_and_auth(
         eprintln!("{instructions}");
         eprintln!();
 
-        // Only prompt for the registration-specific fields — the credentials
-        // already collected (e.g. master password) are carried forward from
-        // cred_map so the user is not asked to enter them a second time.
+        // This is first-time setup: the password the user just typed has not
+        // been verified against anything stored.  Re-prompt every password/secret
+        // field with confirmation so a typo doesn't lock them out permanently.
+        let confirm_fields: Vec<PromptField<'_>> = field_descs
+            .iter()
+            .filter(|(_, _, kind, _, _)| kind == "password" || kind == "secret")
+            .map(|(id, label, kind, placeholder, _)| PromptField {
+                id: id.as_str(),
+                label: label.as_str(),
+                kind: kind.as_str(),
+                placeholder: placeholder.as_str(),
+                confirm: true,
+            })
+            .collect();
+        if !confirm_fields.is_empty() {
+            eprintln!("Please confirm your password (it cannot be verified until after setup):");
+            let confirmed = collect_tty(&confirm_fields).await?;
+            cred_map.extend(confirmed);
+        }
+
+        // Now collect the registration-specific fields (e.g. the access token).
         let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
             .iter()
             .map(|(id, label, kind, placeholder, _)| PromptField {
@@ -594,11 +637,10 @@ async fn prompt_and_auth(
                 label: label.as_str(),
                 kind: kind.as_str(),
                 placeholder: placeholder.as_str(),
+                confirm: false,
             })
             .collect();
 
-        // Merge registration fields into cred_map; collect_tty already returns
-        // Zeroizing<String> values so no plain-string copy is created.
         let reg_extra = collect_tty(&reg_only_fields).await?;
         cred_map.extend(reg_extra);
 
@@ -765,11 +807,27 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
 }
 
 /// Collect credentials via TTY for the given fields.
+///
+/// Fields with `confirm: true` are prompted twice; the loop repeats until
+/// both entries match, then the confirmed value is stored once under `f.id`.
 async fn collect_tty(fields: &[PromptField<'_>]) -> Result<HashMap<String, Zeroizing<String>>> {
     eprintln!();
     let mut map = HashMap::new();
     for f in fields {
-        let v = prompt_field(f.label, f.placeholder, f.kind).await?;
+        let v = if f.confirm {
+            loop {
+                let a = prompt_field(f.label, f.placeholder, f.kind).await?;
+                let confirm_label = format!("Confirm {}", f.label);
+                let b = prompt_field(&confirm_label, "", f.kind).await?;
+                if a.as_str() == b.as_str() {
+                    break a;
+                }
+                eprintln!("Entries do not match — please try again.");
+                eprintln!();
+            }
+        } else {
+            prompt_field(f.label, f.placeholder, f.kind).await?
+        };
         map.insert(f.id.to_string(), v);
     }
     Ok(map)
@@ -2687,6 +2745,7 @@ async fn opportunistic_unlock(
         label: pw_field.1.as_str(),
         kind: pw_field.2.as_str(),
         placeholder: pw_field.3.as_str(),
+        confirm: false,
     }];
     let collected = collect_tty(&pfields).await?;
 
