@@ -11,9 +11,23 @@ use rosec_core::config::Config;
 use rosec_core::router::{Router, RouterConfig};
 use rosec_secret_service::server::register_objects_with_full_config;
 use rosec_secret_service::session::SessionManager;
+use zbus::fdo::RequestNameFlags;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(e) = run().await {
+        // Print the error chain cleanly without a stack backtrace.
+        // anyhow chains are displayed as "cause: context" lines; the first
+        // line is always the outermost message.
+        eprintln!("error: {e}");
+        for cause in e.chain().skip(1) {
+            eprintln!("  caused by: {cause}");
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     // Security hardening: disable core dumps, lock memory pages.
@@ -71,8 +85,13 @@ async fn main() -> Result<()> {
     .await?;
 
     // Claim the well-known bus name so clients can discover us.
+    // Use DoNotQueue so a second instance fails immediately instead of silently
+    // waiting in the D-Bus name queue until the first instance exits.
     // If another process already owns it, report who it is before exiting.
-    if let Err(e) = conn.request_name("org.freedesktop.secrets").await {
+    if let Err(e) = conn
+        .request_name_with_flags("org.freedesktop.secrets", RequestNameFlags::DoNotQueue.into())
+        .await
+    {
         // Query the bus for the current owner's PID and comm so the user knows what to kill.
         let owner_info = bus_name_owner_info(&conn, "org.freedesktop.secrets").await;
         anyhow::bail!("cannot claim org.freedesktop.secrets: {e}\n{owner_info}");
