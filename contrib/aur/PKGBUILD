@@ -1,0 +1,66 @@
+# Maintainer: John Mylchreest <jmylchreest@gmail.com>
+#
+# AUR package: rosec
+#
+# This PKGBUILD installs pre-built binaries from the GitHub release.
+# The release workflow renders this file by substituting @VERSION@ and
+# @X86_64_SHA256@ / @AARCH64_SHA256@ before committing to the AUR.
+#
+# To build manually, replace the placeholders and run makepkg -si.
+
+pkgname=rosec
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Read-only Secret Service daemon with Bitwarden backend"
+arch=('x86_64' 'aarch64')
+url="https://github.com/jmylchreest/rosec"
+license=('MIT')
+depends=(
+    'dbus'
+    'libsecret'   # optional: used by clients that talk to the daemon
+)
+optdepends=(
+    'libnotify: desktop notifications on lock/unlock'
+)
+provides=('secret-service')
+conflicts=('gnome-keyring' 'keepassxc')
+
+source_x86_64=(
+    "${pkgname}-${pkgver}-x86_64.tar.gz::https://github.com/jmylchreest/${pkgname}/releases/download/v${pkgver}/${pkgname}-${pkgver}-x86_64-unknown-linux-gnu.tar.gz"
+)
+source_aarch64=(
+    "${pkgname}-${pkgver}-aarch64.tar.gz::https://github.com/jmylchreest/${pkgname}/releases/download/v${pkgver}/${pkgname}-${pkgver}-aarch64-unknown-linux-gnu.tar.gz"
+)
+
+sha256sums_x86_64=('@X86_64_SHA256@')
+sha256sums_aarch64=('@AARCH64_SHA256@')
+
+package() {
+    # The tarball unpacks to a directory named after the target triple.
+    local srcdir_inner
+    srcdir_inner=$(find "${srcdir}" -maxdepth 1 -type d -name '*-linux-gnu' | head -1)
+
+    # Binaries
+    install -Dm755 "${srcdir_inner}/rosecd" "${pkgdir}/usr/bin/rosecd"
+    install -Dm755 "${srcdir_inner}/rosec"  "${pkgdir}/usr/bin/rosec"
+
+    # systemd user units
+    install -Dm644 "${srcdir_inner}/contrib/systemd/rosecd.service" \
+        "${pkgdir}/usr/lib/systemd/user/rosecd.service"
+    install -Dm644 "${srcdir_inner}/contrib/systemd/rosecd.socket" \
+        "${pkgdir}/usr/lib/systemd/user/rosecd.socket"
+
+    # D-Bus session activation
+    install -Dm644 "${srcdir_inner}/contrib/dbus/org.freedesktop.secrets.service" \
+        "${pkgdir}/usr/share/dbus-1/services/org.freedesktop.secrets.service"
+    install -Dm644 "${srcdir_inner}/contrib/dbus/org.gnome.keyring.service" \
+        "${pkgdir}/usr/share/dbus-1/services/org.gnome.keyring.service"
+
+    # XDG autostart (for non-systemd compositors)
+    install -Dm644 "${srcdir_inner}/contrib/autostart/rosecd.desktop" \
+        "${pkgdir}/etc/xdg/autostart/rosecd.desktop"
+
+    # License
+    install -Dm644 "${srcdir_inner}/README.md" \
+        "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

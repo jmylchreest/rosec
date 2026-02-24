@@ -1,0 +1,85 @@
+# Maintainer: John Mylchreest <jmylchreest@gmail.com>
+#
+# AUR package: rosec-git
+#
+# Builds rosec from the latest commit on the main branch.
+# Use this package to track development snapshots.
+
+pkgname=rosec-git
+pkgver=r0.unknown
+pkgrel=1
+pkgdesc="Read-only Secret Service daemon with Bitwarden backend (git)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/jmylchreest/rosec"
+license=('MIT')
+depends=(
+    'dbus'
+)
+makedepends=(
+    'rust'
+    'cargo'
+    'pkg-config'
+)
+optdepends=(
+    'libnotify: desktop notifications on lock/unlock'
+)
+provides=('rosec' 'secret-service')
+conflicts=('rosec' 'gnome-keyring' 'keepassxc')
+
+source=("${pkgname}::git+https://github.com/jmylchreest/rosec.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "${srcdir}/${pkgname}"
+    # Output: r<commit_count>.<short_hash>
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "${srcdir}/${pkgname}"
+    # Fetch all Cargo dependencies into a local cache so the build is
+    # reproducible and does not require internet access at build time.
+    cargo fetch --locked 2>/dev/null || cargo fetch
+}
+
+build() {
+    cd "${srcdir}/${pkgname}"
+
+    export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
+    cargo build --release --locked --bin rosecd --bin rosec 2>/dev/null || \
+    cargo build --release         --bin rosecd --bin rosec
+}
+
+check() {
+    cd "${srcdir}/${pkgname}"
+    cargo test --release --locked --workspace 2>/dev/null || \
+    cargo test --release          --workspace
+}
+
+package() {
+    cd "${srcdir}/${pkgname}"
+
+    # Binaries
+    install -Dm755 target/release/rosecd "${pkgdir}/usr/bin/rosecd"
+    install -Dm755 target/release/rosec  "${pkgdir}/usr/bin/rosec"
+
+    # systemd user units
+    install -Dm644 contrib/systemd/rosecd.service \
+        "${pkgdir}/usr/lib/systemd/user/rosecd.service"
+    install -Dm644 contrib/systemd/rosecd.socket \
+        "${pkgdir}/usr/lib/systemd/user/rosecd.socket"
+
+    # D-Bus session activation
+    install -Dm644 contrib/dbus/org.freedesktop.secrets.service \
+        "${pkgdir}/usr/share/dbus-1/services/org.freedesktop.secrets.service"
+    install -Dm644 contrib/dbus/org.gnome.keyring.service \
+        "${pkgdir}/usr/share/dbus-1/services/org.gnome.keyring.service"
+
+    # XDG autostart (for non-systemd compositors)
+    install -Dm644 contrib/autostart/rosecd.desktop \
+        "${pkgdir}/etc/xdg/autostart/rosecd.desktop"
+
+    # Docs
+    install -Dm644 README.md \
+        "${pkgdir}/usr/share/doc/rosec/README.md"
+}

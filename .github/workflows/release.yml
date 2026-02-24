@@ -1,0 +1,351 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Determine version and whether to skip (commit already tagged for release)
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_tag: ${{ steps.version.outputs.version_tag }}
+      is_release: ${{ steps.version.outputs.is_release }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      should_skip: ${{ steps.version.outputs.should_skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          SHOULD_SKIP=false
+          IS_PRERELEASE=false
+
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Tag push — this is a release or pre-release
+            VERSION="${GITHUB_REF_NAME#v}"
+            VERSION_TAG="${GITHUB_REF_NAME}"
+
+            # Pre-release if the version contains a pre-release suffix
+            # e.g. v1.2.3-alpha.1, v1.2.3-rc.1, v1.2.3-beta
+            if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
+              IS_RELEASE=false
+              IS_PRERELEASE=true
+            else
+              IS_RELEASE=true
+              IS_PRERELEASE=false
+            fi
+
+          else
+            IS_RELEASE=false
+
+            # On main: skip if this commit already carries a release tag
+            if [[ "${{ github.ref }}" == refs/heads/main ]]; then
+              EXISTING_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+              if [[ -n "$EXISTING_TAG" ]]; then
+                echo "Commit already has release tag $EXISTING_TAG — skipping snapshot build"
+                SHOULD_SKIP=true
+              fi
+            fi
+
+            # Snapshot version: {major}.{minor}.{next_patch}-dev.{commits}+{hash}
+            if git describe --tags --always --long 2>/dev/null | grep -q '^v'; then
+              DESCRIBE=$(git describe --tags --always --long 2>/dev/null)
+              if [[ $DESCRIBE =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-g([a-f0-9]+)$ ]]; then
+                MAJOR=${BASH_REMATCH[1]}
+                MINOR=${BASH_REMATCH[2]}
+                PATCH=${BASH_REMATCH[3]}
+                COMMITS=${BASH_REMATCH[4]}
+                HASH=${BASH_REMATCH[5]}
+                NEXT_PATCH=$((PATCH + 1))
+                VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-dev.${COMMITS}+${HASH}"
+                VERSION_TAG="v${MAJOR}.${MINOR}.${NEXT_PATCH}-dev.${COMMITS}"
+              else
+                VERSION="0.0.0-dev.0+${GITHUB_SHA:0:7}"
+                VERSION_TAG="v0.0.0-dev.0"
+              fi
+            else
+              VERSION="0.0.0-dev.0+${GITHUB_SHA:0:7}"
+              VERSION_TAG="v0.0.0-dev.0"
+            fi
+          fi
+
+          echo "should_skip=${SHOULD_SKIP}"   >> "$GITHUB_OUTPUT"
+          echo "is_release=${IS_RELEASE}"     >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"           >> "$GITHUB_OUTPUT"
+          echo "version_tag=${VERSION_TAG}"   >> "$GITHUB_OUTPUT"
+
+          echo "Version:      ${VERSION}"
+          echo "Version tag:  ${VERSION_TAG}"
+          echo "Is release:   ${IS_RELEASE}"
+          echo "Is prerelease: ${IS_PRERELEASE}"
+          echo "Should skip:  ${SHOULD_SKIP}"
+
+  # ---------------------------------------------------------------------------
+  # Build binaries for all target platforms
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    needs: prepare
+    if: needs.prepare.outputs.should_skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive_suffix: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+            archive_suffix: tar.gz
+
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            archive_suffix: tar.gz
+
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            cross: true
+            archive_suffix: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        if: matrix.runner == 'ubuntu-latest' && matrix.cross != true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: matrix.cross != true
+        run: |
+          cargo build --release --locked \
+            --bin rosecd --bin rosec \
+            --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: |
+          cross build --release --locked \
+            --bin rosecd --bin rosec \
+            --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        run: |
+          TARGET=${{ matrix.target }}
+          VERSION=${{ needs.prepare.outputs.version }}
+          STAGE="dist/${TARGET}"
+          mkdir -p "${STAGE}"
+
+          cp "target/${TARGET}/release/rosecd" "${STAGE}/"
+          cp "target/${TARGET}/release/rosec"  "${STAGE}/"
+
+          # Include contrib files in the archive
+          cp -r contrib "${STAGE}/"
+          cp README.md  "${STAGE}/" 2>/dev/null || true
+
+          ARCHIVE="rosec-${VERSION}-${TARGET}.tar.gz"
+          tar -czf "${ARCHIVE}" -C "dist" "${TARGET}"
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rosec-${{ matrix.target }}
+          path: |
+            rosec-*.tar.gz
+            rosec-*.tar.gz.sha256
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Create or update the rolling snapshot release on every main push
+  # ---------------------------------------------------------------------------
+  snapshot:
+    name: Snapshot Release
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    if: |
+      needs.prepare.outputs.is_release == 'false' &&
+      needs.prepare.outputs.is_prerelease == 'false' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: rosec-*
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+            -exec cp {} release/ \;
+          # Merge all per-file checksums into one
+          cat release/*.sha256 > release/checksums.txt
+          rm -f release/*.sha256
+          ls -lh release/
+
+      - name: Delete existing snapshot release and tag
+        run: |
+          gh release delete snapshot --yes 2>/dev/null || true
+          git push origin :refs/tags/snapshot 2>/dev/null || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create snapshot release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Development Snapshot"
+          tag_name: snapshot
+          draft: false
+          prerelease: true
+          body: |
+            Automated development snapshot built from `main`.
+
+            **Version:** `${{ needs.prepare.outputs.version }}`
+            **Commit:** ${{ github.sha }}
+            **Built:** ${{ github.event.head_commit.timestamp }}
+
+            This release is overwritten on every push to `main`. For stable
+            builds, use a versioned release tag (`v*`).
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Create a versioned GitHub release on tag push (stable or pre-release)
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    if: |
+      needs.prepare.outputs.is_release == 'true' ||
+      needs.prepare.outputs.is_prerelease == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: rosec-*
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+            -exec cp {} release/ \;
+          cat release/*.sha256 > release/checksums.txt
+          rm -f release/*.sha256
+          ls -lh release/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "rosec ${{ needs.prepare.outputs.version_tag }}"
+          tag_name: ${{ needs.prepare.outputs.version_tag }}
+          draft: false
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+          generate_release_notes: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # AUR package update (disabled — enable by removing the `if: false`)
+  #
+  # When enabled, this job commits an updated PKGBUILD to the AUR repository
+  # after each stable release. Requires:
+  #   - AUR_SSH_KEY secret: SSH private key for the AUR account
+  #   - The AUR package must already exist and the key must have push access
+  # ---------------------------------------------------------------------------
+  aur-publish:
+    name: Publish to AUR
+    runs-on: ubuntu-latest
+    needs: [prepare, release]
+    if: false  # TODO: enable once AUR package is registered
+    # if: needs.prepare.outputs.is_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download x86_64 artifact (for .SRCINFO checksum)
+        uses: actions/download-artifact@v4
+        with:
+          name: rosec-x86_64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Compute checksums for PKGBUILD
+        id: checksums
+        run: |
+          X86_64_SHA=$(grep "x86_64-unknown-linux-gnu" artifacts/checksums.txt | awk '{print $1}' | head -1)
+          echo "x86_64_sha=${X86_64_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Render PKGBUILD from template
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@X86_64_SHA256@|${{ steps.checksums.outputs.x86_64_sha }}|g" \
+            contrib/aur/PKGBUILD.template > /tmp/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3
+        with:
+          pkgname: rosec
+          pkgbuild: /tmp/PKGBUILD
+          commit_username: rosec-bot
+          commit_email: bot@rosec
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: "Update to ${{ needs.prepare.outputs.version }}"
+          force_push: true

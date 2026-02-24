@@ -1,40 +1,67 @@
 [Unit]
 Description=rosec - read-only Secret Service daemon
 Documentation=https://github.com/jmylchreest/rosec
-# Start after the D-Bus session bus is available.
-# graphical-session.target ensures the Wayland compositor is running first,
-# which is required for the unlock prompt GUI.
-After=dbus.service graphical-session.target
+# Require the D-Bus session bus.
+After=dbus.service
 Requires=dbus.service
+# For graphical sessions: also wait for the compositor so the unlock
+# prompt GUI can open a window.  Remove this pair if running headless
+# (TTY / SSH_ASKPASS only).
+After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
+# Type=dbus: systemd considers the daemon ready once it has acquired
+# BusName= on the session bus.  This is the correct type for a Secret
+# Service implementation and integrates cleanly with D-Bus activation.
 Type=dbus
 BusName=org.freedesktop.secrets
+
 # Adjust ExecStart to match your install location:
-#   /usr/local/bin/rosecd   — system-wide install (sudo install)
+#   /usr/local/bin/rosecd   — system-wide (pacman / make install)
 #   %h/.cargo/bin/rosecd    — cargo install (development)
 ExecStart=/usr/local/bin/rosecd
+
 Restart=on-failure
 RestartSec=5
 
+# --------------------------------------------------------------------------
 # Security hardening
+# Mirrors what rosecd sets programmatically (PR_SET_DUMPABLE, mlockall)
+# but also enforces restrictions at the kernel level so they cannot be
+# undone even if the process is compromised.
+# --------------------------------------------------------------------------
 NoNewPrivileges=yes
-ProtectSystem=strict
+
+# rosecd needs read access to $HOME for its config and credential store.
 ProtectHome=read-only
+
+# The filesystem is read-only except for the user's XDG data directories.
+ProtectSystem=strict
+ReadWritePaths=%h/.config/rosec %h/.local/share/rosec %h/.local/state/rosec
+
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
+
+# Secrets are kept in mlock'd memory pages.  Deny W^X so injected
+# shellcode cannot be made executable.
 MemoryDenyWriteExecute=yes
 
-# Allow network access (needed for Bitwarden API)
+# Allow outbound network for Bitwarden API calls.
 PrivateNetwork=no
 
+# --------------------------------------------------------------------------
 # Environment
+# --------------------------------------------------------------------------
 Environment=RUST_LOG=info
 
 [Install]
-WantedBy=default.target
+# Start as part of the user's graphical session.
+WantedBy=graphical-session.target
+# Enabling this service also enables the companion socket unit so that
+# D-Bus session activation works without a separate enable step.
+Also=rosecd.socket

@@ -1,0 +1,38 @@
+[Unit]
+Description=rosec Secret Service socket
+Documentation=https://github.com/jmylchreest/rosec
+# The socket is a prerequisite of the service; it must be present
+# before rosecd starts so that the D-Bus daemon can pass the already-
+# bound file descriptor to rosecd via socket activation (sd_listen_fds).
+#
+# In practice most users rely on D-Bus session activation
+# (org.freedesktop.secrets.service + SystemdService=) rather than this
+# socket unit directly.  The socket unit exists so that:
+#
+#   1. `systemctl --user enable rosecd.socket` makes the socket available
+#      at login without requiring a full graphical-session.target.
+#
+#   2. Compositors or login managers that pre-populate
+#      DBUS_SESSION_BUS_ADDRESS-adjacent sockets can hand the fd to rosecd
+#      on first use (lazy start), matching the gnome-keyring model.
+#
+# The companion service unit references this socket via Also= in [Install],
+# so `systemctl --user enable rosecd.service` enables both.
+
+[Socket]
+# The D-Bus session bus socket path; %t expands to $XDG_RUNTIME_DIR.
+# This is the socket that libsecret / clients connect to when looking for
+# the org.freedesktop.secrets bus name via D-Bus socket activation.
+ListenStream=%t/rosec/secrets.socket
+
+# Create the socket directory with restricted permissions so no other
+# user can enumerate or connect to the socket.
+DirectoryMode=0700
+
+# Pass the socket file descriptor to rosecd on activation (sd_listen_fds).
+# rosecd must call sd_listen_fds() (via the systemd crate) to pick it up.
+# When the fd is not present (e.g. manual start), rosecd creates its own.
+Accept=no
+
+[Install]
+WantedBy=sockets.target
