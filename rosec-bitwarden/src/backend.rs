@@ -5,8 +5,8 @@ use std::time::SystemTime;
 
 use rosec_core::{
     AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus,
-    ItemAttributes, RecoveryOutcome, RegistrationInfo, SecretBytes, UnlockInput, VaultBackend,
-    VaultItem, VaultItemMeta,
+    ItemAttributes, RegistrationInfo, SecretBytes, UnlockInput, VaultBackend, VaultItem,
+    VaultItemMeta,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -1115,22 +1115,6 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         *guard = None;
         info!("Bitwarden vault locked");
         Ok(())
-    }
-
-    async fn recover(&self) -> Result<RecoveryOutcome, BackendError> {
-        // Try to re-sync if we have an active session
-        let mut guard = self.state.lock().await;
-        if let Some(state) = guard.as_mut() {
-            match Self::resync(state, &self.api).await {
-                Ok(()) => Ok(RecoveryOutcome::Recovered),
-                Err(e) => {
-                    warn!(error = %e, "recovery re-sync failed");
-                    Ok(RecoveryOutcome::Failed(e.to_string()))
-                }
-            }
-        } else {
-            Ok(RecoveryOutcome::Failed("vault is locked".to_string()))
-        }
     }
 
     async fn sync(&self) -> Result<(), BackendError> {

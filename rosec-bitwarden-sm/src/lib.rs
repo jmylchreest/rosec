@@ -11,9 +11,32 @@
 //! ```text
 //! 0.{service-account-uuid}.{client_secret}:{base64_16_byte_enc_key_seed}
 //! ```
-//! Tokens are stored encrypted on disk and are never interactively prompted
-//! after the first `backend add`.  The backend starts locked; `unlock()`
-//! performs the API login and secret fetch.
+//!
+//! ## Storage key derivation
+//!
+//! The access token is stored encrypted at rest.  The storage key is derived
+//! from **both** a machine-local secret and the user's unlock password:
+//!
+//! ```text
+//! HKDF-SHA256(ikm: machine_secret || password, salt: backend_id) → 64-byte storage key
+//! ```
+//!
+//! This means:
+//! - A password is **always required** to unlock — there is no auto-unlock path.
+//! - The same password participates in the opportunistic unlock sweep alongside
+//!   Bitwarden PM backends, so users with a shared password only type it once.
+//! - Wrong password → wrong storage key → decryption failure (no stored hash to
+//!   compare against — the ciphertext is the proof).
+//! - Changing the password or rotating the token requires re-running
+//!   `rosec backend auth`.
+//!
+//! ## First-time setup
+//!
+//! `unlock()` returns `BackendError::RegistrationRequired` if no encrypted token
+//! is found on disk.  The auth flow then prompts for `registration_info()` fields
+//! (the access token itself) and retries with `UnlockInput::WithRegistration`.
+//! The backend derives the storage key from the password, encrypts the token, and
+//! persists it.  Subsequent unlocks only need the password.
 //!
 //! # Configuration
 //!
@@ -29,8 +52,7 @@
 //!
 //! The access token is **not** stored in `config.toml`.  It is collected
 //! interactively on first `rosec backend auth` and persisted encrypted at
-//! `$XDG_DATA_HOME/rosec/oauth/<id>.toml`, protected by a per-installation
-//! machine key at `$XDG_DATA_HOME/rosec/machine-key`.
+//! `$XDG_DATA_HOME/rosec/oauth/<id>.toml`.
 
 mod api;
 
@@ -40,8 +62,8 @@ use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use rosec_core::credential::StorageKey;
 use rosec_core::{
-    Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus, RecoveryOutcome,
-    SecretBytes, UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
+    Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus, RegistrationInfo, SecretBytes,
+    UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
 use sha2::Sha256;
 use tokio::sync::Mutex;
@@ -149,14 +171,19 @@ impl SmBackend {
 
     /// Derive the 64-byte storage key for this SM backend.
     ///
-    /// Uses HKDF-SHA256 keyed with the per-installation machine key seed
-    /// and the backend ID as domain separator.  No user password required —
-    /// the machine key is generated once and stored at mode-0600 on disk.
-    fn derive_storage_key(&self) -> Result<StorageKey, BackendError> {
+    /// Uses HKDF-SHA256 with the backend ID as salt and `machine_secret ||
+    /// password` as IKM.  Both factors are required: the machine secret ties
+    /// the ciphertext to this installation; the password provides the
+    /// interactive access-control gate.  Neither alone is sufficient.
+    fn derive_storage_key(&self, password: &str) -> Result<StorageKey, BackendError> {
         let seed = rosec_core::machine_key::load_or_create()
             .map_err(|e| BackendError::Unavailable(format!("machine key: {e}")))?;
-        let (_, hkdf) = Hkdf::<Sha256>::extract(Some(self.config.id.as_bytes()), &seed);
-        let info = format!("rosec-sm-token-v1:{}", self.config.id);
+        // Concatenate machine secret and password as IKM so both are required.
+        let mut ikm = Zeroizing::new(Vec::with_capacity(seed.len() + password.len()));
+        ikm.extend_from_slice(&seed);
+        ikm.extend_from_slice(password.as_bytes());
+        let (_, hkdf) = Hkdf::<Sha256>::extract(Some(self.config.id.as_bytes()), &ikm);
+        let info = format!("rosec-sm-token-v2:{}", self.config.id);
         let mut key_material = Zeroizing::new(vec![0u8; 64]);
         hkdf.expand(info.as_bytes(), &mut key_material)
             .map_err(|e| BackendError::Unavailable(format!("SM key derivation failed: {e}")))?;
@@ -216,24 +243,6 @@ impl VaultBackend for SmBackend {
         "bitwarden-sm"
     }
 
-    /// The "password" for SM is the access token itself — no separate master
-    /// password is involved.  Leaving the field blank on a re-auth re-uses the
-    /// stored token; entering a new value rotates it.
-    fn password_field(&self) -> AuthField {
-        AuthField {
-            id: "access_token",
-            label: "Access Token",
-            placeholder: "Blank = use stored token; enter new token to rotate",
-            required: false,
-            kind: AuthFieldKind::Secret,
-        }
-    }
-
-    /// SM uses `can_auto_unlock` — no interactive prompts after initial setup.
-    fn can_auto_unlock(&self) -> bool {
-        true
-    }
-
     async fn status(&self) -> Result<BackendStatus, BackendError> {
         let state = self.state.lock().await;
         Ok(BackendStatus {
@@ -242,36 +251,97 @@ impl VaultBackend for SmBackend {
         })
     }
 
+    /// The unlock password for SM is not the access token — it is a
+    /// user-chosen passphrase used to derive the storage key that protects
+    /// the encrypted access token on disk.  The same password participates in
+    /// the opportunistic unlock sweep alongside PM backends.
+    fn password_field(&self) -> AuthField {
+        AuthField {
+            id: "password",
+            label: "Unlock Password",
+            placeholder: "Password used to protect the stored access token",
+            required: true,
+            kind: AuthFieldKind::Password,
+        }
+    }
+
+    /// First-time setup requires the Bitwarden SM access token in addition to
+    /// the unlock password.  The token is encrypted with the derived storage
+    /// key and persisted to disk; subsequent unlocks only need the password.
+    fn registration_info(&self) -> Option<RegistrationInfo> {
+        static FIELDS: &[AuthField] = &[AuthField {
+            id: "access_token",
+            label: "Access Token",
+            placeholder: "0.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.xxxxxxxx…",
+            required: true,
+            kind: AuthFieldKind::Secret,
+        }];
+        Some(RegistrationInfo {
+            instructions: "\
+This backend needs a Bitwarden Secrets Manager access token to complete setup.\n\n\
+Generate a machine account access token in the Bitwarden Secrets Manager web app \
+and paste it below.  The token will be encrypted with your unlock password and \
+stored locally — you will not need to enter it again.",
+            fields: FIELDS,
+        })
+    }
+
+    /// Authenticate the SM backend.
+    ///
+    /// Two cases:
+    ///
+    /// - **`Password(pw)`** — normal unlock after initial setup.  Derives the
+    ///   storage key from `pw` and the machine secret, loads the encrypted
+    ///   access token from disk, decrypts it, and authenticates with Bitwarden.
+    ///   Wrong password → wrong key → decryption failure.  No stored token →
+    ///   `BackendError::RegistrationRequired` (first-time setup required).
+    ///
+    /// - **`WithRegistration { password, registration_fields }`** — first-time
+    ///   setup or token rotation.  Derives the storage key from `password`,
+    ///   encrypts the `access_token` from `registration_fields`, persists it,
+    ///   then authenticates.
     async fn unlock(&self, input: UnlockInput) -> Result<(), BackendError> {
-        // The "password" field IS the access token for SM.
-        // A blank value means "re-use stored token"; non-blank saves/rotates it.
-        let provided = match input {
-            UnlockInput::Password(p) => p,
+        let (password, token_to_save) = match input {
+            UnlockInput::Password(pw) => (pw, None),
+            UnlockInput::WithRegistration {
+                password,
+                ref registration_fields,
+            } => {
+                let token = registration_fields
+                    .get("access_token")
+                    .ok_or_else(|| {
+                        BackendError::Unavailable(
+                            "registration_fields missing 'access_token'".to_string(),
+                        )
+                    })?
+                    .clone();
+                (password, Some(token))
+            }
             other => {
-                warn!(backend = %self.config.id, "SM backend got unexpected input: {:?}", other);
+                warn!(backend = %self.config.id, "SM backend received unexpected input: {:?}", other);
                 return Err(BackendError::NotSupported);
             }
         };
 
-        let storage_key = self.derive_storage_key()?;
+        let storage_key = self.derive_storage_key(password.as_str())?;
 
-        let token = if provided.is_empty() {
-            // Re-auth with stored token.
-            let cred = rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key)
-                .map_err(|e| BackendError::Unavailable(format!("failed to load SM token: {e}")))?
-                .ok_or(BackendError::RegistrationRequired)?;
-            cred.client_secret
-        } else {
-            // New or rotated token — encrypt and persist.
+        let token = if let Some(new_token) = token_to_save {
+            // First-time setup or token rotation: encrypt and persist the new token.
             rosec_core::credential::encrypt_and_save(
                 &self.config.id,
                 &storage_key,
                 "access_token",
-                provided.as_str(),
+                new_token.as_str(),
             )
             .map_err(|e| BackendError::Unavailable(format!("failed to save SM token: {e}")))?;
             info!(backend = %self.config.id, "SM access token saved (encrypted)");
-            provided
+            new_token
+        } else {
+            // Normal unlock: derive key from password and decrypt stored token.
+            let cred = rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key)
+                .map_err(|e| BackendError::Unavailable(format!("failed to load SM token: {e}")))?
+                .ok_or(BackendError::RegistrationRequired)?;
+            cred.client_secret
         };
 
         let auth = self.do_unlock(token.as_str()).await?;
@@ -287,36 +357,19 @@ impl VaultBackend for SmBackend {
         Ok(())
     }
 
-    /// Re-fetch all secrets from the Bitwarden SM API using the stored token.
+    /// Re-fetch all secrets from the Bitwarden SM API using the in-memory token.
     ///
-    /// Unlike `recover()`, `sync()` always performs a fresh network fetch even
-    /// if the backend is already unlocked — this ensures the in-memory cache
-    /// reflects any secrets added, updated, or deleted since last login.
-    ///
-    /// The token is read from in-memory state first (fastest path), falling
-    /// back to the encrypted credential store if the backend was restarted.
+    /// Requires the backend to be unlocked — the access token is held in memory
+    /// only while unlocked (zeroized on lock/drop).  Returns
+    /// `BackendError::Locked` if called while locked; the caller must unlock
+    /// first.  There is no disk fallback: the password used to derive the
+    /// storage key is not retained after unlock.
     async fn sync(&self) -> Result<(), BackendError> {
-        // Read the in-memory token first; fall back to disk.
         let token = {
             let guard = self.access_token.lock().await;
             guard.as_deref().map(|t| Zeroizing::new(t.to_string()))
         };
-
-        let token = match token {
-            Some(t) => t,
-            None => {
-                let storage_key = self.derive_storage_key()?;
-                match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
-                    Ok(Some(cred)) => cred.client_secret,
-                    Ok(None) => return Err(BackendError::Locked),
-                    Err(e) => {
-                        return Err(BackendError::Unavailable(format!(
-                            "failed to load SM token for sync: {e}"
-                        )));
-                    }
-                }
-            }
-        };
+        let token = token.ok_or(BackendError::Locked)?;
 
         let auth = self.do_unlock(token.as_str()).await?;
 
@@ -345,48 +398,6 @@ impl VaultBackend for SmBackend {
         }
         info!(backend = %self.config.id, "SM backend locked");
         Ok(())
-    }
-
-    async fn recover(&self) -> Result<RecoveryOutcome, BackendError> {
-        // Try in-memory token first (fastest path, avoids disk I/O).
-        // Fall back to loading from the encrypted credential store so that
-        // recover() works correctly after a rosecd restart.
-        let token = {
-            let guard = self.access_token.lock().await;
-            guard.as_deref().map(|t| t.to_string())
-        };
-
-        let token = match token {
-            Some(t) => Zeroizing::new(t),
-            None => {
-                let storage_key = match self.derive_storage_key() {
-                    Ok(k) => k,
-                    Err(e) => return Ok(RecoveryOutcome::Failed(e.to_string())),
-                };
-                match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
-                    Ok(Some(cred)) => cred.client_secret,
-                    Ok(None) => {
-                        return Ok(RecoveryOutcome::Failed(
-                            "no stored token — run `rosec backend auth`".to_string(),
-                        ));
-                    }
-                    Err(e) => return Ok(RecoveryOutcome::Failed(e)),
-                }
-            }
-        };
-
-        match self.do_unlock(token.as_str()).await {
-            Ok(auth) => {
-                {
-                    let mut tok = self.access_token.lock().await;
-                    *tok = Some(token);
-                }
-                let mut state_guard = self.state.lock().await;
-                *state_guard = Some(auth);
-                Ok(RecoveryOutcome::Recovered)
-            }
-            Err(e) => Ok(RecoveryOutcome::Failed(e.to_string())),
-        }
     }
 
     fn last_synced_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -545,9 +556,32 @@ pub use SmConfig as BitwardenSmConfig;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TEST_ENV_MUTEX: Mutex<()> = Mutex::new(());
+    /// RAII guard that sets an env var for the duration of a test and restores
+    /// (or removes) it on drop.  Tests that manipulate env vars must be run
+    /// single-threaded (`cargo test -- --test-threads=1`) or use separate temp
+    /// dirs per test to avoid interference.
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    fn scoped_env(key: &'static str, value: &str) -> ScopedEnv {
+        let previous = std::env::var(key).ok();
+        // SAFETY: tests are the only callers; env mutation is inherently
+        // unsafe in multi-threaded contexts — run with --test-threads=1.
+        unsafe { std::env::set_var(key, value) };
+        ScopedEnv { key, previous }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn make_backend() -> SmBackend {
         SmBackend::new(SmConfig {
@@ -593,18 +627,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn unlock_blank_token_without_stored_token_returns_registration_required() {
-        // An empty token means "use stored" — if nothing is stored, RegistrationRequired.
-        let tmp = std::env::temp_dir().join(format!("rosec-sm-test-{}-blank", std::process::id()));
+    async fn unlock_without_stored_token_returns_registration_required() {
+        // Normal unlock with no token on disk → RegistrationRequired (first-time setup).
+        let tmp =
+            std::env::temp_dir().join(format!("rosec-sm-test-{}-noreg", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let _guard = TEST_ENV_MUTEX.lock().unwrap();
-        unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
-        let result = make_backend()
-            .unlock(UnlockInput::Password(Zeroizing::new(String::new())))
-            .await;
-        unsafe { std::env::remove_var("XDG_DATA_HOME") };
-        drop(_guard);
+        let result = {
+            let _env = scoped_env("XDG_DATA_HOME", tmp.to_str().unwrap());
+            make_backend()
+                .unlock(UnlockInput::Password(Zeroizing::new(
+                    "my-unlock-password".to_string(),
+                )))
+                .await
+        };
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(matches!(result, Err(BackendError::RegistrationRequired)));
     }
@@ -766,26 +801,6 @@ mod tests {
             meta.attributes.get("sm.project").map(String::as_str),
             Some("my-project")
         );
-    }
-
-    #[test]
-    fn can_auto_unlock_returns_true() {
-        assert!(make_backend().can_auto_unlock());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn recover_when_no_token_stored_returns_failed() {
-        let tmp =
-            std::env::temp_dir().join(format!("rosec-sm-test-{}-recover", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let _guard = TEST_ENV_MUTEX.lock().unwrap();
-        unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
-        let outcome = make_backend().recover().await.unwrap();
-        unsafe { std::env::remove_var("XDG_DATA_HOME") };
-        drop(_guard);
-        let _ = std::fs::remove_dir_all(&tmp);
-        assert!(matches!(outcome, RecoveryOutcome::Failed(_)));
     }
 
     #[tokio::test]

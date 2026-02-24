@@ -199,12 +199,6 @@ impl std::fmt::Debug for UnlockInput {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum RecoveryOutcome {
-    Recovered,
-    Failed(String),
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum BackendError {
     #[error("backend locked")]
@@ -347,33 +341,41 @@ pub trait VaultBackend: Send + Sync {
         &[]
     }
 
-    /// Whether this backend can unlock itself without an interactive prompt.
-    ///
-    /// Returns `true` for backends that authenticate silently (e.g. Bitwarden SM
-    /// using a stored machine-account access token).  When `true`, `ensure_unlocked`
-    /// will call `recover()` instead of launching a password prompt.
-    ///
-    /// Defaults to `false` (prompt-based PM backends).
-    fn can_auto_unlock(&self) -> bool {
-        false
-    }
-
     async fn status(&self) -> Result<BackendStatus, BackendError>;
+
+    /// Authenticate this backend with the supplied credentials.
+    ///
+    /// `UnlockInput::Password(pw)` is the normal unlock path — the password is
+    /// used directly (PM: vault decryption key) or as input to a key derivation
+    /// function (SM: derives the storage key used to decrypt the persisted
+    /// access token).  The password is **always required** and must be
+    /// non-empty.
+    ///
+    /// `UnlockInput::WithRegistration { password, registration_fields }` is
+    /// used when the backend previously returned `BackendError::RegistrationRequired`.
+    /// The password serves the same role as above; `registration_fields` carries
+    /// the additional credentials needed for first-time setup or token rotation
+    /// (e.g. an SM access token, or PM device API key).
+    ///
+    /// In-memory credentials (decrypted vault keys, access tokens) are held as
+    /// `Zeroizing<_>` and scrubbed on lock/drop.  `sync()` operates on these
+    /// in-memory credentials and returns `BackendError::Locked` once they are
+    /// gone — callers must unlock again before syncing after a lock.
+    ///
+    /// Returns `BackendError::RegistrationRequired` if the backend needs
+    /// first-time setup before the normal password unlock can succeed.
     async fn unlock(&self, input: UnlockInput) -> Result<(), BackendError>;
     async fn lock(&self) -> Result<(), BackendError>;
-    async fn recover(&self) -> Result<RecoveryOutcome, BackendError>;
 
     /// Pull fresh data from the remote source and update the in-memory vault.
     ///
-    /// Returns `Ok(())` if the sync succeeded, or `BackendError::Locked` if
-    /// the backend is not unlocked.  The default implementation delegates to
-    /// `recover()` and maps the outcome to a Result.  Backends with a richer
-    /// sync mechanism (e.g. Bitwarden's `/sync` endpoint) should override this.
+    /// Returns `Ok(())` on success, `BackendError::Locked` if the backend is
+    /// not yet authenticated.  The default returns `BackendError::Locked` so
+    /// that backends without a custom sync implementation fail safely rather
+    /// than silently succeeding.  Backends with network sync (Bitwarden PM/SM)
+    /// override this.
     async fn sync(&self) -> Result<(), BackendError> {
-        match self.recover().await? {
-            RecoveryOutcome::Recovered => Ok(()),
-            RecoveryOutcome::Failed(msg) => Err(BackendError::Unavailable(msg)),
-        }
+        Err(BackendError::Locked)
     }
 
     /// Return the UTC timestamp of the last successful sync, or `None` if no

@@ -8,8 +8,7 @@ use rosec_core::config::{Config, PromptConfig};
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
-    Attributes, BackendError, RecoveryOutcome, SecretBytes, UnlockInput, VaultBackend,
-    VaultItemMeta,
+    Attributes, BackendError, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta,
 };
 use tracing::{debug, info, warn};
 use zbus::Connection;
@@ -737,16 +736,15 @@ impl ServiceState {
     /// Real implementation of the unlock flow — must be called only from a
     /// Tokio task context (i.e. via `ensure_unlocked`).
     ///
-    /// Iterates all backends in configured order.  For each locked backend:
-    /// - If `backend.can_auto_unlock()` is `true` (e.g. SM token-based backends),
-    ///   calls `backend.recover()` silently — no prompt is launched.
-    /// - Otherwise, launches an interactive password prompt (PM backends).
+    /// Iterates all backends in configured order.  All backends require an
+    /// interactive password to unlock — there is no silent/auto-unlock path.
+    /// Returns a `locked::<id>` sentinel for the first locked backend found so
+    /// the client (CLI or D-Bus caller) can prompt the user and call
+    /// `AuthBackend` with the collected credentials.
     ///
     /// Uses a tokio mutex to prevent concurrent unlock flows.
-    /// Returns an error if an interactive backend is locked and no prompt launcher
-    /// is configured.
     pub(crate) async fn ensure_unlocked_inner(&self) -> Result<(), FdoError> {
-        // Quick check — skip the mutex if all backends are already unlocked
+        // Quick check — skip the mutex if all backends are already unlocked.
         let mut any_locked = false;
         for backend in self.backends_ordered() {
             let status = backend.status().await.map_err(map_backend_error)?;
@@ -759,43 +757,19 @@ impl ServiceState {
             return Ok(());
         }
 
-        // Acquire the unlock mutex to prevent concurrent prompts
+        // Acquire the unlock mutex to prevent concurrent prompts.
         let _guard = self.unlock_in_progress.lock().await;
 
-        // Unlock each locked backend in order
+        // All backends require interactive unlock — return the sentinel for the
+        // first locked one so the client can prompt and call AuthBackend.
         for backend in self.backends_ordered() {
             let status = backend.status().await.map_err(map_backend_error)?;
             if !status.locked {
                 continue;
             }
-
             let backend_id = backend.id().to_string();
-
-            if backend.can_auto_unlock() {
-                // SM / token-based backends: silently re-authenticate.
-                // A failure here is non-fatal for the overall unlock — it means
-                // the stored credential is stale or missing for this backend, but
-                // other backends should still be unlocked normally.
-                tracing::debug!(backend = %backend_id, "attempting silent re-auth (auto-unlock)");
-                match backend.recover().await.map_err(map_backend_error)? {
-                    RecoveryOutcome::Recovered => {
-                        tracing::debug!(backend = %backend_id, "silent re-auth succeeded");
-                    }
-                    RecoveryOutcome::Failed(reason) => {
-                        warn!(backend = %backend_id, %reason,
-                            "silent re-auth failed — backend will remain locked until re-authenticated");
-                        // Continue to the next backend rather than aborting the whole unlock.
-                        continue;
-                    }
-                }
-            } else {
-                // Interactive backend is locked — tell the client to authenticate.
-                // The client (rosec CLI or any other caller) must call AuthBackend
-                // with credentials collected on its side, then retry the operation.
-                // This is the normal pre-unlock state; debug level to avoid log noise.
-                tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
-                return Err(FdoError::Failed(format!("locked::{backend_id}")));
-            }
+            tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
+            return Err(FdoError::Failed(format!("locked::{backend_id}")));
         }
 
         self.mark_unlocked();
@@ -1119,16 +1093,7 @@ impl ServiceState {
         self.tokio_handle
             .spawn(async move {
                 let _sync_guard = sync_guard; // held until task completes
-
-                // For auto-unlock backends (e.g. SM), sync() handles its own
-                // token loading — calling ensure_backend_unlocked first would
-                // trigger recover() (a full fetch) immediately before sync()
-                // does another full fetch.  Skip the pre-unlock step for those.
-                // For interactive backends, we still need to ensure they are
-                // unlocked before calling sync(), which just hits the API.
-                if !backend.can_auto_unlock() {
-                    this.ensure_backend_unlocked(&backend_id).await?;
-                }
+                this.ensure_backend_unlocked(&backend_id).await?;
                 backend.sync().await.map_err(map_backend_error)?;
                 let entries = this.rebuild_cache_inner().await?;
                 // Count only items belonging to this backend.
@@ -1174,9 +1139,7 @@ impl ServiceState {
         self.tokio_handle
             .spawn(async move {
                 let _sync_guard = sync_guard; // held until task completes
-                if !backend.can_auto_unlock() {
-                    this.ensure_backend_unlocked(&backend_id).await?;
-                }
+                this.ensure_backend_unlocked(&backend_id).await?;
                 backend.sync().await.map_err(map_backend_error)?;
                 this.rebuild_cache_inner().await?;
                 Ok::<_, FdoError>(())
@@ -1188,9 +1151,9 @@ impl ServiceState {
 
     /// Ensure a *single* backend is unlocked.
     ///
-    /// Mirrors the logic in `ensure_unlocked_inner` but scoped to one backend.
-    /// Auto-unlock backends call `recover()`; interactive backends return a
-    /// `locked::<id>` sentinel so the CLI can prompt the user.
+    /// All backends require interactive unlock — returns a `locked::<id>`
+    /// sentinel if the backend is locked so the CLI can prompt the user and
+    /// call `AuthBackend`.
     async fn ensure_backend_unlocked(&self, backend_id: &str) -> Result<(), FdoError> {
         let backend = self
             .backend_by_id(backend_id)
@@ -1201,27 +1164,8 @@ impl ServiceState {
             return Ok(());
         }
 
-        if backend.can_auto_unlock() {
-            tracing::debug!(backend = %backend_id, "attempting silent re-auth (auto-unlock)");
-            match backend.recover().await.map_err(map_backend_error)? {
-                RecoveryOutcome::Recovered => {
-                    tracing::debug!(backend = %backend_id, "silent re-auth succeeded");
-                }
-                RecoveryOutcome::Failed(reason) => {
-                    warn!(backend = %backend_id, %reason, "silent re-auth failed");
-                    return Err(FdoError::Failed(format!(
-                        "auto-unlock failed for backend '{backend_id}': {reason}"
-                    )));
-                }
-            }
-        } else {
-            tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
-            return Err(FdoError::Failed(format!("locked::{backend_id}")));
-        }
-
-        self.mark_unlocked();
-        self.touch_activity();
-        Ok(())
+        tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
+        Err(FdoError::Failed(format!("locked::{backend_id}")))
     }
 
     /// Rebuild the item cache from in-memory backend state.
@@ -1332,9 +1276,8 @@ impl ServiceState {
             let fetched = match result {
                 Ok(items) => items,
                 Err(BackendError::Locked) => {
-                    // Auto-unlock backend (e.g. SM) whose recover() failed —
-                    // skip it and continue with the remaining backends so the
-                    // other backends' items still populate the cache.
+                    // Backend is locked — skip it so the remaining backends
+                    // still populate the cache.  The user must unlock it first.
                     debug!(backend = %bid, "skipping locked backend during cache fetch");
                     backend_ids.push(bid);
                     continue;
@@ -1612,7 +1555,7 @@ mod tests {
     use std::sync::Arc;
 
     use rosec_core::router::RouterConfig;
-    use rosec_core::{BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput, VaultItem};
+    use rosec_core::{BackendStatus, SecretBytes, UnlockInput, VaultItem};
 
     #[derive(Debug)]
     struct MockBackend {
@@ -1656,10 +1599,6 @@ mod tests {
 
         async fn lock(&self) -> Result<(), BackendError> {
             Ok(())
-        }
-
-        async fn recover(&self) -> Result<RecoveryOutcome, BackendError> {
-            Ok(RecoveryOutcome::Recovered)
         }
 
         async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError> {

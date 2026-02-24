@@ -440,12 +440,8 @@ async fn prompt_and_auth(
     let has_display =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
-    // Token-based backends (SM) always use TTY regardless of display.
-    // Their credential is a long machine-generated access token — a GUI
-    // password dialog is the wrong UX for pasting a token, and the GUI
-    // field label/placeholder doesn't fit the token format.
     let collected: HashMap<String, Zeroizing<String>> =
-        if has_display && !is_token_backend(backend_kind) {
+        if has_display {
             let program = match config.prompt.backend.as_str() {
                 "builtin" | "" => resolve_binary("rosec-prompt"),
                 custom => custom.to_string(),
@@ -1286,15 +1282,6 @@ async fn preemptive_sync(conn: &Connection) -> Result<()> {
     futures_util::future::join_all(futures).await;
 
     Ok(())
-}
-
-/// Returns `true` if the backend kind uses token-based auth rather than a
-/// master password.  Token backends (e.g. `bitwarden-sm`) must always be
-/// prompted individually via TTY — they are incompatible with the opportunistic
-/// password-sharing unlock flow, and the GUI prompt is the wrong UX for a long
-/// machine-generated access token.
-fn is_token_backend(kind: &str) -> bool {
-    kind.ends_with("-sm")
 }
 
 /// Returns `true` if the daemon reports at least one locked backend.
@@ -2499,49 +2486,12 @@ async fn cmd_unlock() -> Result<()> {
         return Ok(());
     }
 
-    // Silently attempt auto-unlock for backends that don't need user input
-    // (e.g. Bitwarden SM with a stored token).  These call recover() internally
-    // and should never show a prompt.  Backends that fail (no stored token yet)
-    // fall through to the interactive prompt below.
-    let mut still_locked: Vec<(String, String, String)> = Vec::new();
-    for (id, name, kind) in &locked {
-        let can_auto: bool = proxy.call("CanAutoUnlock", &(id,)).await.unwrap_or(false);
-        if can_auto {
-            let result: Result<bool, zbus::Error> =
-                proxy.call("AuthBackend", &(id, HashMap::<&str, &str>::new())).await;
-            match result {
-                Ok(_) => println!("'{id}' unlocked."),
-                Err(e) => {
-                    tracing::debug!(backend = %id, "auto-unlock failed, will prompt: {e}");
-                    still_locked.push((id.clone(), name.clone(), kind.clone()));
-                }
-            }
-        } else {
-            still_locked.push((id.clone(), name.clone(), kind.clone()));
-        }
-    }
-    let locked = still_locked;
-
-    if locked.is_empty() {
-        return Ok(());
-    }
-
-    // Opportunistic unlock: collect a password once, try it against all
-    // password-compatible locked backends simultaneously.  Backends that fail
-    // (wrong password or no stored credential) are deferred and prompted for
-    // individually afterward.  This means the user enters their password once
-    // if all backends share it, or as few times as there are distinct passwords.
-    //
-    // Token-based backends (e.g. Bitwarden SM, kind ends with "-sm") are
-    // excluded from the opportunistic step — they use a machine access token,
-    // not a master password, and must always be prompted individually via TTY.
-    let (token_backends, password_backends): (Vec<_>, Vec<_>) = locked
-        .iter()
-        .cloned()
-        .partition(|(_, _, kind)| is_token_backend(kind));
-
-    let mut remaining = opportunistic_unlock(&password_backends, &proxy, &config).await?;
-    remaining.extend(token_backends);
+    // Opportunistic unlock: collect a password once and try it against all
+    // locked backends simultaneously.  Backends that fail (wrong password or
+    // no stored credential) are deferred and prompted for individually.  This
+    // means the user enters their password once if all backends share it, or
+    // as few times as there are distinct passwords.
+    let remaining = opportunistic_unlock(&locked, &proxy, &config).await?;
 
     // Any that still failed get their own targeted prompt.
     for (id, name, kind) in &remaining {

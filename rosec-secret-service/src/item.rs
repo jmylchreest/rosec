@@ -140,8 +140,7 @@ mod tests {
     use super::*;
 
     use rosec_core::{
-        Attributes, BackendError, BackendStatus, RecoveryOutcome, SecretBytes, UnlockInput,
-        VaultItem,
+        Attributes, BackendError, BackendStatus, SecretBytes, UnlockInput, VaultItem,
     };
 
     #[derive(Debug)]
@@ -178,10 +177,6 @@ mod tests {
 
         async fn lock(&self) -> Result<(), BackendError> {
             Ok(())
-        }
-
-        async fn recover(&self) -> Result<RecoveryOutcome, BackendError> {
-            Ok(RecoveryOutcome::Recovered)
         }
 
         async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError> {

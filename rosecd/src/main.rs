@@ -177,14 +177,10 @@ async fn run() -> Result<()> {
                 .unwrap_or(60);
             tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
 
-            // For each backend, decide what to do based on its lock state and
-            // whether it supports auto-unlock:
-            //
-            //  - can_auto_unlock + locked   → sync_backend() (handles token
-            //    load + full fetch itself; this keeps SM data fresh even before
-            //    the first interactive request arrives)
-            //  - any backend + unlocked     → check_remote_changed() first;
-            //    only call sync_backend() when the remote reports changes
+            // For each unlocked backend, check for remote changes and sync if
+            // needed.  Locked backends are skipped entirely — all backends
+            // require an interactive password to unlock and the daemon never
+            // prompts autonomously.
             //
             // After per-backend work we still call rebuild_cache() as a safety
             // net so the in-process cache always reflects the latest state.
@@ -201,67 +197,50 @@ async fn run() -> Result<()> {
                     }
                 };
 
-                if locked && backend.can_auto_unlock() {
-                    // SM / token backends: silently sync (includes re-auth).
-                    // Use try_sync_backend: background caller, skip if a D-Bus
-                    // SyncBackend call (or another timer tick) is already running.
-                    tracing::debug!(backend = %backend_id, "background: syncing locked auto-unlock backend");
-                    match cache_rebuild_state.try_sync_backend(&backend_id).await {
-                        Ok(true) => {
-                            tracing::debug!(backend = %backend_id, "background: auto-unlock+sync ok");
-                            did_any_work = true;
-                        }
-                        Ok(false) => {
-                            tracing::debug!(backend = %backend_id, "background: sync skipped (already in progress)");
-                        }
-                        Err(e) => {
-                            tracing::debug!(backend = %backend_id, error = %e,
-                                "background: auto-unlock+sync failed (token missing or API error)");
-                        }
-                    }
-                } else if !locked {
-                    // Already unlocked: check for remote changes before syncing.
-                    match backend.check_remote_changed().await {
-                        Ok(true) => {
-                            tracing::debug!(backend = %backend_id, "background: remote changed, syncing");
-                            // Use try_sync_backend: skip if a D-Bus caller or
-                            // another timer tick already has the sync lock.
-                            match cache_rebuild_state.try_sync_backend(&backend_id).await {
-                                Ok(true) => {
-                                    tracing::debug!(backend = %backend_id, "background: sync ok");
-                                    did_any_work = true;
-                                }
-                                Ok(false) => {
-                                    tracing::debug!(backend = %backend_id, "background: sync skipped (already in progress)");
-                                }
-                                Err(e) => {
-                                    let err_str = e.to_string();
-                                    if err_str.starts_with("locked::") {
-                                        tracing::debug!(backend = %backend_id, "background: sync skipped — backend locked");
-                                    } else {
-                                        consecutive_failures += 1;
-                                        if consecutive_failures <= 3 {
-                                            tracing::warn!(backend = %backend_id, attempt = consecutive_failures, "background sync failed: {e}");
-                                        } else if consecutive_failures == 4 {
-                                            tracing::warn!(backend = %backend_id,
-                                                "background sync has failed {} times, suppressing further warnings",
-                                                consecutive_failures);
-                                        }
+                if locked {
+                    // All backends need a user-supplied password — the
+                    // background poller never unlocks autonomously.
+                    tracing::debug!(backend = %backend_id, "background: backend locked, skipping sync");
+                    continue;
+                }
+
+                // Unlocked: check for remote changes before syncing.
+                match backend.check_remote_changed().await {
+                    Ok(true) => {
+                        tracing::debug!(backend = %backend_id, "background: remote changed, syncing");
+                        match cache_rebuild_state.try_sync_backend(&backend_id).await {
+                            Ok(true) => {
+                                tracing::debug!(backend = %backend_id, "background: sync ok");
+                                did_any_work = true;
+                            }
+                            Ok(false) => {
+                                tracing::debug!(backend = %backend_id, "background: sync skipped (already in progress)");
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                if err_str.starts_with("locked::") {
+                                    tracing::debug!(backend = %backend_id, "background: sync skipped — backend locked");
+                                } else {
+                                    consecutive_failures += 1;
+                                    if consecutive_failures <= 3 {
+                                        tracing::warn!(backend = %backend_id, attempt = consecutive_failures, "background sync failed: {e}");
+                                    } else if consecutive_failures == 4 {
+                                        tracing::warn!(backend = %backend_id,
+                                            "background sync has failed {} times, suppressing further warnings",
+                                            consecutive_failures);
                                     }
                                 }
                             }
                         }
-                        Ok(false) => {
-                            tracing::debug!(backend = %backend_id, "background: no remote changes");
-                        }
-                        Err(e) => {
-                            tracing::debug!(backend = %backend_id, error = %e,
-                                "background: remote-changed check failed, skipping sync");
-                        }
+                    }
+                    Ok(false) => {
+                        tracing::debug!(backend = %backend_id, "background: no remote changes");
+                    }
+                    Err(e) => {
+                        tracing::debug!(backend = %backend_id, error = %e,
+                            "background: remote-changed check failed, skipping sync");
                     }
                 }
-                // locked && !can_auto_unlock: skip — interactive backends need
-                // a user-supplied password; the poller never prompts.
             }
 
             // Safety-net rebuild: keep the in-process item cache consistent

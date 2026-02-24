@@ -188,32 +188,22 @@ impl SecretService {
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_caller("Unlock", &header);
 
-        // Iterate backends in order.
-        // - Auto-unlock backends (SM): silently recover() inline.
-        // - First locked interactive backend: allocate a Prompt, register it,
-        //   and return ([], prompt_path) so the client can call Prompt.Prompt().
-        // - If all backends already unlocked: return (objects, "/") immediately.
+        // Iterate backends in order.  All backends require interactive unlock.
+        // Return the first locked backend so the client allocates a Prompt and
+        // calls Prompt.Prompt(); if all are unlocked, return "/" immediately.
         let state = Arc::clone(&self.state);
         let state2 = Arc::clone(&state);
         let prompt_path_opt: Option<String> = state
             .run_on_tokio(async move {
-                let mut interactive_backend: Option<String> = None;
+                let mut first_locked: Option<String> = None;
                 for backend in state2.backends_ordered() {
                     let status = backend.status().await.map_err(map_backend_error)?;
-                    if !status.locked {
-                        continue;
+                    if status.locked {
+                        first_locked = Some(backend.id().to_string());
+                        break;
                     }
-                    let backend_id = backend.id().to_string();
-                    if backend.can_auto_unlock() {
-                        // Silently recover; failure is non-fatal for this call.
-                        let _ = backend.recover().await;
-                        continue;
-                    }
-                    // Interactive backend needs a prompt — use the first one found.
-                    interactive_backend = Some(backend_id);
-                    break;
                 }
-                Ok::<Option<String>, FdoError>(interactive_backend)
+                Ok::<Option<String>, FdoError>(first_locked)
             })
             .await??;
 
