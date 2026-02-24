@@ -822,3 +822,57 @@ corporate proxies that terminate long-lived connections).
   WebSocket client (MIT).  Already in the broader Rust ecosystem; lightweight.
 - No SignalR crate is needed — the subset used by Bitwarden is simple enough to
   parse directly from newline-delimited JSON frames.
+
+---
+
+## Headless / container mode (private D-Bus socket)
+
+### Background
+
+`rosecd` currently requires a D-Bus session bus (`DBUS_SESSION_BUS_ADDRESS`).
+In containers, SSH sessions, and CI environments there is often no session bus,
+making the daemon unusable in those contexts.
+
+gnome-keyring-daemon solves a related problem via
+`/run/user/<uid>/keyring/control` — a Unix domain socket it listens on directly,
+advertised to clients via `GNOME_KEYRING_CONTROL`.  This lets gnome-keyring work
+without a session bus, but at the cost of a bespoke, non-standard protocol that
+no other Secret Service implementation supports.
+
+### Proposed approach
+
+Rather than a gnome-keyring-style private protocol socket, rosecd should expose
+the **same `org.freedesktop.secrets` D-Bus interface** over a private Unix socket
+bus.  Clients connect by setting `DBUS_SESSION_BUS_ADDRESS=unix:path=<socket>`,
+which is the standard mechanism — no client changes required.
+
+```
+rosecd --socket /run/user/1000/rosec/bus
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/rosec/bus
+rosec search name=github
+```
+
+### Implementation notes
+
+- zbus supports this via `ConnectionBuilder::unix_listener(listener)` —
+  `rosecd` would call `tokio::net::UnixListener::bind(path)` and pass it to
+  `ConnectionBuilder` instead of `Connection::session()`.
+- The socket path defaults to `$XDG_RUNTIME_DIR/rosec/bus`; configurable via
+  `--socket` flag or `ROSEC_SOCKET` env var.
+- When `--socket` is given, rosecd skips claiming `org.freedesktop.secrets` on
+  the session bus (there may not be one) and instead acts as the bus itself.
+- `rosec` CLI would auto-detect the socket via `ROSEC_SOCKET` /
+  `XDG_RUNTIME_DIR/rosec/bus` before falling back to the session bus, so
+  `eval $(rosecd --socket ...)` shell integration works naturally.
+- This is the correct path for containers: no new IPC surface, same protocol,
+  existing Secret Service clients work unmodified.
+
+### Why not the gnome-keyring control socket approach
+
+- `GNOME_KEYRING_CONTROL` is a gnome-keyring private protocol — not the Secret
+  Service spec.  No other implementation supports it.
+- Exposing a raw socket with a bespoke framing would require maintaining a
+  second protocol implementation in perpetuity.
+- A private D-Bus socket is strictly superior: same protocol, zero extra code
+  beyond `ConnectionBuilder::unix_listener`, and fully interoperable with any
+  conforming Secret Service client.
