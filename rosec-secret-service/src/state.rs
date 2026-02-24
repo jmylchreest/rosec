@@ -316,6 +316,15 @@ impl ServiceState {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|existing| existing != id);
+
+            // Purge all items belonging to the removed backend from both caches
+            // so they don't appear as ghost entries in SearchItems results.
+            if let Ok(mut items) = self.items.lock() {
+                items.retain(|_, meta| meta.backend_id != id);
+            }
+            if let Ok(mut cache) = self.metadata_cache.lock() {
+                cache.retain(|_, meta| meta.backend_id != id);
+            }
         }
         found
     }
@@ -561,7 +570,9 @@ impl ServiceState {
             }
 
             // Parse the JSON map and extract the password field.
-            let map: HashMap<String, String> = serde_json::from_str(response_line.trim())
+            // Use `take` to move the value out of the map so only one
+            // allocation exists; then zeroize all remaining map values.
+            let mut map: HashMap<String, String> = serde_json::from_str(response_line.trim())
                 .map_err(|e| FdoError::Failed(format!("rosec-prompt JSON parse: {e}")))?;
 
             // Find the password field ID for this backend.
@@ -569,9 +580,15 @@ impl ServiceState {
                 .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
             let pw_id = backend.password_field().id.to_string();
 
-            let password = map.get(&pw_id)
+            // Move the password out (avoiding a clone) then immediately zeroize
+            // all remaining map values so no plain-String secrets linger.
+            let raw_pw = map.remove(&pw_id);
+            for v in map.values_mut() {
+                zeroize::Zeroize::zeroize(v);
+            }
+            let password = raw_pw
                 .filter(|v| !v.is_empty())
-                .map(|v| Zeroizing::new(v.clone()))
+                .map(Zeroizing::new)
                 .ok_or_else(|| FdoError::Failed("password field empty or missing".to_string()))?;
 
             return Ok(password);
@@ -1327,12 +1344,20 @@ pub(crate) fn map_backend_error(err: BackendError) -> FdoError {
         BackendError::Locked => FdoError::Failed("locked".to_string()),
         BackendError::NotFound => FdoError::Failed("not found".to_string()),
         BackendError::NotSupported => FdoError::NotSupported("not supported".to_string()),
+        // Unavailable carries a reason string already intended for callers
+        // (e.g. "backend locked", "network unreachable") — pass it through.
         BackendError::Unavailable(reason) => FdoError::Failed(reason),
         // Sentinel string detected by the CLI to trigger the registration retry flow.
         BackendError::RegistrationRequired => {
             FdoError::Failed("registration_required".to_string())
         }
-        BackendError::Other(err) => FdoError::Failed(err.to_string()),
+        // Other/internal errors: log the full chain server-side, return an
+        // opaque message to the D-Bus caller to avoid leaking internal detail
+        // (cipher UUIDs, server HTTP bodies, file paths, etc.).
+        BackendError::Other(err) => {
+            warn!(error = %err, "internal backend error");
+            FdoError::Failed("backend error".to_string())
+        }
     }
 }
 
@@ -1376,7 +1401,14 @@ fn sanitize_component(raw: &str) -> String {
 fn hash_id(input: &str) -> u64 {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(input.as_bytes());
-    u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 is always ≥8 bytes"))
+    // SHA-256 always produces 32 bytes; slicing [..8] and converting to [u8; 8]
+    // cannot fail.  Use unreachable! to make the invariant explicit without
+    // disguising it as a handled error.
+    u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("SHA-256 output is always 32 bytes")),
+    )
 }
 
 #[cfg(test)]

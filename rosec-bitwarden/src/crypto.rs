@@ -216,7 +216,18 @@ pub(crate) fn encrypt_symmetric(
     Ok((iv, ciphertext, mac))
 }
 
-/// Decrypt data using RSA-2048-OAEP-SHA1 (for organization keys).
+/// Decrypt data using RSA-2048-OAEP-SHA1 (for organization keys, cipher type 4).
+///
+/// # Why SHA-1?
+///
+/// The Bitwarden protocol specifies RSA-OAEP-SHA1 for cipher type 4 (asymmetric
+/// organization key encryption) for backwards compatibility with all existing
+/// vaults.  This is a **protocol constraint**, not a rosec design choice.
+///
+/// SHA-1 collision attacks do not apply to OAEP encryption/decryption: OAEP's
+/// security depends on SHA-1's one-wayness (preimage resistance), which remains
+/// strong.  The practical risk of this algorithm choice is low, but we cannot
+/// upgrade to SHA-256 without a coordinated Bitwarden server-side migration.
 pub fn decrypt_asymmetric(
     private_key_der: &[u8],
     ciphertext: &[u8],
@@ -227,6 +238,8 @@ pub fn decrypt_asymmetric(
     let private_key = RsaPrivateKey::from_pkcs8_der(private_key_der)
         .map_err(|e| BitwardenError::Crypto(format!("pkcs8 parse: {e}")))?;
 
+    // SHA-1 is required by the Bitwarden wire protocol for cipher type 4.
+    // See the doc comment above for the security rationale.
     let padding = Oaep::new::<sha1::Sha1>();
     let plaintext = private_key
         .decrypt(padding, ciphertext)

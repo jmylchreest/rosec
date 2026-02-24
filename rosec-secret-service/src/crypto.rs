@@ -95,7 +95,7 @@ pub struct DhKeypair {
 
 /// Generate a fresh DH keypair using the MODP-1024 group.
 ///
-/// Uses `getrandom` for the private key so it is cryptographically random.
+/// Uses a thread-local CSPRNG (seeded from the OS) for the private key.
 /// The private key is 1024 bits; the public key is `g^private mod p`.
 pub fn generate_dh_keypair() -> Result<DhKeypair, BackendError> {
     let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
@@ -103,8 +103,7 @@ pub fn generate_dh_keypair() -> Result<DhKeypair, BackendError> {
 
     // Generate 128 random bytes for the private key
     let mut priv_bytes = Zeroizing::new([0u8; DH_KEY_BYTES]);
-    getrandom::getrandom(priv_bytes.as_mut())
-        .map_err(|e| BackendError::Unavailable(format!("getrandom failed: {e}")))?;
+    rand::Rng::fill(&mut rand::rng(), priv_bytes.as_mut_slice());
     let private = BigUint::from_bytes_be(priv_bytes.as_ref());
 
     let public = g.modpow(&private, &p);
@@ -169,14 +168,13 @@ type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
 /// Encrypt `plaintext` with AES-128-CBC-PKCS7.
 ///
-/// Returns `(iv, ciphertext)`. The IV is randomly generated using `getrandom`.
+/// Returns `(iv, ciphertext)`. The IV is randomly generated from the OS CSPRNG.
 pub fn aes128_cbc_encrypt(
     key: &[u8; AES128_KEY_BYTES],
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
     let mut iv = [0u8; AES_BLOCK_BYTES];
-    getrandom::getrandom(&mut iv)
-        .map_err(|e| BackendError::Unavailable(format!("getrandom failed: {e}")))?;
+    rand::Rng::fill(&mut rand::rng(), &mut iv[..]);
 
     let encryptor = Aes128CbcEnc::new(key.into(), &iv.into());
     let ciphertext = encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext);

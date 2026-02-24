@@ -37,10 +37,16 @@ base64 = "0.22.1"
 rand = "0.9.2"
 block-padding = "0.3.3"
 num-bigint = { version = "0.4.6", features = ["rand"] }
-getrandom = "0.2.15"
 rpassword = "7"
 libc = "0.2"
 toml_edit = "0.22"
 futures-util = "0.3"
 wildmatch = "2.6.1"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Hoisted from per-crate declarations to ensure version consistency
+zbus = "5.14.0"
+zvariant = "5.10.0"
+uuid = { version = "1.21.0", features = ["v4"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "form"] }
+notify = "7"

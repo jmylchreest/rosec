@@ -120,7 +120,43 @@ EXAMPLES:
     rosec get a1b2c3d4e5f60718                              # print secret value only (pipeable)
     rosec get a1b2c3d4e5f60718 | xclip -sel clip            # copy secret to clipboard
     rosec inspect a1b2c3d4e5f60718                          # full label + attributes + secret
+    rosec inspect -s a1b2c3d4e5f60718                       # sync/unlock then inspect
+    rosec inspect -s --all-attrs a1b2c3d4e5f60718           # include sensitive attrs (password, totp…)
+    rosec inspect --all-attrs --format=json a1b2c3d4e5f60718 # JSON with all attrs
     rosec inspect /org/freedesktop/secrets/collection/default/… # full D-Bus path"
+    );
+}
+
+fn print_inspect_help() {
+    println!(
+        "\
+rosec inspect - show full item detail
+
+USAGE:
+    rosec inspect [flags] <id>
+
+ARGUMENTS:
+    <id>                16-char hex item ID or full D-Bus object path
+
+FLAGS:
+    -a, --all-attrs     Also fetch and display sensitive attributes (password, totp,
+                        notes, card number, custom fields, etc.)
+    -s, --sync          Sync backends before inspecting; also unlocks if the item is
+                        not yet in the cache (e.g. after a fresh daemon start)
+    --format=<fmt>      Output format: human (default), kv, json
+    --help, -h          Show this help
+
+OUTPUT FORMATS:
+    human               Labelled sections with public and (if --all-attrs) sensitive attrs
+    kv                  Flat key=value pairs — one per line, pipe-friendly
+    json                JSON object with 'attributes', 'sensitive_attributes', and 'secret'
+
+EXAMPLES:
+    rosec inspect a1b2c3d4e5f60718
+    rosec inspect -s a1b2c3d4e5f60718
+    rosec inspect -s --all-attrs a1b2c3d4e5f60718
+    rosec inspect --all-attrs --format=kv a1b2c3d4e5f60718
+    rosec inspect --all-attrs --format=json a1b2c3d4e5f60718"
     );
 }
 
@@ -378,16 +414,22 @@ async fn prompt_and_auth(
     };
 
     // Call AuthBackend with the collected values.
-    // Keep the map alive past the first AuthBackend call — if registration is
-    // required we need to merge the already-collected credentials with the
-    // registration-specific fields rather than re-prompting for everything.
-    let mut string_map: HashMap<String, String> = collected
-        .into_iter()
-        .map(|(k, v)| (k, v.as_str().to_string()))
-        .collect();
+    // `cred_map` holds credentials as Zeroizing<String> throughout so they are
+    // scrubbed on drop.  When calling D-Bus we build a temporary borrowed view
+    // (HashMap<&str, &str>) to avoid creating any plain String copies.
+    let mut cred_map: HashMap<String, Zeroizing<String>> = collected;
+
+    // Helper: build the borrowed &str map for a D-Bus call without allocating.
+    macro_rules! as_str_map {
+        ($map:expr) => {
+            $map.iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<HashMap<&str, &str>>()
+        };
+    }
 
     let result: Result<bool, zbus::Error> =
-        proxy.call("AuthBackend", &(backend_id, &string_map)).await;
+        proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await;
 
     let needs_registration = matches!(
         &result,
@@ -405,7 +447,7 @@ async fn prompt_and_auth(
 
         // Only prompt for the registration-specific fields — the credentials
         // already collected (e.g. master password) are carried forward from
-        // string_map so the user is not asked to enter them a second time.
+        // cred_map so the user is not asked to enter them a second time.
         let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
             .iter()
             .map(|(id, label, kind, placeholder, _)| PromptField {
@@ -415,24 +457,19 @@ async fn prompt_and_auth(
                 placeholder: placeholder.as_str(),
             })
             .collect();
-        let reg_extra: HashMap<String, String> = collect_tty(&reg_only_fields)
-            .await?
-            .into_iter()
-            .map(|(k, v)| (k, v.as_str().to_string()))
-            .collect();
 
-        // Merge: registration fields overlay the original credentials.
-        string_map.extend(reg_extra);
+        // Merge registration fields into cred_map; collect_tty already returns
+        // Zeroizing<String> values so no plain-string copy is created.
+        let reg_extra = collect_tty(&reg_only_fields).await?;
+        cred_map.extend(reg_extra);
 
-        let _ok: bool = proxy.call("AuthBackend", &(backend_id, &string_map)).await?;
+        let _ok: bool = proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await?;
     } else {
         result?;
     }
 
-    // Zero all credential values now that they have been sent.
-    for v in string_map.values_mut() {
-        unsafe { v.as_bytes_mut().iter_mut().for_each(|b| *b = 0) };
-    }
+    // cred_map is dropped here; all Zeroizing<String> values are scrubbed.
+    drop(cred_map);
 
     Ok(())
 }
@@ -1159,6 +1196,7 @@ async fn sync_before_get(conn: &Connection) -> Result<()> {
 /// Output format for `rosec search`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
+    Human,
     Table,
     Kv,
     Json,
@@ -1167,6 +1205,7 @@ enum OutputFormat {
 impl OutputFormat {
     fn parse(s: &str) -> Option<Self> {
         match s {
+            "human" => Some(Self::Human),
             "table" => Some(Self::Table),
             "kv"    => Some(Self::Kv),
             "json"  => Some(Self::Json),
@@ -1424,6 +1463,7 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     }
 
     match format {
+        OutputFormat::Human |
         OutputFormat::Table => print_search_table(&items, show_path),
         OutputFormat::Kv    => print_search_kv(&items, show_path),
         OutputFormat::Json  => print_search_json(&items)?,  // JSON always includes path
@@ -1762,12 +1802,40 @@ EXAMPLES:
     );
 }
 
+/// Normalise an `--attr` value that may use dot-index syntax.
+///
+/// Any attribute with multiple values uses `name.N` notation in the CLI:
+/// - `name`   → `"name"`   (bare = index 0, backwards compat)
+/// - `name.0` → `"name"`   (explicit index 0 → bare key)
+/// - `name.1` → `"name.1"` (index 1 stored as "name.1")
+/// - `name.2` → `"name.2"`, …
+///
+/// This is generic — it works for `uri`, `custom.field`, or any future
+/// multi-value attribute without needing an allowlist.
+fn normalise_attr_key(attr: &str) -> String {
+    if let Some(dot) = attr.rfind('.') {
+        let name = &attr[..dot];
+        let suffix = &attr[dot + 1..];
+        // Only treat as an index if suffix is a pure decimal integer.
+        if !name.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+            && let Ok(idx) = suffix.parse::<usize>() {
+            return if idx == 0 {
+                name.to_string()
+            } else {
+                format!("{name}.{idx}")
+            };
+        }
+    }
+    attr.to_string()
+}
+
 /// Print only the secret value (or a named attribute) to stdout — pipeable.
 async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Result<()> {
     use std::io::Write;
 
     // --attr mode: read from the public Attributes property, no session needed.
     if let Some(attr_name) = attr {
+        let resolved = normalise_attr_key(attr_name);
         let item_proxy = zbus::Proxy::new(
             conn,
             "org.freedesktop.secrets",
@@ -1776,7 +1844,7 @@ async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Res
         )
         .await?;
         let attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
-        match attrs.get(attr_name) {
+        match attrs.get(resolved.as_str()) {
             Some(v) => {
                 let mut out = std::io::stdout();
                 out.write_all(v.as_bytes())?;
@@ -1787,7 +1855,7 @@ async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Res
                 }
                 return Ok(());
             }
-            None => bail!("attribute '{attr_name}' not found on this item"),
+            None => bail!("attribute '{resolved}' not found on this item"),
         }
     }
 
@@ -1848,24 +1916,75 @@ async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Res
 }
 
 async fn cmd_inspect(args: &[String]) -> Result<()> {
-    let raw = args.first().ok_or_else(|| anyhow::anyhow!("missing item path or ID"))?;
+    let mut all_attrs = false;
+    let mut sync = false;
+    let mut format = OutputFormat::Human;
+    let mut raw: Option<&str> = None;
 
-    let conn = conn().await?;
-    let (path, is_locked) = resolve_item_path(&conn, raw).await?;
-
-    // If the item is locked, trigger unlock before inspecting.
-    if is_locked {
-        trigger_unlock(&conn).await?;
+    for arg in args {
+        match arg.as_str() {
+            "--all-attrs" | "-a" => all_attrs = true,
+            "--sync" | "-s" => sync = true,
+            s if s.starts_with("--format=") => {
+                let fmt_str = &s["--format=".len()..];
+                match OutputFormat::parse(fmt_str) {
+                    Some(f) => format = f,
+                    None => {
+                        eprintln!("unknown format '{fmt_str}': use human, kv, or json");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "--format" => {
+                eprintln!("--format requires a value: --format=human|kv|json");
+                std::process::exit(1);
+            }
+            "--help" | "-h" => {
+                print_inspect_help();
+                return Ok(());
+            }
+            s if raw.is_none() => raw = Some(s),
+            s => {
+                eprintln!("unexpected argument: {s}");
+                std::process::exit(1);
+            }
+        }
     }
 
-    match cmd_inspect_inner(&conn, &path).await {
+    let raw = raw.ok_or_else(|| anyhow::anyhow!("missing item path or ID"))?;
+
+    let conn = conn().await?;
+
+    if sync {
+        sync_before_get(&conn).await?;
+    }
+
+    // Resolve the item; if not found and --sync is set, try unlock + re-sync first.
+    let (path, is_locked) = match resolve_item_path(&conn, raw).await {
+        Ok(result) => result,
+        Err(e) => {
+            // Item not in cache — trigger unlock (which may populate it) then retry.
+            trigger_unlock(&conn).await?;
+            sync_before_get(&conn).await?;
+            resolve_item_path(&conn, raw).await.map_err(|_| e)?
+        }
+    };
+
+    if is_locked {
+        trigger_unlock(&conn).await?;
+        if sync {
+            sync_before_get(&conn).await?;
+        }
+    }
+
+    match cmd_inspect_inner(&conn, &path, all_attrs, &format).await {
         Ok(()) => Ok(()),
         Err(e) => {
             let zbus_err = e.downcast_ref::<zbus::Error>();
             if let Some(ze) = zbus_err
                 && try_lazy_unlock(&conn, ze).await?
             {
-                cmd_inspect_inner(&conn, &path).await
+                cmd_inspect_inner(&conn, &path, all_attrs, &format).await
             } else {
                 Err(e)
             }
@@ -1874,7 +1993,16 @@ async fn cmd_inspect(args: &[String]) -> Result<()> {
 }
 
 /// Print full item metadata (label, attributes) plus the secret value.
-async fn cmd_inspect_inner(conn: &Connection, path: &str) -> Result<()> {
+///
+/// When `all_attrs` is true, also fetches sensitive attribute names via
+/// `org.rosec.Secrets.GetSecretAttributeNames` and their values via
+/// `GetSecretAttribute`, displaying them alongside the public attributes.
+async fn cmd_inspect_inner(
+    conn: &Connection,
+    path: &str,
+    all_attrs: bool,
+    format: &OutputFormat,
+) -> Result<()> {
     let service_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1896,19 +2024,37 @@ async fn cmd_inspect_inner(conn: &Connection, path: &str) -> Result<()> {
     .await?;
 
     let label: String = item_proxy.get_property("Label").await?;
-    let attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
+    let pub_attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
 
-    println!("Label:      {label}");
-    println!("Path:       {path}");
-    if !attrs.is_empty() {
-        println!("Attributes:");
-        let mut sorted: Vec<_> = attrs.iter().collect();
-        sorted.sort_by_key(|(k, _)| *k);
-        for (k, v) in sorted {
-            println!("  {k}: {v}");
+    // Fetch sensitive attribute names (and optionally values) if requested.
+    let secret_attrs: Vec<(String, Zeroizing<Vec<u8>>)> = if all_attrs {
+        let secrets_proxy = zbus::Proxy::new(
+            conn,
+            "org.freedesktop.secrets",
+            "/org/rosec/Secrets",
+            "org.rosec.Secrets",
+        )
+        .await?;
+
+        let names: Vec<String> = secrets_proxy
+            .call("GetSecretAttributeNames", &(path,))
+            .await?;
+
+        let mut pairs: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::with_capacity(names.len());
+        for name in names {
+            let bytes: Vec<u8> = secrets_proxy
+                .call("GetSecretAttribute", &(path, name.as_str()))
+                .await
+                .unwrap_or_default();
+            pairs.push((name, Zeroizing::new(bytes)));
         }
-    }
+        pairs
+    } else {
+        Vec::new()
+    };
 
+    // Fetch the primary secret for human/kv (not needed for json as we include
+    // sensitive attrs separately).
     let items = vec![path.to_string()];
     let secrets_result: Result<HashMap<String, OwnedValue>, zbus::Error> = service_proxy
         .call("GetSecrets", &(items, &session_path))
@@ -1918,32 +2064,136 @@ async fn cmd_inspect_inner(conn: &Connection, path: &str) -> Result<()> {
         .call("CloseSession", &(&session_path,))
         .await?;
 
-    match secrets_result {
-        Ok(secrets) if secrets.is_empty() => {
-            println!("Secret:     <none>");
-        }
-        Ok(secrets) => {
-            for (_item_path, value) in secrets {
-                match <(OwnedObjectPath, Vec<u8>, Vec<u8>, String)>::try_from(value) {
-                    Ok((_session, _params, secret_bytes, content_type)) => {
-                        let text = String::from_utf8_lossy(&secret_bytes);
-                        if text.is_empty() {
-                            println!("Secret:     <empty>");
-                        } else {
-                            println!("Secret ({content_type}):");
-                            println!("  {text}");
+    match format {
+        OutputFormat::Human | OutputFormat::Table => {
+            println!("Label:      {label}");
+            println!("Path:       {path}");
+
+            // Public attributes.
+            if !pub_attrs.is_empty() {
+                println!("Attributes (public):");
+                let mut sorted: Vec<_> = pub_attrs.iter().collect();
+                sorted.sort_by_key(|(k, _)| *k);
+                for (k, v) in sorted {
+                    println!("  {k}: {v}");
+                }
+            }
+
+            // Sensitive attributes (--all-attrs).
+            if !secret_attrs.is_empty() {
+                println!("Attributes (sensitive):");
+                for (k, v) in &secret_attrs {
+                    let text = String::from_utf8_lossy(v);
+                    println!("  {k}: {text}");
+                }
+            }
+
+            // Primary secret.
+            match secrets_result {
+                Ok(secrets) if secrets.is_empty() => {
+                    println!("Secret:     <none>");
+                }
+                Ok(secrets) => {
+                    for (_item_path, value) in secrets {
+                        match <(OwnedObjectPath, Vec<u8>, Vec<u8>, String)>::try_from(value) {
+                            Ok((_session, _params, secret_bytes, content_type)) => {
+                                let text = String::from_utf8_lossy(&secret_bytes);
+                                if text.is_empty() {
+                                    println!("Secret:     <empty>");
+                                } else {
+                                    println!("Secret ({content_type}):");
+                                    println!("  {text}");
+                                }
+                            }
+                            Err(_) => println!("Secret:     <could not decode>"),
                         }
                     }
-                    Err(_) => println!("Secret:     <could not decode>"),
+                }
+                Err(zbus::Error::MethodError(_, Some(detail), _))
+                    if detail.as_str().starts_with("no secret for cipher") =>
+                {
+                    println!("Secret:     <not available — this item type has no primary secret>");
+                }
+                Err(e) => println!("Secret:     <error: {e}>"),
+            }
+        }
+
+        OutputFormat::Kv => {
+            println!("label={label}");
+            println!("path={path}");
+            let mut sorted_pub: Vec<_> = pub_attrs.iter().collect();
+            sorted_pub.sort_by_key(|(k, _)| *k);
+            for (k, v) in sorted_pub {
+                println!("{k}={v}");
+            }
+            for (k, v) in &secret_attrs {
+                let text = String::from_utf8_lossy(v);
+                println!("{k}={text}");
+            }
+            // Also emit primary secret as `secret=` for completeness.
+            if let Ok(secrets) = secrets_result {
+                for (_item_path, value) in secrets {
+                    if let Ok((_session, _params, secret_bytes, _ct)) =
+                        <(OwnedObjectPath, Vec<u8>, Vec<u8>, String)>::try_from(value)
+                    {
+                        let text = String::from_utf8_lossy(&secret_bytes);
+                        println!("secret={text}");
+                    }
                 }
             }
         }
-        Err(zbus::Error::MethodError(_, Some(detail), _))
-            if detail.as_str().starts_with("no secret for cipher") =>
-        {
-            println!("Secret:     <not available — this item type has no primary secret>");
+
+        OutputFormat::Json => {
+            // Build a JSON object with label, path, public_attrs, and (if
+            // --all-attrs) sensitive_attrs as a merged or separate sub-object.
+            let mut sorted_pub: Vec<_> = pub_attrs.iter().collect();
+            sorted_pub.sort_by_key(|(k, _)| *k);
+
+            let pub_obj: serde_json::Map<String, serde_json::Value> = sorted_pub
+                .into_iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+
+            let secret_obj: serde_json::Map<String, serde_json::Value> = secret_attrs
+                .iter()
+                .map(|(k, v)| {
+                    let text = String::from_utf8_lossy(v).into_owned();
+                    (k.clone(), serde_json::Value::String(text))
+                })
+                .collect();
+
+            // Primary secret value.
+            let primary_secret = match secrets_result {
+                Ok(secrets) => {
+                    let mut val = serde_json::Value::Null;
+                    for (_item_path, value) in secrets {
+                        if let Ok((_session, _params, secret_bytes, _ct)) =
+                            <(OwnedObjectPath, Vec<u8>, Vec<u8>, String)>::try_from(value)
+                        {
+                            val = serde_json::Value::String(
+                                String::from_utf8_lossy(&secret_bytes).into_owned(),
+                            );
+                        }
+                    }
+                    val
+                }
+                Err(_) => serde_json::Value::Null,
+            };
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("label".into(), serde_json::Value::String(label));
+            obj.insert("path".into(), serde_json::Value::String(path.to_string()));
+            obj.insert("attributes".into(), serde_json::Value::Object(pub_obj));
+            if all_attrs {
+                obj.insert(
+                    "sensitive_attributes".into(),
+                    serde_json::Value::Object(secret_obj),
+                );
+            }
+            obj.insert("secret".into(), primary_secret);
+
+            println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(obj))?);
         }
-        Err(e) => println!("Secret:     <error: {e}>"),
     }
 
     Ok(())

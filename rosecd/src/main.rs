@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     let err_str = e.to_string();
-                                    if err_str.contains("locked::") {
+                                    if err_str.starts_with("locked::") {
                                         tracing::debug!(backend = %backend_id, "background: sync skipped — backend locked");
                                     } else {
                                         consecutive_failures += 1;
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
                     }
                     Err(err) => {
                         let err_str = err.to_string();
-                        if err_str.contains("locked::") {
+                        if err_str.starts_with("locked::") {
                             tracing::debug!("background cache rebuild skipped: backend not yet unlocked");
                         } else {
                             consecutive_failures += 1;
@@ -252,7 +252,14 @@ async fn main() -> Result<()> {
 
     // Wait for SIGTERM or SIGINT for graceful shutdown.
     shutdown_signal().await;
-    tracing::info!("received shutdown signal, exiting");
+    tracing::info!("received shutdown signal, locking all backends before exit");
+    // Explicitly lock all backends so decrypted state is zeroed before the
+    // process exits.  Errors are logged but not fatal — the process is exiting
+    // anyway and Zeroizing<> drop impls will still run.
+    if let Err(e) = state.auto_lock().await {
+        tracing::warn!("lock-on-exit failed: {e}");
+    }
+    tracing::info!("all backends locked, exiting");
     Ok(())
 }
 
@@ -265,14 +272,20 @@ async fn bus_name_owner_info(conn: &zbus::Connection, name: &str) -> String {
         Err(_) => return "  (could not query bus daemon)".to_string(),
     };
 
-    let unique_name = match proxy.get_name_owner(zbus::names::BusName::try_from(name).unwrap()).await {
+    let bus_name = match zbus::names::BusName::try_from(name) {
+        Ok(n) => n,
+        Err(_) => return format!("  (invalid bus name: {name})"),
+    };
+    let unique_name = match proxy.get_name_owner(bus_name).await {
         Ok(n) => n.to_string(),
         Err(_) => return "  (no current owner found — may have just exited)".to_string(),
     };
 
-    let pid = match proxy.get_connection_unix_process_id(
-        zbus::names::BusName::try_from(unique_name.as_str()).unwrap()
-    ).await {
+    let unique_bus_name = match zbus::names::BusName::try_from(unique_name.as_str()) {
+        Ok(n) => n,
+        Err(_) => return format!("  current owner: {unique_name} (invalid unique name)"),
+    };
+    let pid = match proxy.get_connection_unix_process_id(unique_bus_name).await {
         Ok(p) => p,
         Err(_) => return format!("  current owner: {unique_name} (PID unknown)"),
     };

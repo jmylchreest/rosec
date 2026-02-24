@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 ///
 /// Returns a 32-byte zeroizing buffer.
 pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
-    let path = machine_key_path();
+    let path = machine_key_path()?;
 
     if path.exists() {
         let bytes = std::fs::read(&path)
@@ -54,16 +54,15 @@ pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(seed)
 }
 
-fn machine_key_path() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local/share")
-        });
-    base.join("rosec").join("machine-key")
+fn machine_key_path() -> Result<PathBuf, String> {
+    let base = if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(xdg)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share")
+    } else {
+        return Err("cannot locate machine key: neither XDG_DATA_HOME nor HOME is set".to_string());
+    };
+    Ok(base.join("rosec").join("machine-key"))
 }
 
 fn write_secret(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
@@ -128,7 +127,7 @@ mod tests {
         with_tmp_home(|| {
             let k1 = load_or_create().unwrap();
             // Remove the file to simulate a new install.
-            std::fs::remove_file(machine_key_path()).unwrap();
+            std::fs::remove_file(machine_key_path().unwrap()).unwrap();
             let k2 = load_or_create().unwrap();
             assert_ne!(k1.as_slice(), k2.as_slice());
         });

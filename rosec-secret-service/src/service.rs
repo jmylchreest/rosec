@@ -209,9 +209,14 @@ impl SecretService {
             .await??;
 
         // Helper to build an OwnedObjectPath, falling back to "/" on parse error.
+        // "/" is a well-known valid D-Bus object path; the second try_from cannot
+        // fail, but we handle the unreachable error path explicitly to stay
+        // consistent with the no-naked-unwrap policy.
         let make_path = |s: &str| {
-            OwnedObjectPath::try_from(s.to_string())
-                .unwrap_or_else(|_| OwnedObjectPath::try_from("/".to_string()).unwrap())
+            OwnedObjectPath::try_from(s.to_string()).unwrap_or_else(|_| {
+                OwnedObjectPath::try_from("/".to_string())
+                    .unwrap_or_else(|_| unreachable!("'/' is always a valid D-Bus object path"))
+            })
         };
 
         match prompt_path_opt {

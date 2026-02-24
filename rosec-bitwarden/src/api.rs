@@ -60,6 +60,7 @@ impl ApiClient {
             .user_agent(format!("rosec/{}", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
+            .https_only(true)
             .build()?;
 
         let device_id = load_or_create_device_id();
@@ -363,10 +364,32 @@ fn load_or_create_device_id() -> String {
         warn!(error = %e, "failed to create data directory; using ephemeral device ID");
         return id;
     }
-    if let Err(e) = std::fs::write(&path, &id) {
-        warn!(error = %e, "failed to persist device ID to {}", path.display());
-    } else {
-        debug!("persisted new device ID to {}", path.display());
+    // Write with mode 0600 for consistency with other rosec data files.
+    // The device ID is not a secret, but restricting permissions avoids leaking
+    // account-identifying information to other users on a shared system.
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(id.as_bytes()))
+        {
+            Ok(()) => debug!("persisted new device ID to {}", path.display()),
+            Err(e) => warn!(error = %e, "failed to persist device ID to {}", path.display()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = std::fs::write(&path, &id) {
+            warn!(error = %e, "failed to persist device ID to {}", path.display());
+        } else {
+            debug!("persisted new device ID to {}", path.display());
+        }
     }
     id
 }

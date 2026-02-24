@@ -760,7 +760,13 @@ fn font_from_string(name: &str) -> iced::Font {
         };
     }
     if !name.is_empty() {
-        return iced::Font::with_name(Box::leak(name.to_string().into_boxed_str()));
+        // `iced::Font::with_name` requires `&'static str`.  We store the name
+        // in a process-wide OnceLock so the single allocation is reachable for
+        // the lifetime of the process instead of being silently leaked.
+        // rosec-prompt is a short-lived subprocess; this runs at most once.
+        static FONT_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let stored = FONT_NAME.get_or_init(|| name.to_string());
+        return iced::Font::with_name(stored.as_str());
     }
     iced::Font::DEFAULT
 }

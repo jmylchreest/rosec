@@ -12,7 +12,10 @@ use crate::crypto::Keys;
 use crate::error::BitwardenError;
 
 /// Decrypted vault item.
-#[derive(Clone)]
+///
+/// `Clone` is intentionally not derived — cloning secret material creates
+/// untracked copies that may outlive the vault and escape zeroization.
+/// Use references (`&DecryptedCipher`) or indices wherever possible.
 pub struct DecryptedCipher {
     pub id: String,
     pub name: String,
@@ -86,7 +89,6 @@ impl CipherType {
     }
 }
 
-#[derive(Clone)]
 pub struct DecryptedLogin {
     /// Username is PII — zeroized on drop.
     pub username: Option<Zeroizing<String>>,
@@ -106,7 +108,6 @@ impl std::fmt::Debug for DecryptedLogin {
     }
 }
 
-#[derive(Clone)]
 pub struct DecryptedCard {
     /// Cardholder name is PII — zeroized on drop.
     pub cardholder_name: Option<Zeroizing<String>>,
@@ -132,7 +133,6 @@ impl std::fmt::Debug for DecryptedCard {
     }
 }
 
-#[derive(Clone)]
 pub struct DecryptedSshKey {
     pub private_key: Option<Zeroizing<String>>,
     pub public_key: Option<String>,
@@ -149,7 +149,6 @@ impl std::fmt::Debug for DecryptedSshKey {
     }
 }
 
-#[derive(Clone)]
 pub struct DecryptedIdentity {
     /// All identity fields are PII — zeroized on drop.
     pub title: Option<Zeroizing<String>>,
@@ -201,7 +200,6 @@ impl std::fmt::Debug for DecryptedIdentity {
     }
 }
 
-#[derive(Clone)]
 pub struct DecryptedField {
     pub name: Option<String>,
     /// Value is wrapped in `Zeroizing` because hidden fields (type 1) contain secrets.

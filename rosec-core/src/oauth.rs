@@ -183,18 +183,24 @@ fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()>
     let tmp_path = path.with_extension("toml.tmp");
 
     {
+        // Open with mode 0600 at creation time to avoid a TOCTOU window
+        // where the file would be world-readable between open() and chmod().
+        #[cfg(unix)]
+        let mut f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?
+        };
+        #[cfg(not(unix))]
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&tmp_path)?;
-
-        // Set 0600 before writing so the secret is never world-readable even briefly.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
 
         f.write_all(data)?;
         f.flush()?;

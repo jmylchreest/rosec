@@ -9,8 +9,8 @@ repository = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
-zbus = "4.4.0"
-zvariant = "4.2.0"
+zbus = { workspace = true }
+zvariant = { workspace = true }
 libc = { workspace = true }
 rosec-core = { path = "../rosec-core" }
 toml_edit = { workspace = true }

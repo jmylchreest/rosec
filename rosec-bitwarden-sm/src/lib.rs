@@ -96,7 +96,7 @@ struct AuthState {
     /// Used by `check_remote_changed` to avoid a redundant login round-trip
     /// when the token is still fresh.  May be stale — callers must handle
     /// auth errors by falling back to a full re-login.
-    bearer: String,
+    bearer: Zeroizing<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +401,8 @@ impl VaultBackend for SmBackend {
     /// on any transient error so the caller falls back to a full sync.
     async fn check_remote_changed(&self) -> Result<bool, BackendError> {
         // Snapshot the current bearer + last_synced_at under a single lock hold.
+        // The clone is required: we cannot hold the mutex across the async HTTP
+        // call below.  Zeroizing<String> ensures the copy is zeroed on drop.
         let (bearer, last_synced_at) = {
             let guard = self.state.lock().await;
             match guard.as_ref() {
@@ -499,12 +501,12 @@ fn secret_to_meta(secret: &DecryptedSecret, backend_id: &str) -> VaultItemMeta {
 }
 
 fn secret_value(secret: &DecryptedSecret) -> SecretBytes {
-    let bytes = if !secret.value.is_empty() {
-        secret.value.as_bytes().to_vec()
+    let src = if !secret.value.is_empty() {
+        secret.value.as_bytes()
     } else {
-        secret.note.as_bytes().to_vec()
+        secret.note.as_bytes()
     };
-    SecretBytes::new(bytes)
+    SecretBytes::from_zeroizing(Zeroizing::new(src.to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -541,7 +543,7 @@ mod tests {
             secrets,
             last_sync: Some(SystemTime::now()),
             last_synced_at: chrono::Utc::now(),
-            bearer: String::new(),
+            bearer: Zeroizing::new(String::new()),
         });
     }
 

@@ -93,10 +93,10 @@ impl AccessToken {
         let mut prk = Zeroizing::new([0u8; 32]);
         prk.copy_from_slice(&prk_generic);
 
-        hkdf_expand_sha256(&*prk, Some(b"sm-access-token"), 64)
-            .try_into()
-            .map(Zeroizing::new)
-            .expect("HKDF output is exactly 64 bytes")
+        let expanded = hkdf_expand_sha256(&*prk, Some(b"sm-access-token"), 64);
+        let mut out = Zeroizing::new([0u8; 64]);
+        out.copy_from_slice(&expanded);
+        out
     }
 }
 
@@ -152,6 +152,7 @@ impl SmApiClient {
             .user_agent(format!("rosec/{}", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
+            .https_only(true)
             .build()
             .map_err(SmApiError::Http)?;
         Ok(Self { http, urls })
@@ -353,8 +354,18 @@ impl SmApiClient {
 
 #[derive(Debug, Deserialize)]
 pub struct LoginResponse {
+    // Deserialized as plain String then immediately wrapped; the raw String
+    // field is consumed (moved) into Zeroizing so no lingering copy exists
+    // beyond the serde frame.
     pub access_token: String,
     pub encrypted_payload: String,
+}
+
+impl LoginResponse {
+    /// Consume the response, wrapping the bearer token in a Zeroizing guard.
+    pub fn into_zeroizing_token(self) -> (Zeroizing<String>, String) {
+        (Zeroizing::new(self.access_token), self.encrypted_payload)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,12 +530,17 @@ pub fn decrypt_field_opt(
 /// `prk` is the pseudo-random key (output of HKDF-Extract or PBKDF).
 /// `info` is optional context / application-specific information.
 /// `length` is the desired output length in bytes (≤ 255 * 32).
-fn hkdf_expand_sha256(prk: &[u8], info: Option<&[u8]>, length: usize) -> Vec<u8> {
+fn hkdf_expand_sha256(prk: &[u8], info: Option<&[u8]>, length: usize) -> Zeroizing<Vec<u8>> {
     use hkdf::Hkdf;
-    let hk = Hkdf::<Sha256>::from_prk(prk).expect("valid PRK length");
-    let mut okm = vec![0u8; length];
+    // Both error cases represent programming errors (wrong PRK size or oversized
+    // output length), not runtime conditions.  Use unreachable! so violations are
+    // caught clearly in tests without masking them with a panic message that looks
+    // like a handled error.
+    let hk = Hkdf::<Sha256>::from_prk(prk)
+        .unwrap_or_else(|_| unreachable!("PRK must be a valid HKDF pseudo-random key"));
+    let mut okm = Zeroizing::new(vec![0u8; length]);
     hk.expand(info.unwrap_or(b""), &mut okm)
-        .expect("HKDF length is valid");
+        .unwrap_or_else(|_| unreachable!("HKDF output length must be ≤ 255 * HashLen"));
     okm
 }
 
@@ -594,31 +610,32 @@ pub async fn fetch_secrets(
     client: &SmApiClient,
     token: &AccessToken,
     org_id: Uuid,
-) -> Result<(String, Vec<DecryptedSecret>), SmApiError> {
-    // Step 3: authenticate
+) -> Result<(Zeroizing<String>, Vec<DecryptedSecret>), SmApiError> {
+    // Step 3: authenticate — immediately wrap the bearer token in Zeroizing.
     let login = client.login(token).await?;
     debug!("SM access token authenticated");
+    let (bearer, encrypted_payload) = login.into_zeroizing_token();
 
     // Step 4: derive org encryption key from the encrypted_payload in the login response
     let token_enc_key = token.derive_token_enc_key();
-    let org_key = decrypt_org_key(&login.encrypted_payload, &token_enc_key)?;
+    let org_key = decrypt_org_key(&encrypted_payload, &token_enc_key)?;
 
     // Step 5: list secret identifiers
-    let identifiers = client.list_secrets(&login.access_token, org_id).await?;
+    let identifiers = client.list_secrets(&bearer, org_id).await?;
     debug!(count = identifiers.len(), "SM secret identifiers fetched");
 
     if identifiers.is_empty() {
-        return Ok((login.access_token, Vec::new()));
+        return Ok((bearer, Vec::new()));
     }
 
     // Step 6: fetch encrypted blobs
     let ids: Vec<Uuid> = identifiers.iter().map(|s| s.id).collect();
-    let raw_secrets = client.get_secrets_by_ids(&login.access_token, &ids).await?;
+    let raw_secrets = client.get_secrets_by_ids(&bearer, &ids).await?;
 
     // Step 6b: fetch project names (non-fatal — empty map if endpoint fails or
     // org has no projects).
     let project_names: HashMap<Uuid, String> = client
-        .list_projects(&login.access_token, org_id)
+        .list_projects(&bearer, org_id)
         .await
         .unwrap_or_default();
 
@@ -642,7 +659,7 @@ pub async fn fetch_secrets(
     }
 
     debug!(count = secrets.len(), "SM secrets loaded and decrypted");
-    Ok((login.access_token, secrets))
+    Ok((bearer, secrets))
 }
 
 // ---------------------------------------------------------------------------

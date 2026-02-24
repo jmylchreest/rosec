@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use zbus::interface;
-use zbus::object_server::SignalContext;
+use zbus::object_server::SignalEmitter;
 use zeroize::Zeroizing;
 
 use crate::state::{ServiceState, map_backend_error};
@@ -48,7 +48,7 @@ impl SecretPrompt {
     async fn prompt(
         &mut self,
         _window_id: &str,
-        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let state = Arc::clone(&self.state);
         let prompt_path = self.path.clone();
@@ -67,15 +67,15 @@ impl SecretPrompt {
         // is still running — but cancel_prompt() sends SIGTERM to the child
         // so the window disappears when the client calls CancelPrompt or
         // when the Prompt object is dropped (via Dismiss).
-        let ctxt_static = ctxt.to_owned();
-        let state2 = Arc::clone(&state);
-        state
-            .run_on_tokio(async move {
-                tokio::spawn(async move {
-                    run_prompt_task(state2, prompt_path, backend_id, label, ctxt_static).await;
-                });
-            })
-            .await?;
+    let ctxt_owned = ctxt.to_owned();
+    let state2 = Arc::clone(&state);
+    state
+        .run_on_tokio(async move {
+            tokio::spawn(async move {
+                run_prompt_task(state2, prompt_path, backend_id, label, ctxt_owned).await;
+            });
+        })
+        .await?;
 
         Ok(())
     }
@@ -83,7 +83,7 @@ impl SecretPrompt {
     /// Dismiss the prompt (cancel).  Kills the child subprocess if still running.
     async fn dismiss(
         &self,
-        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         self.state.cancel_prompt(&self.path);
         Self::completed(&ctxt, true, &zvariant::Value::from(""))
@@ -97,7 +97,7 @@ impl SecretPrompt {
     /// `result` for a successful collection unlock is the collection object path.
     #[zbus(signal)]
     pub async fn completed(
-        ctxt: &SignalContext<'_>,
+        ctxt: &SignalEmitter<'_>,
         dismissed: bool,
         result: &zvariant::Value<'_>,
     ) -> zbus::Result<()>;
@@ -114,10 +114,10 @@ async fn run_prompt_task(
     prompt_path: String,
     backend_id: String,
     label: String,
-    ctxt: SignalContext<'static>,
+    ctxt: SignalEmitter<'static>,
 ) {
     // Inline helper: emit Completed(dismissed=true).
-    async fn emit_dismissed(ctxt: &SignalContext<'_>) {
+    async fn emit_dismissed(ctxt: &SignalEmitter<'_>) {
         if let Err(e) =
             SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await
         {

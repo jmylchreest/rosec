@@ -570,8 +570,15 @@ impl BitwardenBackend {
             if let Some(username) = &login.username {
                 attributes.insert("username".to_string(), username.as_str().to_string());
             }
-            if let Some(uri) = login.uris.first() {
-                attributes.insert("uri".to_string(), uri.clone());
+            // All URIs are public. First is "uri" (index 0, backwards compat);
+            // subsequent ones are "uri.1", "uri.2", etc.
+            for (i, uri) in login.uris.iter().enumerate() {
+                let key = if i == 0 {
+                    "uri".to_string()
+                } else {
+                    format!("uri.{i}")
+                };
+                attributes.insert(key, uri.clone());
             }
         }
 
@@ -710,8 +717,15 @@ impl BitwardenBackend {
             if let Some(username) = &login.username {
                 public.insert("username".to_string(), username.as_str().to_string());
             }
-            if let Some(uri) = login.uris.first() {
-                public.insert("uri".to_string(), uri.clone());
+            // All URIs are public. First is "uri" (index 0, backwards compat);
+            // subsequent ones are "uri.1", "uri.2", etc.
+            for (i, uri) in login.uris.iter().enumerate() {
+                let key = if i == 0 {
+                    "uri".to_string()
+                } else {
+                    format!("uri.{i}")
+                };
+                public.insert(key, uri.clone());
             }
             // sensitive
             if login.password.is_some() {

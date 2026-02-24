@@ -16,15 +16,15 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
-zbus = "4.4.0"
-zvariant = "4.2.0"
-uuid = { version = "1.16.0", features = ["v4"] }
+zbus = { workspace = true }
+zvariant = { workspace = true }
+uuid = { workspace = true }
 sha2 = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }
 hkdf = { workspace = true }
 num-bigint = { workspace = true }
-getrandom = { workspace = true }
-base64 = "0.22.1"
+rand = { workspace = true }
+base64 = { workspace = true }
 libc = { workspace = true }
 wildmatch = { workspace = true }
