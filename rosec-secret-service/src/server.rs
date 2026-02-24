@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rosec_core::VaultBackend;
-use rosec_core::config::PromptConfig;
+use rosec_core::config::{Config, PromptConfig};
 use rosec_core::router::Router;
 use zbus::Connection;
 
@@ -61,11 +61,14 @@ pub async fn register_objects_with_config(
         return_attr_map,
         HashMap::new(),
         PromptConfig::default(),
+        Config::default(),
     )
     .await
 }
 
-/// Full constructor used by `rosecd` — passes `return_attr_map`, `collection_map`, and `PromptConfig`.
+/// Full constructor used by `rosecd` — passes `return_attr_map`, `collection_map`,
+/// `PromptConfig`, and the full `Config` for live hot-reload support.
+#[allow(clippy::too_many_arguments)]
 pub async fn register_objects_with_full_config(
     conn: &Connection,
     backends: Vec<Arc<dyn VaultBackend>>,
@@ -74,6 +77,7 @@ pub async fn register_objects_with_full_config(
     return_attr_map: HashMap<String, Vec<String>>,
     collection_map: HashMap<String, String>,
     prompt_config: PromptConfig,
+    initial_config: Config,
 ) -> zbus::Result<Arc<ServiceState>> {
     let paths = ObjectPaths::new();
     // Keep a reference to all backends for the CollectionState before consuming `backends`
@@ -89,6 +93,7 @@ pub async fn register_objects_with_full_config(
         return_attr_map,
         collection_map,
         prompt_config,
+        initial_config,
     ));
     let shared_items = Arc::clone(&state.items);
 

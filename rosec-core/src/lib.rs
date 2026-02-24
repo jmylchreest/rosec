@@ -461,7 +461,7 @@ pub enum DedupTimeFallback {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoLockPolicy {
     pub on_logout: bool,
     pub on_session_lock: bool,

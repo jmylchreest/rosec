@@ -1,4 +1,6 @@
-use crate::dedup::{DedupConfig, backend_priority_map, dedup};
+use std::sync::RwLock;
+
+use crate::dedup::{backend_priority_map, dedup, DedupConfig};
 use crate::{DedupStrategy, DedupTimeFallback, VaultItemMeta};
 
 #[derive(Debug, Clone)]
@@ -9,18 +11,32 @@ pub struct RouterConfig {
 
 #[derive(Debug)]
 pub struct Router {
-    config: RouterConfig,
+    config: RwLock<RouterConfig>,
 }
 
 impl Router {
     pub fn new(config: RouterConfig) -> Self {
-        Self { config }
+        Self {
+            config: RwLock::new(config),
+        }
+    }
+
+    /// Replace the router config atomically. Called by the config hot-reload watcher.
+    pub fn update_config(&self, config: RouterConfig) {
+        if let Ok(mut c) = self.config.write() {
+            *c = config;
+        }
     }
 
     pub fn dedup(&self, items: Vec<VaultItemMeta>, backend_order: &[String]) -> Vec<VaultItemMeta> {
+        let (strategy, time_fallback) = self
+            .config
+            .read()
+            .map(|c| (c.dedup_strategy, c.dedup_time_fallback))
+            .unwrap_or((DedupStrategy::Newest, DedupTimeFallback::Created));
         let config = DedupConfig {
-            strategy: self.config.dedup_strategy,
-            time_fallback: self.config.dedup_time_fallback,
+            strategy,
+            time_fallback,
         };
         let priorities = backend_priority_map(backend_order.iter().cloned());
         dedup(items, config, &priorities).items

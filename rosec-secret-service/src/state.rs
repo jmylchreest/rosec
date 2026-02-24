@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
-use rosec_core::config::PromptConfig;
+use rosec_core::config::{Config, PromptConfig};
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
@@ -97,7 +97,12 @@ pub struct ServiceState {
     /// prompts that have already completed or been dismissed.
     pub active_prompts: Mutex<HashMap<String, (String, Option<u32>)>>,
     /// Prompt program configuration (binary path, theme, etc.).
-    pub prompt_config: PromptConfig,
+    /// Behind a `RwLock` so it can be updated by the config hot-reload watcher
+    /// without restarting the daemon.
+    prompt_config: RwLock<PromptConfig>,
+    /// The full non-backend configuration, kept live so background tasks always
+    /// read the latest values rather than a snapshot taken at startup.
+    live_config: Arc<RwLock<Config>>,
 }
 
 impl std::fmt::Debug for ServiceState {
@@ -130,6 +135,7 @@ impl ServiceState {
             HashMap::new(),
             HashMap::new(),
             PromptConfig::default(),
+            Config::default(),
         )
     }
 
@@ -154,10 +160,12 @@ impl ServiceState {
             return_attr_map,
             HashMap::new(),
             PromptConfig::default(),
+            Config::default(),
         )
     }
 
-    /// Full constructor: accepts `return_attr` patterns, collection map, and `PromptConfig`.
+    /// Full constructor: accepts `return_attr` patterns, collection map, `PromptConfig`,
+    /// and the full live `Config` for hot-reload support.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_config(
         backends: Vec<Arc<dyn VaultBackend>>,
@@ -168,6 +176,7 @@ impl ServiceState {
         return_attr_map: HashMap<String, Vec<String>>,
         collection_map: HashMap<String, String>,
         prompt_config: PromptConfig,
+        initial_config: Config,
     ) -> Self {
         let backend_order: Vec<String> = backends.iter().map(|b| b.id().to_string()).collect();
         let backends_map: HashMap<String, Arc<dyn VaultBackend>> = backends
@@ -193,8 +202,31 @@ impl ServiceState {
             prompt_counter: AtomicU32::new(0),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             active_prompts: Mutex::new(HashMap::new()),
-            prompt_config,
+            prompt_config: RwLock::new(prompt_config),
+            live_config: Arc::new(RwLock::new(initial_config)),
         }
+    }
+
+    /// Atomically replace the live config.
+    ///
+    /// Called by the config hot-reload watcher whenever the config file changes.
+    /// Background tasks reading `live_config()` on their next tick will
+    /// automatically pick up the new values without any restart.
+    pub fn update_live_config(&self, new_config: Config) {
+        if let Ok(mut guard) = self.live_config.write() {
+            *guard = new_config.clone();
+        }
+        if let Ok(mut guard) = self.prompt_config.write() {
+            *guard = new_config.prompt;
+        }
+    }
+
+    /// Return a snapshot of the current live config.
+    pub fn live_config(&self) -> Config {
+        self.live_config
+            .read()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
     /// Return the `return_attr` patterns for a given backend ID.
@@ -563,7 +595,14 @@ impl ServiceState {
         }
 
         // ── Resolve rosec-prompt binary ────────────────────────────────────
-        let program = match self.prompt_config.backend.as_str() {
+        // Snapshot prompt config under the lock so we use a consistent view
+        // for both the binary path and the JSON theme payload.
+        let prompt_cfg = self
+            .prompt_config
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let program = match prompt_cfg.backend.as_str() {
             "builtin" | "" => resolve_prompt_binary(),
             custom => custom.to_string(),
         };
@@ -575,7 +614,7 @@ impl ServiceState {
         // ── 2 & 3. GUI or TTY via rosec-prompt ────────────────────────────
         if has_display || has_tty {
             // Build the JSON request that rosec-prompt expects.
-            let json = build_prompt_json(backend_id_str, label, &self.prompt_config);
+            let json = build_prompt_json(backend_id_str, label, &prompt_cfg);
 
             let mut cmd = std::process::Command::new(&program);
             cmd.stdin(Stdio::piped())

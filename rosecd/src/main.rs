@@ -81,6 +81,7 @@ async fn run() -> Result<()> {
         return_attr_map,
         collection_map,
         config.prompt.clone(),
+        config.clone(),
     )
     .await?;
 
@@ -97,13 +98,14 @@ async fn run() -> Result<()> {
         anyhow::bail!("cannot claim org.freedesktop.secrets: {e}\n{owner_info}");
     }
 
-    // Start logind watcher if any logind-based policy is enabled.
-    if config.autolock.on_session_lock || config.autolock.on_logout {
+    // Start logind watcher unconditionally — it always subscribes to all
+    // signals and checks the live config flags on each arrival.  This means
+    // enabling on_session_lock or on_logout in the config takes effect
+    // immediately without a restart.
+    {
         let logind_state = Arc::clone(&state);
-        let on_session_lock = config.autolock.on_session_lock;
-        let on_logout = config.autolock.on_logout;
         tokio::spawn(async move {
-            if let Err(e) = logind_watcher(logind_state, on_session_lock, on_logout).await {
+            if let Err(e) = logind_watcher(logind_state).await {
                 tracing::warn!("logind watcher exited: {e}");
             }
         });
@@ -162,14 +164,18 @@ async fn run() -> Result<()> {
         });
     }
 
-    let cache_rebuild_interval = config.service.refresh_interval_secs.unwrap_or(60);
-
     let cache_rebuild_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let interval = tokio::time::Duration::from_secs(cache_rebuild_interval);
         let mut consecutive_failures = 0u32;
         loop {
-            tokio::time::sleep(interval).await;
+            // Re-read refresh_interval_secs from the live config on every tick
+            // so changes to the config file take effect without a restart.
+            let interval_secs = cache_rebuild_state
+                .live_config()
+                .service
+                .refresh_interval_secs
+                .unwrap_or(60);
+            tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
 
             // For each backend, decide what to do based on its lock state and
             // whether it supports auto-unlock:
@@ -295,13 +301,16 @@ async fn run() -> Result<()> {
         }
     });
 
-    // Auto-lock policy background task
-    let autolock = config.autolock.clone();
+    // Auto-lock policy background task.
+    // Reads autolock settings from live_config on every tick so changes to the
+    // config file take effect without a restart.
     let autolock_state = Arc::clone(&state);
     tokio::spawn(async move {
         let check_interval = tokio::time::Duration::from_secs(30);
         loop {
             tokio::time::sleep(check_interval).await;
+
+            let autolock = autolock_state.live_config().autolock;
 
             // Check idle timeout
             if let Some(idle_min) = autolock.idle_timeout_minutes
@@ -408,17 +417,18 @@ async fn shutdown_signal() {
 /// Subscribe to logind D-Bus signals and enforce on_session_lock / on_logout policies.
 ///
 /// Connects to the **system** bus where `org.freedesktop.login1` lives.
+/// Always subscribes to all signals regardless of the current config values;
+/// config flags are re-read from `state.live_config()` on each signal arrival
+/// so hot-reloading `on_session_lock` or `on_logout` takes effect immediately.
 ///
 /// Signals watched:
-/// - `PrepareForSleep(true)` on `org.freedesktop.login1.Manager` → lock (suspend/hibernate)
-/// - `Lock` on `org.freedesktop.login1.Session` (our own session) → lock
-/// - `SessionRemoved` on `org.freedesktop.login1.Manager` → lock on logout
+/// - `PrepareForSleep(true)` on `org.freedesktop.login1.Manager` → lock (always)
+/// - `Lock` on `org.freedesktop.login1.Session` (our own session) → lock if on_session_lock
+/// - `SessionRemoved` on `org.freedesktop.login1.Manager` → lock if on_logout
 ///
 /// The function runs until an unrecoverable error occurs (e.g. system bus disconnected).
 async fn logind_watcher(
     state: Arc<rosec_secret_service::ServiceState>,
-    on_session_lock: bool,
-    on_logout: bool,
 ) -> anyhow::Result<()> {
     use futures_util::TryStreamExt;
     use zbus::Connection;
@@ -473,40 +483,37 @@ async fn logind_watcher(
         zbus::MessageStream::for_match_rule(session_removed_rule, &system_bus, None).await?;
 
     // -----------------------------------------------------------------------
-    // Subscribe to Lock on our own Session object (if we know the session path)
+    // Always subscribe to the Lock signal on our own session (if we know the
+    // path).  Whether to act on it is decided at signal-arrival time by reading
+    // the live config, so enabling on_session_lock in the config takes effect
+    // without a restart.
     // -----------------------------------------------------------------------
-    let mut lock_stream_opt: Option<zbus::MessageStream> = if on_session_lock {
-        if let Some(ref spath) = session_path {
-            let lock_rule = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .interface("org.freedesktop.login1.Session")?
-                .member("Lock")?
-                .path(spath.as_str())?
-                .build();
-            let stream = zbus::MessageStream::for_match_rule(lock_rule, &system_bus, None).await?;
-            Some(stream)
-        } else {
-            tracing::warn!("XDG_SESSION_ID not set — session Lock signal not subscribed");
-            None
-        }
+    let mut lock_stream_opt: Option<zbus::MessageStream> = if let Some(ref spath) = session_path {
+        let lock_rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.login1.Session")?
+            .member("Lock")?
+            .path(spath.as_str())?
+            .build();
+        let stream = zbus::MessageStream::for_match_rule(lock_rule, &system_bus, None).await?;
+        Some(stream)
     } else {
+        tracing::warn!("XDG_SESSION_ID not set — session Lock signal not subscribed");
         None
     };
 
     tracing::info!(
-        on_session_lock,
-        on_logout,
         session_id = session_id.as_deref().unwrap_or("unknown"),
         "logind watcher started"
     );
 
-    // Event loop
+    // Event loop — config flags are read fresh from live_config on each signal.
     loop {
         tokio::select! {
             msg = sleep_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
-                        // PrepareForSleep(going_to_sleep: bool)
+                        // PrepareForSleep is always honoured regardless of config.
                         if let Ok(going_to_sleep) = msg.body().deserialize::<(bool,)>()
                             && going_to_sleep.0
                         {
@@ -524,17 +531,20 @@ async fn logind_watcher(
                     }
                 }
             }
-            msg = session_removed_stream.try_next(), if on_logout => {
+            msg = session_removed_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
-                        // SessionRemoved(id: &str, path: OwnedObjectPath)
-                        // Only lock if the removed session is *our* session.
-                        if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
-                            let removed_id = body.0;
-                            if session_id.as_deref() == Some(&removed_id) {
-                                tracing::info!(session = %removed_id, "logind: our session removed — locking");
-                                if let Err(e) = state.auto_lock().await {
-                                    tracing::warn!("auto-lock on logout failed: {e}");
+                        // Check live config — on_logout may have changed since startup.
+                        if state.live_config().autolock.on_logout {
+                            // SessionRemoved(id: &str, path: OwnedObjectPath)
+                            // Only lock if the removed session is *our* session.
+                            if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
+                                let removed_id = body.0;
+                                if session_id.as_deref() == Some(&removed_id) {
+                                    tracing::info!(session = %removed_id, "logind: our session removed — locking");
+                                    if let Err(e) = state.auto_lock().await {
+                                        tracing::warn!("auto-lock on logout failed: {e}");
+                                    }
                                 }
                             }
                         }
@@ -550,9 +560,12 @@ async fn logind_watcher(
             msg = poll_lock_stream(&mut lock_stream_opt), if lock_stream_opt.is_some() => {
                 match msg {
                     Some(Ok(_)) => {
-                        tracing::info!("logind: session Lock signal — locking all backends");
-                        if let Err(e) = state.auto_lock().await {
-                            tracing::warn!("auto-lock on session lock failed: {e}");
+                        // Check live config — on_session_lock may have changed since startup.
+                        if state.live_config().autolock.on_session_lock {
+                            tracing::info!("logind: session Lock signal — locking all backends");
+                            if let Err(e) = state.auto_lock().await {
+                                tracing::warn!("auto-lock on session lock failed: {e}");
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -805,6 +818,52 @@ async fn config_watcher(
                 }
             }
         }
+
+        // ── Hot-reload non-backend config sections ─────────────────────────
+        // These are live-updated in ServiceState and the Router so background
+        // tasks pick up the new values on their next tick without a restart.
+        let old_config = state.live_config();
+
+        if new_config.service.dedup_strategy != old_config.service.dedup_strategy
+            || new_config.service.dedup_time_fallback != old_config.service.dedup_time_fallback
+        {
+            state.router.update_config(rosec_core::router::RouterConfig {
+                dedup_strategy: new_config.service.dedup_strategy,
+                dedup_time_fallback: new_config.service.dedup_time_fallback,
+            });
+            tracing::info!(
+                dedup_strategy = ?new_config.service.dedup_strategy,
+                dedup_time_fallback = ?new_config.service.dedup_time_fallback,
+                "hot-reload: service dedup config updated"
+            );
+        }
+        if new_config.service.refresh_interval_secs != old_config.service.refresh_interval_secs {
+            tracing::info!(
+                refresh_interval_secs = ?new_config.service.refresh_interval_secs,
+                "hot-reload: refresh_interval_secs updated (takes effect on next timer tick)"
+            );
+        }
+        if new_config.autolock != old_config.autolock {
+            tracing::info!(
+                idle_timeout_minutes = ?new_config.autolock.idle_timeout_minutes,
+                max_unlocked_minutes = ?new_config.autolock.max_unlocked_minutes,
+                on_session_lock = new_config.autolock.on_session_lock,
+                on_logout = new_config.autolock.on_logout,
+                "hot-reload: autolock policy updated"
+            );
+        }
+        if new_config.prompt.backend != old_config.prompt.backend
+            || new_config.prompt.args != old_config.prompt.args
+        {
+            tracing::info!(
+                backend = %new_config.prompt.backend,
+                "hot-reload: prompt config updated"
+            );
+        }
+
+        // Atomically push the new config into ServiceState so all live readers
+        // (autolock loop, cache rebuild, logind watcher, prompt) see it.
+        state.update_live_config(new_config.clone());
 
         known = new_fingerprints;
         tracing::info!(
