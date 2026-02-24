@@ -8,6 +8,8 @@ pub mod service;
 pub mod session;
 pub mod session_iface;
 pub mod state;
+pub mod tty;
+pub mod unlock;
 
 pub use service::SecretService;
 pub use state::ServiceState;

@@ -794,7 +794,7 @@ impl ServiceState {
             .map_err(|e| FdoError::Failed(format!("auth task panicked: {e}")))?
     }
 
-    async fn auth_backend_inner(
+    pub(crate) async fn auth_backend_inner(
         &self,
         backend_id: &str,
         fields: HashMap<String, String>,

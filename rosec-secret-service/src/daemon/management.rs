@@ -6,8 +6,10 @@ use tracing::debug;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
+use zvariant::OwnedFd;
 
 use crate::state::ServiceState;
+use crate::unlock::{UnlockResult, auth_backend_with_tty, unlock_with_tty};
 
 /// Log the D-Bus caller at debug level for a management method.
 fn log_caller(method: &str, header: &Header<'_>) {
@@ -247,6 +249,92 @@ impl RosecManagement {
         Ok(true)
     }
 
+    /// Unlock all locked backends using credentials prompted on the caller's TTY.
+    ///
+    /// The caller opens `/dev/tty` and passes the file descriptor via D-Bus
+    /// fd-passing (SCM_RIGHTS, type signature `h`).  `dbus-monitor` sees only
+    /// the fd number — never any credential.  All prompting happens inside the
+    /// daemon process via the received fd.
+    ///
+    /// Returns a list of `(backend_id, success, message)` tuples — one per
+    /// backend that was locked at the time of the call.
+    async fn unlock_with_tty(
+        &self,
+        tty_fd: OwnedFd,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<UnlockResultEntry>, FdoError> {
+        log_caller("UnlockWithTty", &header);
+
+        // Duplicate the fd so it survives the move into the Tokio task.
+        // SAFETY: as_raw_fd() returns a valid fd owned by tty_fd (which is
+        // kept alive until this function returns); dup() produces a new
+        // independent fd that we own and close after the task completes.
+        use std::os::unix::io::AsRawFd as _;
+        let raw: libc::c_int = unsafe { libc::dup(tty_fd.as_raw_fd()) };
+        if raw < 0 {
+            return Err(FdoError::Failed(format!(
+                "dup(tty_fd) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let state = Arc::clone(&self.state);
+        let results: Vec<UnlockResult> = self
+            .state
+            .run_on_tokio(async move {
+                let res = unlock_with_tty(state, raw).await;
+                // Close our dup'd fd after the unlock completes.
+                unsafe { libc::close(raw) };
+                res
+            })
+            .await?
+            .map_err(|e| FdoError::Failed(format!("unlock_with_tty error: {e}")))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| UnlockResultEntry {
+                backend_id: r.backend_id,
+                success: r.success,
+                message: r.message,
+            })
+            .collect())
+    }
+
+    /// Authenticate a specific backend using credentials prompted on the caller's TTY.
+    ///
+    /// Like `UnlockWithTty` but targets a single backend by ID.  Used by
+    /// `rosec backend auth` and `rosec backend add`.
+    ///
+    /// Credentials are prompted in-process on the fd received via fd-passing;
+    /// they never appear in any D-Bus message payload.
+    async fn auth_backend_with_tty(
+        &self,
+        backend_id: String,
+        tty_fd: OwnedFd,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), FdoError> {
+        log_caller("AuthBackendWithTty", &header);
+
+        use std::os::unix::io::AsRawFd as _;
+        let raw: libc::c_int = unsafe { libc::dup(tty_fd.as_raw_fd()) };
+        if raw < 0 {
+            return Err(FdoError::Failed(format!(
+                "dup(tty_fd) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let state = Arc::clone(&self.state);
+        self.state
+            .run_on_tokio(async move {
+                let res = auth_backend_with_tty(state, raw, &backend_id).await;
+                unsafe { libc::close(raw) };
+                res
+            })
+            .await?
+            .map_err(|e| FdoError::Failed(format!("auth_backend_with_tty error: {e}")))
+    }
+
     /// Cancel an active prompt subprocess by its D-Bus object path.
     ///
     /// Used by the `rosec` CLI (and other clients) to cleanly cancel a running
@@ -313,4 +401,13 @@ pub struct AuthFieldInfo {
     pub kind: String,
     pub placeholder: String,
     pub required: bool,
+}
+
+/// Result entry returned by `UnlockWithTty`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+pub struct UnlockResultEntry {
+    pub backend_id: String,
+    pub success: bool,
+    /// Human-readable status message (e.g. "unlocked", "wrong password").
+    pub message: String,
 }

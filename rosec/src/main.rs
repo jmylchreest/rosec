@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::process::Stdio;
 
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use anyhow::{Result, bail};
@@ -286,364 +284,14 @@ fn load_config() -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt helpers (client-side credential collection)
+// Prompt helpers (local config-value collection only — not credentials)
 // ---------------------------------------------------------------------------
-
-/// JSON types matching the rosec-prompt wire protocol.
-#[derive(Serialize)]
-struct PromptRequest<'a> {
-    #[serde(rename = "t")]
-    title: &'a str,
-    #[serde(rename = "m")]
-    message: &'a str,
-    #[serde(rename = "h")]
-    hint: &'a str,
-    backend: &'a str,
-    confirm_label: &'a str,
-    cancel_label: &'a str,
-    fields: Vec<PromptField<'a>>,
-    theme: PromptTheme<'a>,
-}
-
-#[derive(Serialize, Clone)]
-struct PromptField<'a> {
-    id: &'a str,
-    label: &'a str,
-    kind: &'a str,
-    placeholder: &'a str,
-}
-
-#[derive(Serialize)]
-struct PromptTheme<'a> {
-    #[serde(rename = "bg")]
-    background: &'a str,
-    #[serde(rename = "fg")]
-    foreground: &'a str,
-    #[serde(rename = "bdr")]
-    border_color: &'a str,
-    #[serde(rename = "bw")]
-    border_width: u16,
-    #[serde(rename = "font")]
-    font_family: &'a str,
-    #[serde(rename = "lc")]
-    label_color: &'a str,
-    #[serde(rename = "ac")]
-    accent_color: &'a str,
-    #[serde(rename = "ybg")]
-    confirm_background: &'a str,
-    #[serde(rename = "yt")]
-    confirm_text: &'a str,
-    #[serde(rename = "nbg")]
-    cancel_background: &'a str,
-    #[serde(rename = "nt")]
-    cancel_text: &'a str,
-    #[serde(rename = "ibg")]
-    input_background: &'a str,
-    #[serde(rename = "it")]
-    input_text: &'a str,
-    #[serde(rename = "size")]
-    font_size: u16,
-}
-
-/// Resolve the path to the named binary, checking sibling of current exe first
-/// (handles cargo dev builds in target/debug/ and same-directory installs).
-fn resolve_binary(name: &str) -> String {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    name.to_string()
-}
-
-/// Collect credentials for `backend_id` using the configured prompt program
-/// (or TTY fallback), then call `AuthBackend` over D-Bus.
-///
-/// `field_descs` is the list returned by `GetAuthFields`.
-/// `backend_kind` is the kind string (e.g. `"bitwarden"`, `"bitwarden-sm"`)
-/// and is used to select the right action verb for the prompt title.
-/// `prefill` carries credentials already collected (e.g. from the opportunistic
-/// unlock sweep) — when `Some`, the initial credential prompt is skipped and the
-/// pre-filled map is sent directly to `AuthBackend`.  Used when a backend
-/// returned `RegistrationRequired` during opportunistic unlock so the user is
-/// not asked to re-enter the password they just typed.
-/// `force_tty` suppresses the GUI prompt even when a display is available —
-/// used by `backend auth` and `backend add` which are explicit CLI admin
-/// operations where the user is already at the terminal.
-/// Returns `Ok(())` if the backend was successfully authenticated.
-#[allow(clippy::too_many_arguments)]
-async fn prompt_and_auth(
-    backend_id: &str,
-    backend_name: &str,
-    backend_kind: &str,
-    field_descs: &[(String, String, String, String, bool)],
-    prefill: Option<&HashMap<String, Zeroizing<String>>>,
-    proxy: &zbus::Proxy<'_>,
-    config: &Config,
-    force_tty: bool,
-) -> Result<()> {
-    let theme = &config.prompt.theme;
-
-    let fields: Vec<PromptField<'_>> = field_descs
-        .iter()
-        .map(|(id, label, kind, placeholder, _)| PromptField {
-            id: id.as_str(),
-            label: label.as_str(),
-            kind: kind.as_str(),
-            placeholder: placeholder.as_str(),
-        })
-        .collect();
-
-    // SM uses token-based auth, not a vault password — use "Authenticate"
-    // as the action verb.  All other backends use "Unlock".
-    let is_token_auth = backend_kind.ends_with("-sm");
-    let action_verb = if is_token_auth {
-        "Authenticate"
-    } else {
-        "Unlock"
-    };
-    let confirm_label = if is_token_auth {
-        "Authenticate"
-    } else {
-        "Unlock"
-    };
-
-    // The human-readable name (which may contain PII such as an email address)
-    // is shown in the tooltip (hint) so it is discoverable on hover but does
-    // not occupy visible space or leak into the main window text.
-    let hint = if backend_name.is_empty() || backend_name == backend_id {
-        String::new()
-    } else {
-        backend_name.to_string()
-    };
-    let request = PromptRequest {
-        title: &format!("{action_verb} {backend_id}"),
-        message: "",
-        hint: &hint,
-        backend: backend_id,
-        confirm_label,
-        cancel_label: "Cancel",
-        fields: fields.clone(),
-        theme: PromptTheme {
-            background: &theme.background,
-            foreground: &theme.foreground,
-            border_color: &theme.border_color,
-            border_width: theme.border_width,
-            font_family: &theme.font_family,
-            label_color: &theme.label_color,
-            accent_color: &theme.accent_color,
-            confirm_background: &theme.confirm_background,
-            confirm_text: &theme.confirm_text,
-            cancel_background: &theme.cancel_background,
-            cancel_text: &theme.cancel_text,
-            input_background: &theme.input_background,
-            input_text: &theme.input_text,
-            font_size: theme.font_size,
-        },
-    };
-
-    let json = serde_json::to_string(&request)?;
-
-    // Helper: build the borrowed &str map for a D-Bus call without allocating.
-    macro_rules! as_str_map {
-        ($map:expr) => {
-            $map.iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect::<HashMap<&str, &str>>()
-        };
-    }
-
-    // If credentials were already collected (e.g. from the opportunistic unlock
-    // sweep), skip the prompt and use them directly.  The backend returned
-    // RegistrationRequired, so we'll still need to collect registration-specific
-    // fields below — but we do not re-prompt for the password.
-    if let Some(existing) = prefill {
-        let mut cred_map: HashMap<String, Zeroizing<String>> =
-            existing.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-        // This call is expected to return RegistrationRequired — that's why
-        // we have a prefill.  Collect only the registration fields via TTY.
-        let result: Result<bool, zbus::Error> = with_spinner("Verifying…", async {
-            proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await
-        }).await;
-
-        let needs_registration = matches!(
-            &result,
-            Err(zbus::Error::MethodError(_, Some(detail), _)) if detail.as_str() == "registration_required"
-        );
-
-        if needs_registration {
-            type FieldDesc = (String, String, String, String, bool);
-            let (instructions, reg_field_descs): (String, Vec<FieldDesc>) =
-                proxy.call("GetRegistrationInfo", &(backend_id,)).await?;
-            eprintln!();
-            eprintln!("{instructions}");
-            eprintln!();
-
-            // No confirmation needed here: the prefilled password was already
-            // verified by a successful unlock of another backend in the
-            // opportunistic sweep — it is not an unverified new passphrase.
-
-            let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
-                .iter()
-                .map(|(id, label, kind, placeholder, _)| PromptField {
-                    id: id.as_str(),
-                    label: label.as_str(),
-                    kind: kind.as_str(),
-                    placeholder: placeholder.as_str(),
-                })
-                .collect();
-            let reg_extra = collect_tty(&reg_only_fields).await?;
-            cred_map.extend(reg_extra);
-            let _ok: bool = with_spinner("Saving…", async {
-                proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await
-            }).await?;
-        } else {
-            result?;
-        }
-        drop(cred_map);
-        return Ok(());
-    }
-
-    // No prefill — print a header so the user knows which backend they are
-    // unlocking, then collect credentials fresh via the configured prompt.
-    eprintln!();
-    if backend_name.is_empty() || backend_name == backend_id {
-        eprintln!("Unlocking {backend_id}");
-    } else {
-        eprintln!("Unlocking {backend_id}  ({})", backend_name);
-    }
-
-    let has_display = !force_tty
-        && (std::env::var_os("WAYLAND_DISPLAY").is_some()
-            || std::env::var_os("DISPLAY").is_some());
-
-    let collected: HashMap<String, Zeroizing<String>> =
-        if has_display {
-            let program = match config.prompt.backend.as_str() {
-                "builtin" | "" => resolve_binary("rosec-prompt"),
-                custom => custom.to_string(),
-            };
-
-            let spawn_result = std::process::Command::new(&program)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn();
-
-            match spawn_result {
-                Ok(mut child) => {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        stdin.write_all(json.as_bytes())?;
-                    }
-                    let output = child.wait_with_output()?;
-                    if !output.status.success() {
-                        bail!("prompt cancelled");
-                    }
-                    let raw: HashMap<String, String> =
-                        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())?;
-                    raw.into_iter()
-                        .map(|(k, v)| (k, Zeroizing::new(v)))
-                        .collect()
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotFound
-                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
-                {
-                    // GUI binary not available — fall through to TTY
-                    collect_tty(&fields).await?
-                }
-                Err(e) => bail!("failed to launch prompt: {e}"),
-            }
-        } else {
-            collect_tty(&fields).await?
-        };
-
-    // Call AuthBackend with the collected values.
-    // `cred_map` holds credentials as Zeroizing<String> throughout so they are
-    // scrubbed on drop.  When calling D-Bus we build a temporary borrowed view
-    // (HashMap<&str, &str>) to avoid creating any plain String copies.
-    let mut cred_map: HashMap<String, Zeroizing<String>> = collected;
-
-    let result: Result<bool, zbus::Error> = with_spinner("Verifying…", async {
-        proxy
-            .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
-            .await
-    })
-    .await;
-
-    let needs_registration = matches!(
-        &result,
-        Err(zbus::Error::MethodError(_, Some(detail), _)) if detail.as_str() == "registration_required"
-    );
-
-    if needs_registration {
-        type FieldDesc = (String, String, String, String, bool);
-        let (instructions, reg_field_descs): (String, Vec<FieldDesc>) =
-            proxy.call("GetRegistrationInfo", &(backend_id,)).await?;
-
-        eprintln!();
-        eprintln!("{instructions}");
-        eprintln!();
-
-        // This is first-time setup: the password the user just typed has not
-        // been verified against anything stored.  Ask for a single confirmation
-        // entry per password/secret field (no re-prompt of the label — the user
-        // just typed it) and loop until it matches, so a typo doesn't lock them
-        // out permanently.
-        eprintln!("Please confirm your password (it has not been verified yet):");
-        eprintln!();
-        for (id, label, kind, _, _) in field_descs
-            .iter()
-            .filter(|(_, _, kind, _, _)| kind == "password" || kind == "secret")
-        {
-            let original = cred_map
-                .get(id.as_str())
-                .map(|v| v.as_str().to_string())
-                .unwrap_or_default();
-            loop {
-                let confirm_label = format!("Confirm {label}");
-                let entry = prompt_field(&confirm_label, "", kind).await?;
-                if entry.as_str() == original {
-                    break;
-                }
-                eprintln!("Does not match — please try again.");
-                eprintln!();
-            }
-        }
-
-        // Now collect the registration-specific fields (e.g. the access token).
-        let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
-            .iter()
-            .map(|(id, label, kind, placeholder, _)| PromptField {
-                id: id.as_str(),
-                label: label.as_str(),
-                kind: kind.as_str(),
-                placeholder: placeholder.as_str(),
-            })
-            .collect();
-
-        let reg_extra = collect_tty(&reg_only_fields).await?;
-        cred_map.extend(reg_extra);
-
-        let _ok: bool = with_spinner("Saving…", async {
-            proxy
-                .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
-                .await
-        })
-        .await?;
-    } else {
-        result?;
-    }
-
-    // cred_map is dropped here; all Zeroizing<String> values are scrubbed.
-    drop(cred_map);
-
-    Ok(())
-}
+//
+// These functions are used by `cmd_backend_add` to collect non-secret
+// configuration values (email address, region, base_url, etc.) that go into
+// config.toml.  Credential prompting (passwords, tokens) is handled entirely
+// inside `rosecd` via `UnlockWithTty` / `AuthBackendWithTty` — the TTY fd is
+// passed via D-Bus fd-passing so credentials never appear in any D-Bus message.
 
 // ---------------------------------------------------------------------------
 // Lazy-unlock: detect "locked::<backend_id>" D-Bus errors and prompt
@@ -791,17 +439,6 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Collect credentials via TTY for the given fields.
-async fn collect_tty(fields: &[PromptField<'_>]) -> Result<HashMap<String, Zeroizing<String>>> {
-    eprintln!();
-    let mut map = HashMap::new();
-    for f in fields {
-        let v = prompt_field(f.label, f.placeholder, f.kind).await?;
-        map.insert(f.id.to_string(), v);
-    }
-    Ok(map)
-}
-
 /// Run `fut` while showing a TTY spinner on stderr.
 ///
 /// Prints braille spinner frames at ~80 ms intervals until the future resolves,
@@ -852,8 +489,27 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Secure field collection
+// Secure field collection (used locally for config-value prompts in `add`)
 // ---------------------------------------------------------------------------
+
+/// Open `/dev/tty` and return it as a `zvariant::OwnedFd` for D-Bus fd-passing.
+///
+/// The returned `OwnedFd` can be passed directly to `UnlockWithTty` /
+/// `AuthBackendWithTty`.  `dbus-monitor` sees only the fd number, never the
+/// terminal contents.
+fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
+    use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|e| anyhow::anyhow!("cannot open /dev/tty: {e}"))?;
+    let raw = file.into_raw_fd();
+    // SAFETY: raw is a freshly-opened, valid, owned fd.
+    let std_owned: std::os::fd::OwnedFd =
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    Ok(zvariant::OwnedFd::from(std_owned))
+}
 
 /// Read one line from `fd` with terminal echo disabled.
 ///
@@ -1067,21 +723,15 @@ async fn cmd_backend_list() -> Result<()> {
 
 /// `rosec backend auth <id>` — interactively authenticate a backend.
 ///
-/// Normal flow:
-///   1. `GetAuthFields` → prompt each field (always includes the password field first)
-///   2. `AuthBackend` with all collected values
-///
-/// Registration flow (first-time device / new token):
-///   If `AuthBackend` returns a D-Bus error whose message is `"registration_required"`:
-///   3. `GetRegistrationInfo` → display instructions, prompt extra fields
-///   4. Retry `AuthBackend` with password + registration fields combined
+/// Opens `/dev/tty` and passes the fd to `rosecd` via D-Bus fd-passing.
+/// All credential prompting happens inside the daemon — credentials never
+/// appear in any D-Bus message payload.
 async fn cmd_backend_auth(args: &[String]) -> Result<()> {
     let backend_id = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("usage: rosec backend auth <backend-id>"))?;
 
     let conn = conn().await?;
-    let config = load_config();
     let proxy = zbus::Proxy::new(
         &conn,
         "org.freedesktop.secrets",
@@ -1090,26 +740,10 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
     )
     .await?;
 
-    // Resolve the friendly backend name and kind from BackendList.
-    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
-    let entry = backends.iter().find(|(id, _, _, _)| id == backend_id);
-    let backend_name = entry.map(|(_, name, _, _)| name.as_str()).unwrap_or("");
-    let backend_kind = entry.map(|(_, _, k, _)| k.as_str()).unwrap_or("");
-
-    let field_descs: Vec<(String, String, String, String, bool)> =
-        proxy.call("GetAuthFields", &(backend_id,)).await?;
-
-    prompt_and_auth(
-        backend_id,
-        backend_name,
-        backend_kind,
-        &field_descs,
-        None,
-        &proxy,
-        &config,
-        true, // force_tty: backend auth is an explicit CLI admin operation
-    )
-    .await?;
+    let tty_fd = open_tty_owned_fd()?;
+    let _: () = proxy
+        .call("AuthBackendWithTty", &(backend_id.as_str(), tty_fd))
+        .await?;
 
     println!("Backend '{backend_id}' authenticated.");
     Ok(())
@@ -1233,10 +867,10 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
 
             if appeared {
                 println!("rosecd picked up the new backend — starting authentication.");
-                let config = load_config();
-                let field_descs: Vec<(String, String, String, String, bool)> =
-                    proxy.call("GetAuthFields", &(id.as_str(),)).await?;
-                prompt_and_auth(&id, kind, kind, &field_descs, None, &proxy, &config, true).await?;
+                let tty_fd = open_tty_owned_fd()?;
+                let _: () = proxy
+                    .call("AuthBackendWithTty", &(id.as_str(), tty_fd))
+                    .await?;
                 println!("Backend '{id}' authenticated.");
             } else {
                 println!("rosecd will hot-reload the config automatically if it is running.");
@@ -1344,12 +978,10 @@ async fn cmd_sync() -> Result<()> {
     )
     .await?;
 
-    let config = load_config();
-
     // Fetch the list of backends so we know which ones to sync.
     let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
-    for (id, name, kind, _locked) in &backends {
+    for (id, _name, _kind, _locked) in &backends {
         eprint!("Syncing '{id}'...");
         match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
             Ok(count) => {
@@ -1359,11 +991,14 @@ async fn cmd_sync() -> Result<()> {
                 if detail.as_str().starts_with("locked::") =>
             {
                 // Daemon says this backend needs credentials first.
+                // Pass a TTY fd so the daemon can prompt in-process —
+                // credentials never appear in any D-Bus message.
                 let backend_id = detail.as_str().trim_start_matches("locked::");
                 eprintln!(" locked");
-                let field_descs: Vec<(String, String, String, String, bool)> =
-                    proxy.call("GetAuthFields", &(backend_id,)).await?;
-                prompt_and_auth(backend_id, name, kind, &field_descs, None, &proxy, &config, true).await?;
+                let tty_fd = open_tty_owned_fd()?;
+                let _: () = proxy
+                    .call("AuthBackendWithTty", &(backend_id, tty_fd))
+                    .await?;
                 // Retry sync now that the backend is unlocked.
                 eprint!("Syncing '{id}' (retrying)...");
                 match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
@@ -2631,7 +2266,6 @@ async fn cmd_lock() -> Result<()> {
 
 async fn cmd_unlock() -> Result<()> {
     let conn = conn().await?;
-    let config = load_config();
 
     let proxy = zbus::Proxy::new(
         &conn,
@@ -2643,159 +2277,42 @@ async fn cmd_unlock() -> Result<()> {
 
     let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
 
-    // Separate already-unlocked from locked backends.
-    let mut locked: Vec<(String, String, String)> = Vec::new(); // (id, name, kind)
-    for (id, name, kind, is_locked) in &backends {
-        if !is_locked {
-            println!("'{id}' is already unlocked.");
-        } else {
-            locked.push((id.clone(), name.clone(), kind.clone()));
-        }
-    }
-
-    if locked.is_empty() {
-        if backends.is_empty() {
-            println!("No backends configured. Run `rosec backend add <kind>` to add one.");
-        }
+    if backends.is_empty() {
+        println!("No backends configured. Run `rosec backend add <kind>` to add one.");
         return Ok(());
     }
 
-    // Opportunistic unlock: collect a password once and try it against all
-    // locked backends simultaneously.  Backends that fail (wrong password or
-    // no stored credential) are deferred and prompted for individually.  This
-    // means the user enters their password once if all backends share it, or
-    // as few times as there are distinct passwords.
-    //
-    // If a backend returned RegistrationRequired, the already-collected
-    // password is carried forward so the user is not asked to enter it again —
-    // only the registration-specific fields (e.g. the SM access token) are
-    // prompted for via TTY.
-    let remaining = opportunistic_unlock(&locked, &proxy, &config).await?;
+    // Report already-unlocked backends.
+    let any_locked = backends.iter().any(|(_, _, _, locked)| *locked);
+    for (id, _, _, is_locked) in &backends {
+        if !is_locked {
+            println!("'{id}' is already unlocked.");
+        }
+    }
 
-    // Any that still failed get their own targeted prompt.
-    for (id, name, kind, prefill) in &remaining {
-        let field_descs: Vec<(String, String, String, String, bool)> =
-            proxy.call("GetAuthFields", &(id,)).await?;
-        prompt_and_auth(id, name, kind, &field_descs, prefill.as_ref(), &proxy, &config, false).await?;
-        println!("'{id}' unlocked.");
+    if !any_locked {
+        return Ok(());
+    }
+
+    // Pass the caller's TTY fd to the daemon via D-Bus fd-passing.
+    // All credential prompting happens inside rosecd — credentials never
+    // appear in any D-Bus message payload.
+    let tty_fd = open_tty_owned_fd()?;
+    type ResultEntry = (String, bool, String); // (backend_id, success, message)
+    let results: Vec<ResultEntry> = with_spinner("Unlocking…", async {
+        proxy.call("UnlockWithTty", &(tty_fd,)).await
+    })
+    .await?;
+
+    for (id, success, message) in &results {
+        if *success {
+            println!("'{id}' unlocked.");
+        } else {
+            eprintln!("'{id}' failed: {message}");
+        }
     }
 
     Ok(())
-}
-
-/// Prompt once and try the entered password against all `backends` concurrently.
-///
-/// Returns the subset that failed.  Each entry is `(id, name, kind, prefill)`:
-/// - `prefill = Some(creds)` when the backend returned `RegistrationRequired` —
-///   the already-collected credentials are carried forward so `prompt_and_auth`
-///   can skip re-prompting for the password and go straight to registration fields.
-/// - `prefill = None` for plain auth failures (wrong password) — a fresh prompt
-///   is needed.
-async fn opportunistic_unlock(
-    backends: &[(String, String, String)], // (id, name, kind)
-    proxy: &zbus::Proxy<'_>,
-    _config: &Config,
-) -> Result<Vec<(String, String, String, Option<HashMap<String, Zeroizing<String>>>)>> {
-    if backends.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // If there is only one backend, skip the opportunistic step and go straight
-    // to the normal targeted prompt (avoids a redundant "try and fail" round-trip).
-    if backends.len() == 1 {
-        let (id, name, kind) = &backends[0];
-        return Ok(vec![(id.clone(), name.clone(), kind.clone(), None)]);
-    }
-
-    // Collect field descriptors for all locked backends.
-    type FieldDesc = (String, String, String, String, bool);
-    let mut all_fields: Vec<(String, String, String, Vec<FieldDesc>)> = Vec::new();
-    for (id, name, kind) in backends {
-        let fields: Vec<FieldDesc> = proxy.call("GetAuthFields", &(id,)).await?;
-        all_fields.push((id.clone(), name.clone(), kind.clone(), fields));
-    }
-
-    // Print a clear header listing every backend we are about to unlock.
-    eprintln!();
-    eprintln!("Unlocking {} backend{}:", all_fields.len(), if all_fields.len() == 1 { "" } else { "s" });
-    for (id, name, _kind, _fields) in &all_fields {
-        if name.is_empty() || name == id {
-            eprintln!("  {id}");
-        } else {
-            eprintln!("  {id:<30}  ({})", name);
-        }
-    }
-
-    // Use the first backend's password field label/kind as representative —
-    // all backends share a password field.  We prompt once for all of them.
-    let (_first_id, _first_name, _first_kind, first_fields) = &all_fields[0];
-    let pw_field = first_fields.first().ok_or_else(|| anyhow::anyhow!("backend returned no auth fields"))?;
-
-    // Prompt once via TTY using the field's own label (e.g. "Master Password").
-    let pfields = [PromptField {
-        id: pw_field.0.as_str(),
-        label: pw_field.1.as_str(),
-        kind: pw_field.2.as_str(),
-        placeholder: pw_field.3.as_str(),
-    }];
-    let collected = collect_tty(&pfields).await?;
-
-    let string_map: HashMap<String, String> = collected
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-        .collect();
-
-    // Try the collected credentials against all locked backends concurrently.
-    let results = with_spinner("Verifying…", async {
-        futures_util::future::join_all(all_fields.iter().map(|(id, name, kind, _fields)| {
-            let proxy = proxy.clone();
-            let id = id.clone();
-            let name = name.clone();
-            let kind = kind.clone();
-            let map = string_map.clone();
-            async move {
-                let result: Result<bool, zbus::Error> =
-                    proxy.call("AuthBackend", &(&id, &map)).await;
-                (id, name, kind, result)
-            }
-        }))
-        .await
-    })
-    .await;
-
-    // Collect failures — these need individual prompts.
-    let mut failed = Vec::new();
-    for (id, name, kind, result) in results {
-        match result {
-            Ok(_) => {
-                println!("'{id}' unlocked.");
-            }
-            Err(e) => {
-                tracing::debug!(backend = %id, "opportunistic unlock did not succeed: {e}");
-                // If RegistrationRequired, carry the collected credentials
-                // forward so prompt_and_auth can skip re-prompting for the
-                // password and only collect the registration-specific fields.
-                let needs_registration = matches!(
-                    &e,
-                    zbus::Error::MethodError(_, Some(detail), _)
-                        if detail.as_str() == "registration_required"
-                );
-                let prefill = if needs_registration {
-                    Some(
-                        collected
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect::<HashMap<String, Zeroizing<String>>>(),
-                    )
-                } else {
-                    None
-                };
-                failed.push((id, name, kind, prefill));
-            }
-        }
-    }
-
-    Ok(failed)
 }
 
 // ---------------------------------------------------------------------------
