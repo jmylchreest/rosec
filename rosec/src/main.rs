@@ -488,23 +488,9 @@ async fn prompt_and_auth(
             eprintln!("{instructions}");
             eprintln!();
 
-            // The prefilled password hasn't been verified — confirm it before saving.
-            let confirm_fields: Vec<PromptField<'_>> = field_descs
-                .iter()
-                .filter(|(_, _, kind, _, _)| kind == "password" || kind == "secret")
-                .map(|(id, label, kind, placeholder, _)| PromptField {
-                    id: id.as_str(),
-                    label: label.as_str(),
-                    kind: kind.as_str(),
-                    placeholder: placeholder.as_str(),
-                    confirm: true,
-                })
-                .collect();
-            if !confirm_fields.is_empty() {
-                eprintln!("Please confirm your password (it cannot be verified until after setup):");
-                let confirmed = collect_tty(&confirm_fields).await?;
-                cred_map.extend(confirmed);
-            }
+            // No confirmation needed here: the prefilled password was already
+            // verified by a successful unlock of another backend in the
+            // opportunistic sweep — it is not an unverified new passphrase.
 
             let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
                 .iter()
