@@ -11,7 +11,7 @@ use rosec_core::{
     Attributes, BackendError, RecoveryOutcome, SecretBytes, UnlockInput, VaultBackend,
     VaultItemMeta,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zbus::Connection;
 use zbus::fdo::Error as FdoError;
 use zeroize::Zeroizing;
@@ -1296,7 +1296,7 @@ impl ServiceState {
                     // Auto-unlock backend (e.g. SM) whose recover() failed —
                     // skip it and continue with the remaining backends so the
                     // other backends' items still populate the cache.
-                    warn!(backend = %bid, "skipping locked backend during cache fetch");
+                    debug!(backend = %bid, "skipping locked backend during cache fetch");
                     backend_ids.push(bid);
                     continue;
                 }
