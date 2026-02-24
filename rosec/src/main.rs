@@ -365,12 +365,18 @@ fn resolve_binary(name: &str) -> String {
 /// `field_descs` is the list returned by `GetAuthFields`.
 /// `backend_kind` is the kind string (e.g. `"bitwarden"`, `"bitwarden-sm"`)
 /// and is used to select the right action verb for the prompt title.
+/// `prefill` carries credentials already collected (e.g. from the opportunistic
+/// unlock sweep) — when `Some`, the initial credential prompt is skipped and the
+/// pre-filled map is sent directly to `AuthBackend`.  Used when a backend
+/// returned `RegistrationRequired` during opportunistic unlock so the user is
+/// not asked to re-enter the password they just typed.
 /// Returns `Ok(())` if the backend was successfully authenticated.
 async fn prompt_and_auth(
     backend_id: &str,
     backend_name: &str,
     backend_kind: &str,
     field_descs: &[(String, String, String, String, bool)],
+    prefill: Option<&HashMap<String, Zeroizing<String>>>,
     proxy: &zbus::Proxy<'_>,
     config: &Config,
 ) -> Result<()> {
@@ -436,7 +442,61 @@ async fn prompt_and_auth(
 
     let json = serde_json::to_string(&request)?;
 
-    // Determine the prompt program path.
+    // If credentials were already collected (e.g. from the opportunistic unlock
+    // sweep), skip the prompt and use them directly.  The backend returned
+    // RegistrationRequired, so we'll still need to collect registration-specific
+    // fields below — but we do not re-prompt for the password.
+    if let Some(existing) = prefill {
+        let mut cred_map: HashMap<String, Zeroizing<String>> =
+            existing.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        macro_rules! as_str_map {
+            ($map:expr) => {
+                $map.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<HashMap<&str, &str>>()
+            };
+        }
+
+        // This call is expected to return RegistrationRequired — that's why
+        // we have a prefill.  Collect only the registration fields via TTY.
+        let result: Result<bool, zbus::Error> =
+            proxy.call("AuthBackend", &(backend_id, as_str_map!(cred_map))).await;
+
+        let needs_registration = matches!(
+            &result,
+            Err(zbus::Error::MethodError(_, Some(detail), _)) if detail.as_str() == "registration_required"
+        );
+
+        if needs_registration {
+            type FieldDesc = (String, String, String, String, bool);
+            let (instructions, reg_field_descs): (String, Vec<FieldDesc>) =
+                proxy.call("GetRegistrationInfo", &(backend_id,)).await?;
+            eprintln!();
+            eprintln!("{instructions}");
+            eprintln!();
+            let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
+                .iter()
+                .map(|(id, label, kind, placeholder, _)| PromptField {
+                    id: id.as_str(),
+                    label: label.as_str(),
+                    kind: kind.as_str(),
+                    placeholder: placeholder.as_str(),
+                })
+                .collect();
+            let reg_extra = collect_tty(&reg_only_fields).await?;
+            cred_map.extend(reg_extra);
+            let _ok: bool = proxy
+                .call("AuthBackend", &(backend_id, as_str_map!(cred_map)))
+                .await?;
+        } else {
+            result?;
+        }
+        drop(cred_map);
+        return Ok(());
+    }
+
+    // No prefill — collect credentials fresh via the configured prompt.
     let has_display =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
@@ -947,6 +1007,7 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
         backend_name,
         backend_kind,
         &field_descs,
+        None,
         &proxy,
         &config,
     )
@@ -1077,7 +1138,7 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
                 let config = load_config();
                 let field_descs: Vec<(String, String, String, String, bool)> =
                     proxy.call("GetAuthFields", &(id.as_str(),)).await?;
-                prompt_and_auth(&id, kind, kind, &field_descs, &proxy, &config).await?;
+                prompt_and_auth(&id, kind, kind, &field_descs, None, &proxy, &config).await?;
                 println!("Backend '{id}' authenticated.");
             } else {
                 println!("rosecd will hot-reload the config automatically if it is running.");
@@ -1204,7 +1265,7 @@ async fn cmd_sync() -> Result<()> {
                 eprintln!(" locked");
                 let field_descs: Vec<(String, String, String, String, bool)> =
                     proxy.call("GetAuthFields", &(backend_id,)).await?;
-                prompt_and_auth(backend_id, name, kind, &field_descs, &proxy, &config).await?;
+                prompt_and_auth(backend_id, name, kind, &field_descs, None, &proxy, &config).await?;
                 // Retry sync now that the backend is unlocked.
                 eprint!("Syncing '{id}' (retrying)...");
                 match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
@@ -2491,13 +2552,18 @@ async fn cmd_unlock() -> Result<()> {
     // no stored credential) are deferred and prompted for individually.  This
     // means the user enters their password once if all backends share it, or
     // as few times as there are distinct passwords.
+    //
+    // If a backend returned RegistrationRequired, the already-collected
+    // password is carried forward so the user is not asked to enter it again —
+    // only the registration-specific fields (e.g. the SM access token) are
+    // prompted for via TTY.
     let remaining = opportunistic_unlock(&locked, &proxy, &config).await?;
 
     // Any that still failed get their own targeted prompt.
-    for (id, name, kind) in &remaining {
+    for (id, name, kind, prefill) in &remaining {
         let field_descs: Vec<(String, String, String, String, bool)> =
             proxy.call("GetAuthFields", &(id,)).await?;
-        prompt_and_auth(id, name, kind, &field_descs, &proxy, &config).await?;
+        prompt_and_auth(id, name, kind, &field_descs, prefill.as_ref(), &proxy, &config).await?;
         println!("'{id}' unlocked.");
     }
 
@@ -2506,13 +2572,17 @@ async fn cmd_unlock() -> Result<()> {
 
 /// Prompt once and try the entered password against all `backends` concurrently.
 ///
-/// Returns the subset that failed (wrong password / no stored credential) so the
-/// caller can prompt for them individually.
+/// Returns the subset that failed.  Each entry is `(id, name, kind, prefill)`:
+/// - `prefill = Some(creds)` when the backend returned `RegistrationRequired` —
+///   the already-collected credentials are carried forward so `prompt_and_auth`
+///   can skip re-prompting for the password and go straight to registration fields.
+/// - `prefill = None` for plain auth failures (wrong password) — a fresh prompt
+///   is needed.
 async fn opportunistic_unlock(
     backends: &[(String, String, String)], // (id, name, kind)
     proxy: &zbus::Proxy<'_>,
     _config: &Config,
-) -> Result<Vec<(String, String, String)>> {
+) -> Result<Vec<(String, String, String, Option<HashMap<String, Zeroizing<String>>>)>> {
     if backends.is_empty() {
         return Ok(Vec::new());
     }
@@ -2520,20 +2590,21 @@ async fn opportunistic_unlock(
     // If there is only one backend, skip the opportunistic step and go straight
     // to the normal targeted prompt (avoids a redundant "try and fail" round-trip).
     if backends.len() == 1 {
-        return Ok(backends.to_vec());
+        let (id, name, kind) = &backends[0];
+        return Ok(vec![(id.clone(), name.clone(), kind.clone(), None)]);
     }
 
     // Collect field descriptors for all locked backends.
     type FieldDesc = (String, String, String, String, bool);
-    let mut all_fields: Vec<(String, String, String, Vec<FieldDesc>)> = Vec::new(); // (id, name, kind, fields)
+    let mut all_fields: Vec<(String, String, String, Vec<FieldDesc>)> = Vec::new();
     for (id, name, kind) in backends {
         let fields: Vec<FieldDesc> = proxy.call("GetAuthFields", &(id,)).await?;
         all_fields.push((id.clone(), name.clone(), kind.clone(), fields));
     }
 
     // Prompt using the first backend's field descriptors as representative
-    // (all PM backends share the same single password field).  The label is
-    // overridden to make clear this will be tried across all backends.
+    // (all backends share the same password field).  The label is overridden
+    // to make clear this will be tried across all backends.
     let (_first_id, first_name, _first_kind, first_fields) = &all_fields[0];
     let label = if backends.len() == 2 {
         format!("Unlocking {} and 1 other backend", first_name)
@@ -2559,7 +2630,7 @@ async fn opportunistic_unlock(
         })
         .collect();
 
-    // Prompt once.
+    // Prompt once via TTY.
     let collected = {
         let pfields: Vec<PromptField<'_>> = combined_fields
             .iter()
@@ -2574,8 +2645,8 @@ async fn opportunistic_unlock(
     };
 
     let string_map: HashMap<String, String> = collected
-        .into_iter()
-        .map(|(k, v)| (k, v.as_str().to_string()))
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
         .collect();
 
     // Try the collected credentials against all locked backends concurrently.
@@ -2602,9 +2673,26 @@ async fn opportunistic_unlock(
                 println!("'{id}' unlocked.");
             }
             Err(e) => {
-                // Don't log the error — it's expected for mismatched passwords.
                 tracing::debug!(backend = %id, "opportunistic unlock did not succeed: {e}");
-                failed.push((id, name, kind));
+                // If RegistrationRequired, carry the collected credentials
+                // forward so prompt_and_auth can skip re-prompting for the
+                // password and only collect the registration-specific fields.
+                let needs_registration = matches!(
+                    &e,
+                    zbus::Error::MethodError(_, Some(detail), _)
+                        if detail.as_str() == "registration_required"
+                );
+                let prefill = if needs_registration {
+                    Some(
+                        collected
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<HashMap<String, Zeroizing<String>>>(),
+                    )
+                } else {
+                    None
+                };
+                failed.push((id, name, kind, prefill));
             }
         }
     }
