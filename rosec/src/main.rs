@@ -1283,6 +1283,23 @@ async fn preemptive_sync(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Returns `true` if the daemon reports at least one locked backend.
+///
+/// Used by `cmd_search` with `--sync` to distinguish "genuinely no results"
+/// from "empty because the metadata cache was never populated" (cold start with
+/// all backends locked).
+async fn any_backends_locked(conn: &Connection) -> Result<bool> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+    let backends: Vec<(String, String, String, bool)> = proxy.call("BackendList", &()).await?;
+    Ok(backends.iter().any(|(_, _, _, locked)| *locked))
+}
+
 /// Output format for `rosec search`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -1551,8 +1568,17 @@ async fn cmd_search(args: &[String]) -> Result<()> {
         Err(e) => return Err(e),
     };
 
-    // With --sync, if everything came back locked, trigger unlock and retry.
-    let (unlocked, locked) = if sync && unlocked.is_empty() && !locked.is_empty() {
+    // With --sync, trigger unlock and retry when:
+    //   (a) results are all locked (items exist but collection is locked), OR
+    //   (b) both lists are empty AND the daemon has locked backends — the
+    //       metadata cache is cold (never synced) because all backends started
+    //       locked and preemptive_sync skipped them.
+    let needs_unlock = sync
+        && ((!locked.is_empty() && unlocked.is_empty())
+            || (unlocked.is_empty()
+                && locked.is_empty()
+                && any_backends_locked(&conn).await?));
+    let (unlocked, locked) = if needs_unlock {
         trigger_unlock(&conn).await?;
         preemptive_sync(&conn).await?;
         do_search(&conn).await?
