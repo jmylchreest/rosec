@@ -2583,6 +2583,19 @@ async fn cmd_inspect_inner(
 
 async fn cmd_lock() -> Result<()> {
     let conn = conn().await?;
+
+    // Count unlocked backends before locking so we can report how many were locked.
+    let mgmt_proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+    let backends: Vec<(String, String, String, bool)> =
+        mgmt_proxy.call("BackendList", &()).await?;
+    let unlocked_count = backends.iter().filter(|(_, _, _, locked)| !locked).count();
+
     let proxy = zbus::Proxy::new(
         &conn,
         "org.freedesktop.secrets",
@@ -2590,18 +2603,20 @@ async fn cmd_lock() -> Result<()> {
         "org.freedesktop.Secret.Service",
     )
     .await?;
-
-    let (locked, _prompt): (Vec<String>, String) = proxy
+    let _: (Vec<String>, String) = proxy
         .call(
             "Lock",
             &(vec!["/org/freedesktop/secrets/collection/default"],),
         )
         .await?;
 
-    if locked.is_empty() {
-        println!("Lock requested (may require prompt).");
-    } else {
-        println!("Locked: {} objects", locked.len());
+    match unlocked_count {
+        0 => println!("Nothing to lock — all backends already locked."),
+        n => println!(
+            "Locked: 1 collection, {} backend{}.",
+            n,
+            if n == 1 { "" } else { "s" }
+        ),
     }
     Ok(())
 }
