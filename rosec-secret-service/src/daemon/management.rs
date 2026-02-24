@@ -234,6 +234,32 @@ impl RosecManagement {
         self.state.auth_backend(backend_id, fields).await?;
         Ok(true)
     }
+
+    /// Cancel an active prompt subprocess by its D-Bus object path.
+    ///
+    /// Used by the `rosec` CLI (and other clients) to cleanly cancel a running
+    /// `rosec-prompt` child when the user presses Ctrl+C.  After killing the
+    /// child, the Prompt object is responsible for emitting `Completed(true, "")`.
+    ///
+    /// Returns `true` if a matching prompt was found and cancelled, `false` if
+    /// the path was not in the active-prompt registry (already completed or invalid).
+    fn cancel_prompt(
+        &self,
+        prompt_path: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<bool, FdoError> {
+        log_caller("CancelPrompt", &header);
+        // cancel_prompt() sends SIGTERM to the child and removes it from the registry.
+        // We check whether the path existed before calling it.
+        let existed = self
+            .state
+            .active_prompts
+            .lock()
+            .map(|g| g.contains_key(prompt_path))
+            .unwrap_or(false);
+        self.state.cancel_prompt(prompt_path);
+        Ok(existed)
+    }
 }
 
 // ---------------------------------------------------------------------------

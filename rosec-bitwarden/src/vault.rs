@@ -27,6 +27,8 @@ pub struct DecryptedCipher {
     pub creation_date: Option<String>,
     pub revision_date: Option<String>,
     pub organization_id: Option<String>,
+    /// Human-readable organisation name, resolved from the sync profile.
+    pub organization_name: Option<String>,
 }
 
 impl std::fmt::Debug for DecryptedCipher {
@@ -45,6 +47,7 @@ impl std::fmt::Debug for DecryptedCipher {
             .field("creation_date", &self.creation_date)
             .field("revision_date", &self.revision_date)
             .field("organization_id", &self.organization_id)
+            .field("organization_name", &self.organization_name)
             .finish()
     }
 }
@@ -224,6 +227,8 @@ pub struct VaultState {
     private_key: Option<Zeroizing<Vec<u8>>>,
     /// Organization encryption keys, keyed by org ID.
     org_keys: HashMap<String, Keys>,
+    /// Organisation display names, keyed by org ID.
+    org_names: HashMap<String, String>,
     /// Decrypted folder names, keyed by folder ID.
     folder_names: HashMap<String, String>,
     /// All decrypted ciphers.
@@ -244,6 +249,7 @@ impl VaultState {
             vault_keys,
             private_key: None,
             org_keys: HashMap::new(),
+            org_names: HashMap::new(),
             folder_names: HashMap::new(),
             ciphers: Vec::new(),
             last_sync: None,
@@ -263,9 +269,13 @@ impl VaultState {
             debug!("decrypted private key");
         }
 
-        // Decrypt organization keys
+        // Decrypt organization keys and collect org names.
         self.org_keys.clear();
+        self.org_names.clear();
         for org in &sync.profile.organizations {
+            if let Some(name) = &org.name {
+                self.org_names.insert(org.id.clone(), name.clone());
+            }
             let Some(key_str) = &org.key else {
                 debug!(org_id = %org.id, "org has no key field; skipping");
                 continue;
@@ -393,6 +403,13 @@ impl VaultState {
             .and_then(|fid| self.folder_names.get(fid))
             .cloned();
 
+        // Resolve organisation name
+        let organization_name = sc
+            .organization_id
+            .as_ref()
+            .and_then(|oid| self.org_names.get(oid))
+            .cloned();
+
         // Decrypt type-specific data
         let login = if let Some(l) = &sc.login {
             Some(self.decrypt_login(l, keys)?)
@@ -442,6 +459,7 @@ impl VaultState {
             creation_date: sc.creation_date.clone(),
             revision_date: sc.revision_date.clone(),
             organization_id: sc.organization_id.clone(),
+            organization_name,
         })
     }
 

@@ -31,43 +31,48 @@ rosec/
 
 ## Quick Start
 
-1. Copy and edit the example config:
-   ```bash
-   mkdir -p ~/.config/rosec
-   cp examples/config.toml ~/.config/rosec/config.toml
-   # Edit email in the [[backend]] section
-   ```
-
-2. Build:
+1. Build:
    ```bash
    cargo build --release --workspace
    ```
 
-3. Run the daemon:
-   ```bash
-   cargo run --release --bin rosecd
-   ```
-
-4. Use the CLI:
-   ```bash
-   # Show daemon status
-   rosec status
-
-   # Force vault re-sync
-   rosec refresh
-
-   # Search items by attributes
-   rosec search username=admin
-
-   # Get a secret by item path
-   rosec get /org/freedesktop/secrets/item/bitwarden/my-login_abc123
-   ```
-
-5. (Optional) Install the systemd user service:
+2. (Optional) Install the systemd user service so the daemon starts automatically:
    ```bash
    cp contrib/systemd/rosecd.service ~/.config/systemd/user/
    systemctl --user daemon-reload
    systemctl --user enable --now rosecd
+   ```
+   Or run it directly for development:
+   ```bash
+   cargo run --release --bin rosecd
+   ```
+
+3. Add a backend and authenticate in one step:
+   ```bash
+   rosec backend add bitwarden
+   # Prompts for email, optional region/URL, then immediately authenticates
+   # if rosecd is already running.
+   ```
+   If rosecd was not running when you added the backend, start it and then:
+   ```bash
+   rosec backend auth <backend-id>
+   ```
+
+4. Verify the backend is unlocked:
+   ```bash
+   rosec backend list
+   ```
+
+5. Search and retrieve secrets:
+   ```bash
+   # Search by attribute
+   rosec search username=admin
+
+   # Search by name (glob)
+   rosec search name="GitHub*"
+
+   # Get a secret by item path
+   rosec get /org/freedesktop/secrets/item/bitwarden/my-login_abc123
    ```
 
 ## Configuration
@@ -233,6 +238,65 @@ cargo build --workspace
 - [`secretsd`](https://github.com/grawity/secretsd) — Generic Secret Service backend
 - [`oo7`](https://github.com/bilelmoussaoui/oo7) — Pure Rust Secret Service client
 - [`pass-secret-service`](https://github.com/mdellweg/pass_secret_service) — Secret Service backed by pass
+
+## FAQ
+
+### `gnome-keyring-daemon` keeps stealing `org.freedesktop.secrets`
+
+When `rosecd` exits it releases the bus name, and D-Bus immediately re-activates
+`gnome-keyring-daemon` to claim it. You need to disable both activation paths:
+
+**1. Mask the systemd user units** (prevents socket and service activation):
+
+```bash
+systemctl --user mask gnome-keyring-daemon.service gnome-keyring-daemon.socket
+```
+
+**2. Override the D-Bus activation file** (prevents D-Bus from spawning it when the name is requested):
+
+```bash
+mkdir -p ~/.local/share/dbus-1/services
+cp /usr/share/dbus-1/services/org.freedesktop.secrets.service \
+   ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
+sed -i 's|Exec=.*|Exec=/bin/false|' \
+   ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
+```
+
+User-level files in `~/.local/share/dbus-1/services/` take precedence over system ones per the D-Bus spec.
+
+**3. Reload D-Bus and kill the running instance**:
+
+```bash
+systemctl --user reload dbus
+pkill gnome-keyring-daemon
+```
+
+`rosecd` should now be able to claim `org.freedesktop.secrets` cleanly.
+
+### How do I update my Bitwarden master password?
+
+The master password is not stored — it is used only to derive a local encryption key at unlock time. If you change your Bitwarden master password:
+
+1. Update it in the Bitwarden web vault or app as normal.
+2. The next time `rosecd` is locked (e.g. after a reboot or idle timeout), run:
+
+```bash
+rosec backend auth <id>
+```
+
+Enter your **new** master password when prompted. Leave the access token field blank (Bitwarden PM only prompts for the master password).
+
+There is nothing to "migrate" — the local credential store uses your master password to derive a key, so entering the new password at unlock time is all that is required.
+
+### How do I rotate my Bitwarden Secrets Manager access token?
+
+If you generate a new access token in the Bitwarden web vault (Secrets Manager → Machine Accounts → Access Tokens), run:
+
+```bash
+rosec backend auth <id>
+```
+
+At the prompt, enter your **key encryption password** as usual, then paste the **new access token** in the Access Token field. Leaving the field blank re-uses the stored token; entering a new value overwrites it.
 
 ## License
 

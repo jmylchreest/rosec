@@ -6,8 +6,10 @@ use tracing::debug;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
+use zvariant::OwnedObjectPath;
 
 use crate::crypto::aes128_cbc_encrypt;
+use crate::prompt::SecretPrompt;
 use crate::session_iface::SecretSession;
 use crate::state::{ServiceState, map_backend_error, map_zbus_error};
 
@@ -71,17 +73,11 @@ impl SecretService {
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         log_caller("SearchItems", &header);
         self.state.touch_activity();
-        let items = self.state.resolve_items(Some(attributes), None).await?;
-        let mut unlocked_paths = Vec::new();
-        let mut locked_paths = Vec::new();
-        for (path, item) in items {
-            if item.locked {
-                locked_paths.push(path);
-            } else {
-                unlocked_paths.push(path);
-            }
-        }
-        Ok((unlocked_paths, locked_paths))
+        // Per the Secret Service spec, SearchItems is a metadata-only operation
+        // that MUST never error when backends are locked.  Items from locked
+        // backends are returned in the `locked` list.  Read from the persistent
+        // metadata_cache which survives lock/unlock cycles.
+        self.state.search_metadata_cache(&attributes)
     }
 
     async fn get_secrets(
@@ -130,6 +126,7 @@ impl SecretService {
                 Ok(s) => s,
                 Err(BackendError::Other(_)) => continue,
                 Err(BackendError::NotFound) => continue,
+                Err(BackendError::Locked) => continue,
                 Err(e) => return Err(map_backend_error(e)),
             };
             let value = build_secret_value(session, &secret, aes_key.as_deref())?;
@@ -163,21 +160,83 @@ impl SecretService {
     async fn lock(&self, objects: Vec<String>, #[zbus(header)] header: Header<'_>) -> Result<(Vec<String>, String), FdoError> {
         log_caller("Lock", &header);
         for backend in self.state.backends_ordered() {
+            let bid = backend.id().to_string();
             self.state
                 .run_on_tokio(async move { backend.lock().await })
                 .await?
                 .map_err(map_backend_error)?;
+            self.state.mark_backend_locked_in_cache(&bid);
         }
         self.state.mark_locked();
         // Return the requested objects as "locked" and no prompt needed
         Ok((objects, "/".to_string()))
     }
 
-    async fn unlock(&self, objects: Vec<String>, #[zbus(header)] header: Header<'_>) -> Result<(Vec<String>, String), FdoError> {
+    async fn unlock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_caller("Unlock", &header);
-        self.state.ensure_unlocked().await?;
-        // After unlock, return the requested objects as "immediately unlocked"
-        Ok((objects, "/".to_string()))
+
+        // Iterate backends in order.
+        // - Auto-unlock backends (SM): silently recover() inline.
+        // - First locked interactive backend: allocate a Prompt, register it,
+        //   and return ([], prompt_path) so the client can call Prompt.Prompt().
+        // - If all backends already unlocked: return (objects, "/") immediately.
+        let state = Arc::clone(&self.state);
+        let state2 = Arc::clone(&state);
+        let prompt_path_opt: Option<String> = state
+            .run_on_tokio(async move {
+                let mut interactive_backend: Option<String> = None;
+                for backend in state2.backends_ordered() {
+                    let status = backend.status().await.map_err(map_backend_error)?;
+                    if !status.locked {
+                        continue;
+                    }
+                    let backend_id = backend.id().to_string();
+                    if backend.can_auto_unlock() {
+                        // Silently recover; failure is non-fatal for this call.
+                        let _ = backend.recover().await;
+                        continue;
+                    }
+                    // Interactive backend needs a prompt — use the first one found.
+                    interactive_backend = Some(backend_id);
+                    break;
+                }
+                Ok::<Option<String>, FdoError>(interactive_backend)
+            })
+            .await??;
+
+        // Helper to build an OwnedObjectPath, falling back to "/" on parse error.
+        let make_path = |s: &str| {
+            OwnedObjectPath::try_from(s.to_string())
+                .unwrap_or_else(|_| OwnedObjectPath::try_from("/".to_string()).unwrap())
+        };
+
+        match prompt_path_opt {
+            None => {
+                // All backends unlocked — no prompt needed.
+                Ok((objects, make_path("/")))
+            }
+            Some(backend_id) => {
+                // Allocate a unique prompt path and register the object.
+                let prompt_path = self.state.allocate_prompt(&backend_id);
+                let prompt_obj = SecretPrompt::new(
+                    prompt_path.clone(),
+                    backend_id,
+                    Arc::clone(&self.state),
+                );
+                self.state
+                    .conn
+                    .object_server()
+                    .at(prompt_path.clone(), prompt_obj)
+                    .await
+                    .map_err(map_zbus_error)?;
+                // Return empty unlocked list + the prompt path.
+                Ok((vec![], make_path(&prompt_path)))
+            }
+        }
     }
 
     fn create_collection(

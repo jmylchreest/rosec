@@ -9,7 +9,7 @@ use notify::Watcher;
 use rosec_core::config::Config;
 use rosec_core::router::{Router, RouterConfig};
 use rosec_core::VaultBackend;
-use rosec_secret_service::server::register_objects_with_config;
+use rosec_secret_service::server::register_objects_with_full_config;
 use rosec_secret_service::session::SessionManager;
 
 #[tokio::main]
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
 
     let backends: Vec<Arc<dyn VaultBackend>> = build_backends(&config).await?;
 
-    // Build per-backend return_attr map from config.
+    // Build per-backend return_attr and collection maps from config.
     let return_attr_map: std::collections::HashMap<String, Vec<String>> = config
         .backend
         .iter()
@@ -46,8 +46,18 @@ async fn main() -> Result<()> {
         })
         .collect();
 
+    let collection_map: std::collections::HashMap<String, String> = config
+        .backend
+        .iter()
+        .filter_map(|entry| {
+            entry.collection.as_ref().map(|col| {
+                (entry.id.clone(), col.clone())
+            })
+        })
+        .collect();
+
     let conn = zbus::Connection::session().await?;
-    let state = register_objects_with_config(&conn, backends, router, sessions, return_attr_map).await?;
+    let state = register_objects_with_full_config(&conn, backends, router, sessions, return_attr_map, collection_map, config.prompt.clone()).await?;
 
     // Claim the well-known bus name so clients can discover us.
     // If another process already owns it, report who it is before exiting.
@@ -97,50 +107,114 @@ async fn main() -> Result<()> {
         loop {
             tokio::time::sleep(interval).await;
 
-            // Skip if all backends are locked — avoid triggering unlock prompt
-            let mut any_unlocked = false;
+            // For each backend, decide what to do based on its lock state and
+            // whether it supports auto-unlock:
+            //
+            //  - can_auto_unlock + locked   → sync_backend() (handles token
+            //    load + full fetch itself; this keeps SM data fresh even before
+            //    the first interactive request arrives)
+            //  - any backend + unlocked     → check_remote_changed() first;
+            //    only call sync_backend() when the remote reports changes
+            //
+            // After per-backend work we still call rebuild_cache() as a safety
+            // net so the in-process cache always reflects the latest state.
+
+            let mut did_any_work = false;
+
             for backend in cache_rebuild_state.backends_ordered() {
-                match backend.status().await {
-                    Ok(status) if !status.locked => {
-                        any_unlocked = true;
-                        break;
+                let backend_id = backend.id().to_string();
+                let locked = match backend.status().await {
+                    Ok(s) => s.locked,
+                    Err(e) => {
+                        tracing::debug!(backend = %backend_id, error = %e, "status check failed, skipping");
+                        continue;
                     }
-                    _ => {}
+                };
+
+                if locked && backend.can_auto_unlock() {
+                    // SM / token backends: silently sync (includes re-auth).
+                    tracing::debug!(backend = %backend_id, "background: syncing locked auto-unlock backend");
+                    match cache_rebuild_state.sync_backend(&backend_id).await {
+                        Ok(count) => {
+                            tracing::debug!(backend = %backend_id, count, "background: auto-unlock+sync ok");
+                            did_any_work = true;
+                        }
+                        Err(e) => {
+                            tracing::debug!(backend = %backend_id, error = %e,
+                                "background: auto-unlock+sync failed (token missing or API error)");
+                        }
+                    }
+                } else if !locked {
+                    // Already unlocked: check for remote changes before syncing.
+                    match backend.check_remote_changed().await {
+                        Ok(true) => {
+                            tracing::debug!(backend = %backend_id, "background: remote changed, syncing");
+                            match cache_rebuild_state.sync_backend(&backend_id).await {
+                                Ok(count) => {
+                                    tracing::debug!(backend = %backend_id, count, "background: sync ok");
+                                    did_any_work = true;
+                                }
+                                Err(e) => {
+                                    let err_str = e.to_string();
+                                    if err_str.contains("locked::") {
+                                        tracing::debug!(backend = %backend_id, "background: sync skipped — backend locked");
+                                    } else {
+                                        consecutive_failures += 1;
+                                        if consecutive_failures <= 3 {
+                                            tracing::warn!(backend = %backend_id, attempt = consecutive_failures, "background sync failed: {e}");
+                                        } else if consecutive_failures == 4 {
+                                            tracing::warn!(backend = %backend_id,
+                                                "background sync has failed {} times, suppressing further warnings",
+                                                consecutive_failures);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(false) => {
+                            tracing::debug!(backend = %backend_id, "background: no remote changes");
+                        }
+                        Err(e) => {
+                            tracing::debug!(backend = %backend_id, error = %e,
+                                "background: remote-changed check failed, skipping sync");
+                        }
+                    }
                 }
-            }
-            if !any_unlocked {
-                tracing::debug!("background cache rebuild skipped: all backends are locked");
-                continue;
+                // locked && !can_auto_unlock: skip — interactive backends need
+                // a user-supplied password; the poller never prompts.
             }
 
-            match cache_rebuild_state.rebuild_cache().await {
-                Ok(entries) => {
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "background cache rebuild recovered after {} failures: {} items",
-                            consecutive_failures,
-                            entries.len()
-                        );
-                    } else {
+            // Safety-net rebuild: keep the in-process item cache consistent
+            // even if no per-backend sync ran (e.g. all unlocked backends had
+            // no remote changes).
+            if !did_any_work {
+                match cache_rebuild_state.rebuild_cache().await {
+                    Ok(entries) => {
                         tracing::debug!("background cache rebuild: {} items", entries.len());
+                        consecutive_failures = 0;
                     }
-                    consecutive_failures = 0;
-                }
-                Err(err) => {
-                    consecutive_failures += 1;
-                    if consecutive_failures <= 3 {
-                        tracing::warn!(
-                            attempt = consecutive_failures,
-                            "background cache rebuild failed: {err}"
-                        );
-                    } else if consecutive_failures == 4 {
-                        tracing::warn!(
-                            "background cache rebuild has failed {} times, suppressing further warnings",
-                            consecutive_failures
-                        );
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if err_str.contains("locked::") {
+                            tracing::debug!("background cache rebuild skipped: backend not yet unlocked");
+                        } else {
+                            consecutive_failures += 1;
+                            if consecutive_failures <= 3 {
+                                tracing::warn!(
+                                    attempt = consecutive_failures,
+                                    "background cache rebuild failed: {err}"
+                                );
+                            } else if consecutive_failures == 4 {
+                                tracing::warn!(
+                                    "background cache rebuild has failed {} times, suppressing further warnings",
+                                    consecutive_failures
+                                );
+                            }
+                        }
                     }
-                    // else: silently continue to avoid log spam
                 }
+            } else {
+                consecutive_failures = 0;
             }
         }
     });
@@ -422,12 +496,12 @@ async fn poll_lock_stream(
 /// Build all configured backends from the config, in order.
 ///
 /// Delegates to `build_single_backend` for each entry so startup and
-/// hot-reload share identical construction logic.  Falls back to a single
-/// mock backend if no entries are configured.
+/// hot-reload share identical construction logic.  Returns an empty vec if no
+/// backends are configured — the daemon handles that state gracefully.
 async fn build_backends(config: &Config) -> Result<Vec<Arc<dyn VaultBackend>>> {
     if config.backend.is_empty() {
-        tracing::warn!("no backends configured; using mock backend");
-        return Ok(vec![Arc::new(MockBackend)]);
+        tracing::warn!("no backends configured");
+        return Ok(Vec::new());
     }
 
     let mut backends: Vec<Arc<dyn VaultBackend>> = Vec::with_capacity(config.backend.len());
@@ -456,11 +530,6 @@ async fn build_backends(config: &Config) -> Result<Vec<Arc<dyn VaultBackend>>> {
                 ));
             }
         }
-    }
-
-    if backends.is_empty() {
-        tracing::warn!("all configured backends were unknown types; falling back to mock backend");
-        backends.push(Arc::new(MockBackend));
     }
 
     Ok(backends)
@@ -544,6 +613,13 @@ async fn config_watcher(
     let watch_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent directory"))?;
+
+    // Ensure the config directory exists so the watcher can be set up even
+    // when rosecd starts before any config file has been written (e.g. on
+    // first run before `rosec backend add` has been called).
+    std::fs::create_dir_all(watch_dir).map_err(|e| {
+        anyhow::anyhow!("cannot create config directory {}: {e}", watch_dir.display())
+    })?;
 
     watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive)?;
     tracing::info!(path = %config_path.display(), "config watcher started");
@@ -653,8 +729,8 @@ async fn config_watcher(
 /// Extracted from `build_backends` so the hot-reload watcher can reuse it
 /// without re-parsing the whole config.
 ///
-/// `bitwarden-sm` backends are unlocked immediately after construction because
-/// their access token is static; they do not use interactive prompts.
+/// All backends are returned locked; the daemon unlocks them via `AuthBackend`
+/// D-Bus calls once the user supplies credentials interactively.
 async fn build_single_backend(
     entry: &rosec_core::config::BackendEntry,
 ) -> anyhow::Result<Arc<dyn VaultBackend>> {
@@ -689,23 +765,7 @@ async fn build_single_backend(
             Ok(Arc::new(rosec_bitwarden::BitwardenBackend::new(bw_config)
                 .map_err(|e| anyhow::anyhow!("bitwarden backend '{}': {e}", entry.id))?))
         }
-        #[cfg(feature = "bitwarden-sm")]
         "bitwarden-sm" => {
-            use rosec_core::UnlockInput;
-            use zeroize::Zeroizing;
-
-            let access_token = entry
-                .options
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bitwarden-sm backend '{}' requires 'access_token' option",
-                        entry.id
-                    )
-                })?
-                .to_string();
-
             let organization_id = entry
                 .options
                 .get("organization_id")
@@ -724,20 +784,20 @@ async fn build_single_backend(
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            let region = match entry.options.get("region").and_then(|v| v.as_str()) {
+                Some("eu") => rosec_bitwarden_sm::SmRegion::Eu,
+                _ => rosec_bitwarden_sm::SmRegion::Us,
+            };
+
             let sm_config = rosec_bitwarden_sm::BitwardenSmConfig {
                 id: entry.id.clone(),
                 name: Some(entry.id.clone()),
+                region,
                 server_url,
                 organization_id,
             };
 
-            let backend = rosec_bitwarden_sm::BitwardenSmBackend::new(sm_config);
-            backend
-                .unlock(UnlockInput::SessionToken(Zeroizing::new(access_token)))
-                .await
-                .map_err(|e| anyhow::anyhow!("bitwarden-sm '{}' unlock failed: {e}", entry.id))?;
-
-            Ok(Arc::new(backend))
+            Ok(Arc::new(rosec_bitwarden_sm::BitwardenSmBackend::new(sm_config)))
         }
         other => anyhow::bail!("unknown backend kind '{other}'"),
     }
@@ -822,64 +882,4 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     Ok(config)
 }
 
-#[derive(Debug)]
-struct MockBackend;
 
-#[async_trait::async_trait]
-impl rosec_core::VaultBackend for MockBackend {
-    fn id(&self) -> &str {
-        "mock"
-    }
-
-    fn name(&self) -> &str {
-        "Mock Backend"
-    }
-
-    fn kind(&self) -> &str {
-        "mock"
-    }
-
-    async fn status(&self) -> Result<rosec_core::BackendStatus, rosec_core::BackendError> {
-        Ok(rosec_core::BackendStatus {
-            locked: true,
-            last_sync: None,
-        })
-    }
-
-    async fn unlock(
-        &self,
-        _input: rosec_core::UnlockInput,
-    ) -> Result<(), rosec_core::BackendError> {
-        Ok(())
-    }
-
-    async fn lock(&self) -> Result<(), rosec_core::BackendError> {
-        Ok(())
-    }
-
-    async fn recover(&self) -> Result<rosec_core::RecoveryOutcome, rosec_core::BackendError> {
-        Ok(rosec_core::RecoveryOutcome::Recovered)
-    }
-
-    async fn list_items(&self) -> Result<Vec<rosec_core::VaultItemMeta>, rosec_core::BackendError> {
-        Ok(Vec::new())
-    }
-
-    async fn get_item(&self, _id: &str) -> Result<rosec_core::VaultItem, rosec_core::BackendError> {
-        Err(rosec_core::BackendError::NotFound)
-    }
-
-    async fn get_secret(
-        &self,
-        _id: &str,
-    ) -> Result<rosec_core::SecretBytes, rosec_core::BackendError> {
-        Err(rosec_core::BackendError::NotFound)
-    }
-
-    async fn search(
-        &self,
-        _attrs: &rosec_core::Attributes,
-    ) -> Result<Vec<rosec_core::VaultItemMeta>, rosec_core::BackendError> {
-        Ok(Vec::new())
-    }
-}

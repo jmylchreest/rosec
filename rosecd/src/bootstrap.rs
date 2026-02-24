@@ -33,7 +33,7 @@ fn set_not_dumpable() {
     // SAFETY: prctl is safe to call with PR_SET_DUMPABLE and a plain integer arg.
     let ret = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0i64, 0i64, 0i64, 0i64) };
     if ret == 0 {
-        tracing::info!("PR_SET_DUMPABLE=0: core dumps and /proc/pid/mem access disabled");
+        tracing::debug!("PR_SET_DUMPABLE=0: core dumps and /proc/pid/mem access disabled");
     } else {
         let err = std::io::Error::last_os_error();
         tracing::warn!("PR_SET_DUMPABLE=0 failed (non-fatal): {err}");
@@ -45,12 +45,10 @@ fn lock_memory() {
     // SAFETY: mlockall is safe to call; failure is non-fatal.
     let ret = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
     if ret == 0 {
-        tracing::info!("mlockall(MCL_CURRENT|MCL_FUTURE): all memory pages locked in RAM");
+        tracing::debug!("mlockall(MCL_CURRENT|MCL_FUTURE): all memory pages locked in RAM");
     } else {
         let err = std::io::Error::last_os_error();
-        // ENOMEM or EPERM are the typical cases (no CAP_IPC_LOCK).
-        tracing::warn!(
-            "mlockall failed (non-fatal — daemon will run without memory locking): {err}"
-        );
+        // ENOMEM or EPERM are typical (no CAP_IPC_LOCK); not actionable by the user.
+        tracing::debug!("mlockall failed (non-fatal — running without memory locking): {err}");
     }
 }

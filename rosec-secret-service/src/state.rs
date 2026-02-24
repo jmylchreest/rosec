@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 
+use rosec_core::config::PromptConfig;
 use rosec_core::router::Router;
 use rosec_core::dedup::is_stale;
 use rosec_core::{Attributes, BackendError, RecoveryOutcome, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta};
@@ -37,12 +39,33 @@ pub struct ServiceState {
     /// Key: backend ID.  Value: ordered patterns (first match wins).
     /// Falls back to `DEFAULT_RETURN_ATTR` when a backend has no entry.
     return_attr_map: RwLock<HashMap<String, Vec<String>>>,
+    /// Optional collection label per backend.  When present, the label is
+    /// stamped onto every item from that backend as the `"collection"` attribute
+    /// at cache-build time.  Key: backend ID.  Value: collection label string.
+    collection_map: RwLock<HashMap<String, String>>,
     pub router: Arc<Router>,
     pub sessions: Arc<SessionManager>,
     pub items: Arc<Mutex<HashMap<String, VaultItemMeta>>>,
     pub registered_items: Arc<Mutex<HashSet<String>>>,
     pub last_sync: Arc<Mutex<Option<SystemTime>>>,
     pub conn: Connection,
+    /// Persistent metadata cache that survives backend lock/unlock cycles.
+    ///
+    /// Per the Secret Service spec, `SearchItems` is a metadata-only operation
+    /// that MUST never error when backends are locked — items from locked
+    /// backends go in the `locked` return list.  Attributes are stored
+    /// unencrypted per spec, so they are always available.
+    ///
+    /// This cache is populated during `rebuild_cache_inner()` and **never
+    /// cleared** when backends lock.  When a backend locks, items belonging
+    /// to it have their `locked` flag flipped to `true` (via `mark_backend_locked_in_cache`).
+    /// When a backend unlocks and syncs, `rebuild_cache_inner()` replaces the
+    /// entries for that backend with fresh data.
+    ///
+    /// `SearchItems`, `SearchItemsGlob`, and `resolve_item_path` (hash lookup)
+    /// read from this cache, ensuring they always return results regardless of
+    /// backend lock state.
+    metadata_cache: Arc<Mutex<HashMap<String, VaultItemMeta>>>,
     /// Prevents multiple simultaneous unlock attempts for the same backend.
     unlock_in_progress: tokio::sync::Mutex<()>,
     /// Timestamp of the last client activity (D-Bus method call).
@@ -57,6 +80,15 @@ pub struct ServiceState {
     /// this handle; otherwise `tokio::time::sleep` and friends will panic with
     /// "no reactor running".
     tokio_handle: tokio::runtime::Handle,
+    /// Monotonically increasing counter for unique prompt object paths.
+    prompt_counter: AtomicU32,
+    /// Active prompts: maps prompt D-Bus path → (backend_id, child_pid).
+    ///
+    /// `child_pid` is `Some` while a prompt subprocess is running; `None` for
+    /// prompts that have already completed or been dismissed.
+    pub active_prompts: Mutex<HashMap<String, (String, Option<u32>)>>,
+    /// Prompt program configuration (binary path, theme, etc.).
+    pub prompt_config: PromptConfig,
 }
 
 impl std::fmt::Debug for ServiceState {
@@ -76,7 +108,7 @@ impl ServiceState {
         conn: Connection,
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
-        Self::new_with_return_attr(backends, router, sessions, conn, tokio_handle, HashMap::new())
+        Self::new_with_config(backends, router, sessions, conn, tokio_handle, HashMap::new(), HashMap::new(), PromptConfig::default())
     }
 
     /// Like `new`, but accepts per-backend `return_attr` patterns from config.
@@ -91,6 +123,21 @@ impl ServiceState {
         tokio_handle: tokio::runtime::Handle,
         return_attr_map: HashMap<String, Vec<String>>,
     ) -> Self {
+        Self::new_with_config(backends, router, sessions, conn, tokio_handle, return_attr_map, HashMap::new(), PromptConfig::default())
+    }
+
+    /// Full constructor: accepts `return_attr` patterns, collection map, and `PromptConfig`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_config(
+        backends: Vec<Arc<dyn VaultBackend>>,
+        router: Arc<Router>,
+        sessions: Arc<SessionManager>,
+        conn: Connection,
+        tokio_handle: tokio::runtime::Handle,
+        return_attr_map: HashMap<String, Vec<String>>,
+        collection_map: HashMap<String, String>,
+        prompt_config: PromptConfig,
+    ) -> Self {
         let backend_order: Vec<String> = backends.iter().map(|b| b.id().to_string()).collect();
         let backends_map: HashMap<String, Arc<dyn VaultBackend>> = backends
             .into_iter()
@@ -100,6 +147,7 @@ impl ServiceState {
             backends: RwLock::new(backends_map),
             backend_order: RwLock::new(backend_order),
             return_attr_map: RwLock::new(return_attr_map),
+            collection_map: RwLock::new(collection_map),
             router,
             sessions,
             items: Arc::new(Mutex::new(HashMap::new())),
@@ -110,6 +158,10 @@ impl ServiceState {
             last_activity: Mutex::new(None),
             unlocked_since: Mutex::new(None),
             tokio_handle,
+            prompt_counter: AtomicU32::new(0),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
+            active_prompts: Mutex::new(HashMap::new()),
+            prompt_config,
         }
     }
 
@@ -268,6 +320,56 @@ impl ServiceState {
         found
     }
 
+    /// Allocate a unique prompt D-Bus path for the given backend and register
+    /// it in `active_prompts` with no child PID yet (filled in by `Prompt()`).
+    ///
+    /// Returns the path string, e.g. `/org/freedesktop/secrets/prompt/p3`.
+    pub fn allocate_prompt(&self, backend_id: &str) -> String {
+        let n = self.prompt_counter.fetch_add(1, Ordering::Relaxed);
+        let path = format!("/org/freedesktop/secrets/prompt/p{n}");
+        if let Ok(mut map) = self.active_prompts.lock() {
+            map.insert(path.clone(), (backend_id.to_string(), None));
+        }
+        path
+    }
+
+    /// Store the child PID for an active prompt (called once the subprocess starts).
+    pub fn set_prompt_pid(&self, prompt_path: &str, pid: u32) {
+        if let Ok(mut map) = self.active_prompts.lock()
+            && let Some(entry) = map.get_mut(prompt_path)
+        {
+            entry.1 = Some(pid);
+        }
+    }
+
+    /// Kill the active prompt subprocess (if any) and remove it from the registry.
+    ///
+    /// Sends SIGTERM to the child PID. Safe to call even if the child has already
+    /// exited (the signal is silently ignored).
+    pub fn cancel_prompt(&self, prompt_path: &str) {
+        let pid = self
+            .active_prompts
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(prompt_path))
+            .and_then(|(_, pid)| pid);
+
+        if let Some(pid) = pid {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            tracing::debug!(prompt = %prompt_path, pid, "prompt child terminated");
+        }
+    }
+
+    /// Remove a completed prompt from the registry without killing the child.
+    pub fn finish_prompt(&self, prompt_path: &str) {
+        if let Ok(mut map) = self.active_prompts.lock() {
+            map.remove(prompt_path);
+        }
+    }
+
     /// Record that client activity has occurred (resets idle timer).
     pub fn touch_activity(&self) {
         if let Ok(mut guard) = self.last_activity.lock() {
@@ -325,6 +427,164 @@ impl ServiceState {
         }
     }
 
+    /// Collect a password from the user for the given backend, using whichever
+    /// prompt mechanism is appropriate for the current environment:
+    ///
+    /// 1. `SSH_ASKPASS` env var set → exec that program (stdout is the password)
+    /// 2. `WAYLAND_DISPLAY` or `DISPLAY` set → spawn `rosec-prompt` GUI
+    /// 3. `/dev/tty` available → spawn `rosec-prompt --tty` (reads /dev/tty)
+    /// 4. None of the above → return `Err` (headless; user must run `rosec auth`)
+    ///
+    /// The `prompt_path` is recorded in `active_prompts` with the child PID so
+    /// that `cancel_prompt` can kill it cleanly.
+    ///
+    /// # Security
+    /// - The returned `Zeroizing<String>` scrubs the password on drop.
+    /// - GUI/askpass stdout is read via a pipe into a line buffer; the buffer is
+    ///   not heap-duplicated into `std::process::Output` (we never call
+    ///   `child.wait_with_output()`).
+    /// - The pipe read-end is closed immediately after the first line is read.
+    pub fn spawn_prompt(
+        self: &Arc<Self>,
+        prompt_path: &str,
+        backend_id: &str,
+        label: &str,
+    ) -> Result<Zeroizing<String>, FdoError> {
+        use std::io::BufRead as _;
+        use std::process::Stdio;
+
+        let prompt_path = prompt_path.to_string();
+        let backend_id_str = backend_id.to_string();
+
+        // ── 1. SSH_ASKPASS ─────────────────────────────────────────────────
+        if let Ok(askpass) = std::env::var("SSH_ASKPASS")
+            && !askpass.is_empty()
+        {
+            tracing::debug!(program = %askpass, "using SSH_ASKPASS for prompt");
+            let mut child = std::process::Command::new(&askpass)
+                .arg(label)          // prompt text as argv[1] (standard convention)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS '{askpass}' failed to launch: {e}")))?;
+
+            let pid = child.id();
+            self.set_prompt_pid(&prompt_path, pid);
+
+            // Read exactly one line from stdout into a zeroizing buffer.
+            let password = {
+                let stdout = child.stdout.take()
+                    .ok_or_else(|| FdoError::Failed("SSH_ASKPASS: no stdout pipe".to_string()))?;
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut line = Zeroizing::new(String::new());
+                reader.read_line(&mut line)
+                    .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS read error: {e}")))?;
+                // Drop the reader (closes pipe read end) before waiting.
+                drop(reader);
+                // Trim trailing newline in-place without allocating.
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    let new_len = line.len() - 1;
+                    // SAFETY: ASCII control chars are single-byte.
+                    unsafe { line.as_mut_vec().truncate(new_len) };
+                }
+                line
+            };
+
+            let status = child.wait()
+                .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS wait error: {e}")))?;
+            self.finish_prompt(&prompt_path);
+
+            if !status.success() || password.is_empty() {
+                return Err(FdoError::Failed("SSH_ASKPASS: cancelled or empty".to_string()));
+            }
+            return Ok(password);
+        }
+
+        // ── Resolve rosec-prompt binary ────────────────────────────────────
+        let program = match self.prompt_config.backend.as_str() {
+            "builtin" | "" => resolve_prompt_binary(),
+            custom => custom.to_string(),
+        };
+
+        let has_display = std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some();
+        let has_tty = std::path::Path::new("/dev/tty").exists();
+
+        // ── 2 & 3. GUI or TTY via rosec-prompt ────────────────────────────
+        if has_display || has_tty {
+            // Build the JSON request that rosec-prompt expects.
+            let json = build_prompt_json(backend_id_str, label, &self.prompt_config);
+
+            let mut cmd = std::process::Command::new(&program);
+            cmd.stdin(Stdio::piped())
+               .stdout(Stdio::piped())
+               .stderr(Stdio::inherit());
+
+            if !has_display {
+                // No GUI available — request TTY mode.
+                cmd.arg("--tty");
+            }
+
+            let mut child = cmd.spawn()
+                .map_err(|e| FdoError::Failed(format!("rosec-prompt failed to launch: {e}")))?;
+
+            let pid = child.id();
+            self.set_prompt_pid(&prompt_path, pid);
+
+            // Send JSON on stdin then close it.
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write as _;
+                stdin.write_all(json.as_bytes())
+                    .map_err(|e| FdoError::Failed(format!("rosec-prompt stdin write: {e}")))?;
+                // stdin dropped here → EOF sent to child
+            }
+
+            // Read one line of JSON from stdout ({"field_id": "value"}).
+            let response_line = {
+                let stdout = child.stdout.take()
+                    .ok_or_else(|| FdoError::Failed("rosec-prompt: no stdout pipe".to_string()))?;
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut line = Zeroizing::new(String::new());
+                reader.read_line(&mut line)
+                    .map_err(|e| FdoError::Failed(format!("rosec-prompt read error: {e}")))?;
+                drop(reader);
+                line
+            };
+
+            let status = child.wait()
+                .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
+            self.finish_prompt(&prompt_path);
+
+            if !status.success() {
+                return Err(FdoError::Failed("prompt cancelled".to_string()));
+            }
+
+            // Parse the JSON map and extract the password field.
+            let map: HashMap<String, String> = serde_json::from_str(response_line.trim())
+                .map_err(|e| FdoError::Failed(format!("rosec-prompt JSON parse: {e}")))?;
+
+            // Find the password field ID for this backend.
+            let backend = self.backend_by_id(backend_id)
+                .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+            let pw_id = backend.password_field().id.to_string();
+
+            let password = map.get(&pw_id)
+                .filter(|v| !v.is_empty())
+                .map(|v| Zeroizing::new(v.clone()))
+                .ok_or_else(|| FdoError::Failed("password field empty or missing".to_string()))?;
+
+            return Ok(password);
+        }
+
+        // ── 4. Headless — cannot prompt ────────────────────────────────────
+        self.finish_prompt(&prompt_path);
+        Err(FdoError::Failed(format!(
+            "headless: no display, no TTY, and SSH_ASKPASS is not set — \
+             run `rosec auth {backend_id}` to unlock manually"
+        )))
+    }
+
     /// Lock all backends and clear auto-lock state.
     pub async fn auto_lock(&self) -> Result<(), FdoError> {
         for backend in self.backends_ordered() {
@@ -333,6 +593,9 @@ impl ServiceState {
                 .map_err(map_backend_error)?;
         }
         self.mark_locked();
+        // Mark all items in metadata_cache as locked so SearchItems returns
+        // them in the `locked` partition (spec-compliant).
+        self.mark_all_locked_in_cache();
         // Clear the activity timestamp so the idle check doesn't keep
         // re-firing every poll interval on an already-locked vault.
         if let Ok(mut guard) = self.last_activity.lock() {
@@ -394,24 +657,28 @@ impl ServiceState {
             let backend_id = backend.id().to_string();
 
             if backend.can_auto_unlock() {
-                // SM / token-based backends: silently re-authenticate
-                info!(backend = %backend_id, "attempting silent re-auth (auto-unlock)");
+                // SM / token-based backends: silently re-authenticate.
+                // A failure here is non-fatal for the overall unlock — it means
+                // the stored credential is stale or missing for this backend, but
+                // other backends should still be unlocked normally.
+                tracing::debug!(backend = %backend_id, "attempting silent re-auth (auto-unlock)");
                 match backend.recover().await.map_err(map_backend_error)? {
                     RecoveryOutcome::Recovered => {
-                        info!(backend = %backend_id, "silent re-auth succeeded");
+                        tracing::debug!(backend = %backend_id, "silent re-auth succeeded");
                     }
                     RecoveryOutcome::Failed(reason) => {
-                        warn!(backend = %backend_id, %reason, "silent re-auth failed");
-                        return Err(FdoError::Failed(format!(
-                            "auto-unlock failed for backend '{backend_id}': {reason}"
-                        )));
+                        warn!(backend = %backend_id, %reason,
+                            "silent re-auth failed — backend will remain locked until re-authenticated");
+                        // Continue to the next backend rather than aborting the whole unlock.
+                        continue;
                     }
                 }
             } else {
                 // Interactive backend is locked — tell the client to authenticate.
                 // The client (rosec CLI or any other caller) must call AuthBackend
                 // with credentials collected on its side, then retry the operation.
-                info!(backend = %backend_id, "backend is locked; client must call AuthBackend");
+                // This is the normal pre-unlock state; debug level to avoid log noise.
+                tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
                 return Err(FdoError::Failed(format!("locked::{backend_id}")));
             }
         }
@@ -447,7 +714,8 @@ impl ServiceState {
             FdoError::Failed(format!("backend '{backend_id}' not found"))
         })?;
 
-        let pw_field_id = backend.password_field().id;
+        let pw_field = backend.password_field();
+        let pw_field_id = pw_field.id;
 
         let password_value = fields.get(pw_field_id).ok_or_else(|| {
             FdoError::Failed(format!(
@@ -455,7 +723,7 @@ impl ServiceState {
             ))
         })?;
 
-        if password_value.is_empty() {
+        if pw_field.required && password_value.is_empty() {
             return Err(FdoError::Failed(format!(
                 "field '{pw_field_id}' must not be empty"
             )));
@@ -463,15 +731,22 @@ impl ServiceState {
 
         let password = Zeroizing::new(password_value.clone());
 
-        // Collect any registration fields that were supplied alongside the password.
+        // Collect any non-empty registration/auth fields supplied alongside the password.
+        // Sources: registration_info fields (first-time setup) and auth_fields (e.g. token
+        // rotation). Empty values are excluded so optional fields left blank don't trigger
+        // WithRegistration unnecessarily.
         let reg_field_ids: std::collections::HashSet<&str> = backend
             .registration_info()
             .map(|ri| ri.fields.iter().map(|f| f.id).collect())
             .unwrap_or_default();
+        let auth_field_ids: std::collections::HashSet<&str> =
+            backend.auth_fields().iter().map(|f| f.id).collect();
+        let all_extra_ids: std::collections::HashSet<&str> =
+            reg_field_ids.union(&auth_field_ids).copied().collect();
 
         let registration_fields: HashMap<String, Zeroizing<String>> = fields
             .iter()
-            .filter(|(k, _)| reg_field_ids.contains(k.as_str()))
+            .filter(|(k, v)| all_extra_ids.contains(k.as_str()) && !v.is_empty())
             .map(|(k, v)| (k.clone(), Zeroizing::new(v.clone())))
             .collect();
 
@@ -531,6 +806,104 @@ impl ServiceState {
         Ok((unlocked, locked))
     }
 
+    /// Search the persistent metadata cache using exact attribute matching.
+    ///
+    /// This is the method `SearchItems` should use: it reads from `metadata_cache`
+    /// which survives lock/unlock cycles, and partitions results into
+    /// `(unlocked_paths, locked_paths)`.  Never errors due to locked backends.
+    ///
+    /// Empty `attrs` returns all cached items.
+    pub fn search_metadata_cache(
+        &self,
+        attrs: &HashMap<String, String>,
+    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
+        let cache = self.metadata_cache.lock().map_err(|_| {
+            map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+        })?;
+
+        let mut unlocked = Vec::new();
+        let mut locked = Vec::new();
+
+        for (path, meta) in cache.iter() {
+            if !attributes_match(&meta.attributes, attrs) {
+                continue;
+            }
+            if meta.locked {
+                locked.push(path.clone());
+            } else {
+                unlocked.push(path.clone());
+            }
+        }
+
+        Ok((unlocked, locked))
+    }
+
+    /// Search the persistent metadata cache using glob patterns.
+    ///
+    /// Like `search_items_glob` but reads from `metadata_cache` (which survives
+    /// lock/unlock cycles) instead of `items`.  Never errors due to locked
+    /// backends.
+    ///
+    /// The special key `"name"` matches against the item label.
+    pub fn search_metadata_cache_glob(
+        &self,
+        attrs: &HashMap<String, String>,
+    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
+        let cache = self.metadata_cache.lock().map_err(|_| {
+            map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+        })?;
+
+        let mut unlocked = Vec::new();
+        let mut locked = Vec::new();
+
+        'item: for (path, meta) in cache.iter() {
+            for (key, pattern) in attrs {
+                let value = if key == "name" {
+                    meta.label.as_str()
+                } else {
+                    meta.attributes.get(key.as_str()).map(String::as_str).unwrap_or("")
+                };
+                if !WildMatch::new(pattern).matches(value) {
+                    continue 'item;
+                }
+            }
+            if meta.locked {
+                locked.push(path.clone());
+            } else {
+                unlocked.push(path.clone());
+            }
+        }
+
+        Ok((unlocked, locked))
+    }
+
+    /// Mark all items belonging to a specific backend as locked in the
+    /// persistent metadata cache.
+    ///
+    /// Called when a backend transitions to the locked state (auto-lock,
+    /// manual lock, etc.).  Does NOT remove items — they remain queryable
+    /// via `SearchItems` and friends, just in the `locked` partition.
+    pub fn mark_backend_locked_in_cache(&self, backend_id: &str) {
+        if let Ok(mut cache) = self.metadata_cache.lock() {
+            for meta in cache.values_mut() {
+                if meta.backend_id == backend_id {
+                    meta.locked = true;
+                }
+            }
+        }
+    }
+
+    /// Mark all items in the persistent metadata cache as locked.
+    ///
+    /// Called during `auto_lock` / `Lock` when all backends are locked at once.
+    fn mark_all_locked_in_cache(&self) {
+        if let Ok(mut cache) = self.metadata_cache.lock() {
+            for meta in cache.values_mut() {
+                meta.locked = true;
+            }
+        }
+    }
+
     /// Resolve item paths or search by attributes.
     /// Dispatches to Tokio so that cache/unlock futures run on the Tokio reactor.
     pub async fn resolve_items(
@@ -588,16 +961,67 @@ impl ServiceState {
             .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
 
         let this = Arc::clone(self);
+        let backend_id = backend_id.to_string();
         self.tokio_handle
             .spawn(async move {
-                // Unlock first — sync() requires authenticated state.
-                this.ensure_unlocked_inner().await?;
+                // For auto-unlock backends (e.g. SM), sync() handles its own
+                // token loading — calling ensure_backend_unlocked first would
+                // trigger recover() (a full fetch) immediately before sync()
+                // does another full fetch.  Skip the pre-unlock step for those.
+                // For interactive backends, we still need to ensure they are
+                // unlocked before calling sync(), which just hits the API.
+                if !backend.can_auto_unlock() {
+                    this.ensure_backend_unlocked(&backend_id).await?;
+                }
                 backend.sync().await.map_err(map_backend_error)?;
                 let entries = this.rebuild_cache_inner().await?;
-                Ok(entries.len() as u32)
+                // Count only items belonging to this backend.
+                let count = entries
+                    .iter()
+                    .filter(|(_, meta)| meta.backend_id == backend_id)
+                    .count() as u32;
+                Ok(count)
             })
             .await
             .map_err(|e| FdoError::Failed(format!("sync task panicked: {e}")))?
+    }
+
+    /// Ensure a *single* backend is unlocked.
+    ///
+    /// Mirrors the logic in `ensure_unlocked_inner` but scoped to one backend.
+    /// Auto-unlock backends call `recover()`; interactive backends return a
+    /// `locked::<id>` sentinel so the CLI can prompt the user.
+    async fn ensure_backend_unlocked(&self, backend_id: &str) -> Result<(), FdoError> {
+        let backend = self
+            .backend_by_id(backend_id)
+            .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+
+        let status = backend.status().await.map_err(map_backend_error)?;
+        if !status.locked {
+            return Ok(());
+        }
+
+        if backend.can_auto_unlock() {
+            tracing::debug!(backend = %backend_id, "attempting silent re-auth (auto-unlock)");
+            match backend.recover().await.map_err(map_backend_error)? {
+                RecoveryOutcome::Recovered => {
+                    tracing::debug!(backend = %backend_id, "silent re-auth succeeded");
+                }
+                RecoveryOutcome::Failed(reason) => {
+                    warn!(backend = %backend_id, %reason, "silent re-auth failed");
+                    return Err(FdoError::Failed(format!(
+                        "auto-unlock failed for backend '{backend_id}': {reason}"
+                    )));
+                }
+            }
+        } else {
+            tracing::debug!(backend = %backend_id, "backend is locked; client must call AuthBackend");
+            return Err(FdoError::Failed(format!("locked::{backend_id}")));
+        }
+
+        self.mark_unlocked();
+        self.touch_activity();
+        Ok(())
     }
 
     /// Rebuild the item cache from in-memory backend state.
@@ -628,6 +1052,9 @@ impl ServiceState {
                 .collect());
         }
 
+        // First-time population: attempt to unlock interactive backends so the
+        // initial cache contains as many items as possible.
+        self.ensure_unlocked_inner().await?;
         let entries = self.fetch_entries().await?;
         self.register_items(&entries).await?;
         let mut state_items = self.items.lock().map_err(|_| {
@@ -643,32 +1070,85 @@ impl ServiceState {
     pub(crate) async fn rebuild_cache_inner(&self) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
         let entries = self.fetch_entries().await?;
         self.register_items(&entries).await?;
-        let mut state_items = self.items.lock().map_err(|_| {
-            map_backend_error(BackendError::Unavailable("items lock poisoned".to_string()))
-        })?;
-        state_items.clear();
-        for (path, item) in entries.iter() {
-            state_items.insert(path.clone(), item.clone());
+
+        // Determine which backends contributed fresh entries so we can
+        // selectively replace only those backends' items, preserving
+        // cached items from backends that were skipped (still locked).
+        let fresh_backends: HashSet<String> = entries
+            .iter()
+            .map(|(_, meta)| meta.backend_id.clone())
+            .collect();
+
+        {
+            let mut state_items = self.items.lock().map_err(|_| {
+                map_backend_error(BackendError::Unavailable("items lock poisoned".to_string()))
+            })?;
+            // Remove old entries only for backends that were refreshed.
+            state_items.retain(|_, meta| !fresh_backends.contains(&meta.backend_id));
+            // Insert fresh entries.
+            for (path, item) in entries.iter() {
+                state_items.insert(path.clone(), item.clone());
+            }
         }
+
+        // Also populate the persistent metadata cache with the same
+        // selective-replace strategy.  Items from backends that were
+        // skipped during fetch_entries (still locked) retain their
+        // previous metadata_cache entries with `locked: true`.
+        {
+            let mut cache = self.metadata_cache.lock().map_err(|_| {
+                map_backend_error(BackendError::Unavailable("metadata_cache lock poisoned".to_string()))
+            })?;
+            // Remove old entries for backends that were refreshed.
+            cache.retain(|_, meta| !fresh_backends.contains(&meta.backend_id));
+            // Insert fresh entries.
+            for (path, meta) in entries.iter() {
+                cache.insert(path.clone(), meta.clone());
+            }
+        }
+
         self.update_cache_time()?;
         Ok(entries)
     }
 
     async fn fetch_entries(&self) -> Result<Vec<(String, VaultItemMeta)>, FdoError> {
-        self.ensure_unlocked_inner().await?;
         let mut all_items: Vec<VaultItemMeta> = Vec::new();
         let mut backend_ids: Vec<String> = Vec::new();
         for backend in self.backends_ordered() {
             let bid = backend.id().to_string();
-            let fetched = self.run_on_tokio(async move { backend.list_items().await })
-                .await?
-                .map_err(map_backend_error)?;
-            // Tag each item with its backend_id before dedup
+            let result = self.run_on_tokio(async move { backend.list_items().await })
+                .await?;
+            let fetched = match result {
+                Ok(items) => items,
+                Err(BackendError::Locked) => {
+                    // Auto-unlock backend (e.g. SM) whose recover() failed —
+                    // skip it and continue with the remaining backends so the
+                    // other backends' items still populate the cache.
+                    warn!(backend = %bid, "skipping locked backend during cache fetch");
+                    backend_ids.push(bid);
+                    continue;
+                }
+                Err(e) => return Err(map_backend_error(e)),
+            };
+            // Tag each item with its backend_id and optional collection label.
+            let collection_label: Option<String> = self
+                .collection_map
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&bid)
+                .cloned();
             let tagged: Vec<VaultItemMeta> = fetched
                 .into_iter()
                 .map(|mut item| {
                     if item.backend_id.is_empty() {
                         item.backend_id = bid.clone();
+                    }
+                    // Stamp collection label if configured and not already set
+                    // by the backend itself.
+                    if let Some(col) = &collection_label {
+                        item.attributes
+                            .entry("collection".to_string())
+                            .or_insert_with(|| col.clone());
                     }
                     item
                 })
@@ -776,6 +1256,66 @@ impl ServiceState {
     pub(crate) fn ensure_session(&self, session: &str) -> Result<(), FdoError> {
         self.sessions.validate(session).map_err(map_backend_error)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt helpers (module-private)
+// ---------------------------------------------------------------------------
+
+/// Find the `rosec-prompt` binary next to the current executable or on PATH.
+fn resolve_prompt_binary() -> String {
+    // Prefer a sibling binary in the same directory (installed layout).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("rosec-prompt");
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "rosec-prompt".to_string() // fall back to PATH lookup
+}
+
+/// Build the JSON request payload that `rosec-prompt` expects on stdin.
+///
+/// Includes enough context for the prompt to display a useful title and
+/// theme, but deliberately excludes the field values (those come back).
+fn build_prompt_json(backend_id: String, label: &str, cfg: &PromptConfig) -> String {
+    use serde_json::{json, Value};
+    let theme = &cfg.theme;
+    let req: Value = json!({
+        "title": label,
+        "message": "",
+        "hint": "",
+        "backend": backend_id,
+        "confirm_label": "Unlock",
+        "cancel_label": "Cancel",
+        "fields": [
+            {
+                "id": "password",
+                "label": "Master Password",
+                "kind": "password",
+                "placeholder": "",
+            }
+        ],
+        "theme": {
+            "background":         theme.background,
+            "foreground":         theme.foreground,
+            "border_color":       theme.border_color,
+            "border_width":       theme.border_width,
+            "font_family":        theme.font_family,
+            "label_color":        theme.label_color,
+            "accent_color":       theme.accent_color,
+            "confirm_background": theme.confirm_background,
+            "confirm_text":       theme.confirm_text,
+            "cancel_background":  theme.cancel_background,
+            "cancel_text":        theme.cancel_text,
+            "input_background":   theme.input_background,
+            "input_text":         theme.input_text,
+            "font_size":          theme.font_size,
+        }
+    });
+    req.to_string()
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ pub mod config;
 pub mod config_edit;
 pub mod credential;
 pub mod dedup;
+pub mod machine_key;
 pub mod oauth;
 pub mod prompt;
 pub mod router;
@@ -367,6 +368,26 @@ pub trait VaultBackend: Send + Sync {
             RecoveryOutcome::Recovered => Ok(()),
             RecoveryOutcome::Failed(msg) => Err(BackendError::Unavailable(msg)),
         }
+    }
+
+    /// Return the UTC timestamp of the last successful sync, or `None` if no
+    /// sync has occurred since the backend was constructed.
+    fn last_synced_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
+    /// Check whether the remote source has changed since our last sync.
+    ///
+    /// Returns `Ok(true)` if a sync is needed, `Ok(false)` if the local copy
+    /// is up-to-date, or an error if the check itself failed.  The default
+    /// returns `Ok(true)` (always sync), so backends that don't implement a
+    /// cheap remote-check still behave correctly — just less efficiently.
+    ///
+    /// Implementations should use a lightweight API call (e.g.
+    /// `GET /accounts/revision-date` for Bitwarden PM,
+    /// `GET /organizations/{id}/secrets/sync` for Bitwarden SM).
+    async fn check_remote_changed(&self) -> Result<bool, BackendError> {
+        Ok(true)
     }
 
     async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError>;

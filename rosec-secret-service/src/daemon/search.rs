@@ -35,12 +35,16 @@ impl RosecSearch {
     /// Returns `(unlocked_paths, locked_paths)` — identical shape to the
     /// Secret Service spec's `SearchItems` so callers can use the paths with
     /// any spec-compliant method afterwards.
-    fn search_items_glob(
+    ///
+    /// Reads from the persistent metadata cache which survives lock/unlock
+    /// cycles: items from locked backends are returned in the `locked` list
+    /// rather than causing an error.
+    async fn search_items_glob(
         &self,
         attrs: HashMap<String, String>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         log_caller("SearchItemsGlob", &header);
-        self.state.search_items_glob(&attrs)
+        self.state.search_metadata_cache_glob(&attrs)
     }
 }

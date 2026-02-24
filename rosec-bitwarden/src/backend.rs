@@ -440,11 +440,6 @@ impl BitwardenBackend {
         let sync = self.api.sync(&login_resp.access_token).await?;
         vault.process_sync(&sync)?;
 
-        info!(
-            ciphers = vault.ciphers().len(),
-            "Bitwarden vault synced"
-        );
-
         Ok(AuthState {
             // Fields are already Zeroizing<String> from the response struct
             access_token: login_resp.access_token,
@@ -564,6 +559,9 @@ impl BitwardenBackend {
 
         if let Some(org_id) = &dc.organization_id {
             attributes.insert("org_id".to_string(), org_id.clone());
+        }
+        if let Some(org_name) = &dc.organization_name {
+            attributes.insert("org".to_string(), org_name.clone());
         }
 
         // Login-specific public attributes
@@ -997,10 +995,11 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
             .await
             .map_err(BackendError::from)?;
 
+        let ciphers = auth_state.vault.ciphers().len();
         let mut guard = self.state.lock().await;
         *guard = Some(auth_state);
 
-        info!("Bitwarden vault unlocked");
+        info!(ciphers, "Bitwarden vault unlocked");
         Ok(())
     }
 
@@ -1371,6 +1370,7 @@ mod tests {
             creation_date: Some("2024-06-15T10:30:00.000Z".to_string()),
             revision_date: Some("2024-06-20T14:00:00.000Z".to_string()),
             organization_id: None,
+            organization_name: None,
         }
     }
 

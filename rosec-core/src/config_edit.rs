@@ -31,15 +31,27 @@ pub fn add_backend(
         bail!("backend '{id}' already exists in {}", config_path.display());
     }
 
+    // Separate top-level fields ("collection") from backend options.
+    // "collection" is written as a top-level key, not inside [options].
+    let collection: Option<&str> = options
+        .iter()
+        .find(|(k, _)| k == "collection")
+        .map(|(_, v)| v.as_str());
+    let backend_options: Vec<_> = options.iter().filter(|(k, _)| k != "collection").collect();
+
     // Build the new table entry.
     let mut entry = Table::new();
     entry.set_implicit(false);
     entry["id"] = value(id);
     entry["type"] = value(kind);
 
-    if !options.is_empty() {
+    if let Some(col) = collection {
+        entry["collection"] = value(col);
+    }
+
+    if !backend_options.is_empty() {
         let mut opts = Table::new();
-        for (k, v) in options {
+        for (k, v) in &backend_options {
             opts[k.as_str()] = value(v.as_str());
         }
         entry["options"] = Item::Table(opts);
@@ -115,10 +127,7 @@ pub fn remove_backend(config_path: &Path, id: &str) -> Result<()> {
 pub fn required_options_for_kind(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
         "bitwarden" => &[("email", "Bitwarden account email")],
-        "bitwarden-sm" => &[
-            ("access_token", "Machine account access token"),
-            ("organization_id", "Organization UUID"),
-        ],
+        "bitwarden-sm" => &[("organization_id", "Organization UUID")],
         _ => &[],
     }
 }
@@ -140,11 +149,19 @@ pub fn optional_options_for_kind(kind: &str) -> &'static [(&'static str, &'stati
                 "identity_url",
                 "Explicit identity URL override (overrides region/base_url)",
             ),
+            (
+                "collection",
+                "Label stamped on all items as the 'collection' attribute (e.g. 'work')",
+            ),
         ],
-        "bitwarden-sm" => &[(
-            "server_url",
-            "Self-hosted server URL (leave blank for official cloud)",
-        )],
+        "bitwarden-sm" => &[
+            ("region", "Cloud region: 'us' or 'eu' (default: us)"),
+            ("server_url", "Self-hosted server URL (overrides region)"),
+            (
+                "collection",
+                "Label stamped on all items as the 'collection' attribute (e.g. 'work')",
+            ),
+        ],
         _ => &[],
     }
 }
@@ -165,11 +182,23 @@ fn read_or_empty(path: &Path) -> Result<String> {
 }
 
 fn write_doc(path: &Path, doc: &DocumentMut) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
-    std::fs::write(path, doc.to_string())
+
+    // Write with mode 0o600 on creation so the file is never world- or
+    // group-readable regardless of the process umask.  If the file already
+    // exists its permissions are left unchanged.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, doc.to_string().as_bytes()))
         .with_context(|| format!("failed to write {}", path.display()))
 }
 

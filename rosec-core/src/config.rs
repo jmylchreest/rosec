@@ -143,6 +143,22 @@ pub struct BackendEntry {
     /// match at least one pattern will participate in `SearchItems` filtering.
     #[serde(default)]
     pub match_attr: Option<Vec<String>>,
+
+    /// Optional collection label stamped onto every item from this backend as
+    /// the `"collection"` attribute.
+    ///
+    /// Useful for grouping items across multiple backends in a multi-backend
+    /// setup (e.g. `collection = "work"` on a work SM org and a work PM vault).
+    /// Clients can then filter with `rosec search collection=work`.
+    ///
+    /// ```toml
+    /// [[backend]]
+    /// id     = "work-sm"
+    /// type   = "bitwarden-sm"
+    /// collection = "work"
+    /// ```
+    #[serde(default)]
+    pub collection: Option<String>,
 }
 
 /// Option keys whose values must never appear in logs or debug output.

@@ -43,3 +43,4 @@ libc = "0.2"
 toml_edit = "0.22"
 futures-util = "0.3"
 wildmatch = "2.6.1"
+chrono = { version = "0.4", features = ["serde"] }

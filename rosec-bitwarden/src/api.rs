@@ -507,6 +507,8 @@ pub struct SyncProfile {
 pub struct SyncOrganization {
     #[serde(alias = "Id")]
     pub id: String,
+    #[serde(alias = "Name", default)]
+    pub name: Option<String>,
     #[serde(alias = "Key")]
     pub key: Option<String>,
 }

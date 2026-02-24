@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
         "sync" | "refresh" => cmd_sync().await,
         "search" => cmd_search(&args[1..]).await,
         "get" => cmd_get(&args[1..]).await,
+        "inspect" => cmd_inspect(&args[1..]).await,
         "lock" => cmd_lock().await,
         "unlock" => cmd_unlock().await,
         "help" | "--help" | "-h" => {
@@ -66,7 +67,8 @@ COMMANDS:
     sync                                Sync vault with remote server (alias: refresh)
     search [--format=<fmt>] [--show-path] [key=value]...
                                         Search items by attributes (no args = list all)
-    get <id>                            Get a secret by item ID or full D-Bus path
+    get <id>                            Print the secret value only (pipeable)
+    inspect <id>                        Show full item detail: label, attributes, secret
     lock                                Lock all backends
     unlock                              Unlock (triggers GUI/TTY prompt)
     help                                Show this help
@@ -115,8 +117,10 @@ EXAMPLES:
     rosec search --format=json type=login                   # JSON output (includes path)
     rosec search --format=kv uri=github.com                 # key=value output
     rosec search --show-path type=login                     # table with D-Bus path column
-    rosec get a1b2c3d4e5f60718                              # 16-char hex ID from search
-    rosec get /org/freedesktop/secrets/collection/default/… # full D-Bus path"
+    rosec get a1b2c3d4e5f60718                              # print secret value only (pipeable)
+    rosec get a1b2c3d4e5f60718 | xclip -sel clip            # copy secret to clipboard
+    rosec inspect a1b2c3d4e5f60718                          # full label + attributes + secret
+    rosec inspect /org/freedesktop/secrets/collection/default/… # full D-Bus path"
     );
 }
 
@@ -131,6 +135,7 @@ USAGE:
 
 SUBCOMMANDS:
     list                      List backends and their lock state
+    kinds                     List available backend kinds
     auth <id>                 Authenticate/unlock a backend
     add <kind> [options]      Add a backend to config.toml
     remove <id>               Remove a backend from config.toml
@@ -144,6 +149,28 @@ OPTIONS for 'add':
     key=value ...             Backend options (email, region, base_url, etc.)
     --config <path>           Config file to edit (default: ~/.config/rosec/config.toml)"
     );
+}
+
+fn cmd_backend_kinds() {
+    println!("Available backend kinds:\n");
+    for kind in config_edit::KNOWN_KINDS {
+        let required = config_edit::required_options_for_kind(kind);
+        let optional = config_edit::optional_options_for_kind(kind);
+        println!("  {kind}");
+        if !required.is_empty() {
+            println!("    Required:");
+            for (key, desc) in required {
+                println!("      {key:<20}  {desc}");
+            }
+        }
+        if !optional.is_empty() {
+            println!("    Optional:");
+            for (key, desc) in optional {
+                println!("      {key:<20}  {desc}");
+            }
+        }
+        println!();
+    }
 }
 
 async fn conn() -> Result<Connection> {
@@ -244,10 +271,13 @@ fn resolve_binary(name: &str) -> String {
 /// (or TTY fallback), then call `AuthBackend` over D-Bus.
 ///
 /// `field_descs` is the list returned by `GetAuthFields`.
+/// `backend_kind` is the kind string (e.g. `"bitwarden"`, `"bitwarden-sm"`)
+/// and is used to select the right action verb for the prompt title.
 /// Returns `Ok(())` if the backend was successfully authenticated.
 async fn prompt_and_auth(
     backend_id: &str,
     backend_name: &str,
+    backend_kind: &str,
     field_descs: &[(String, String, String, String, bool)],
     proxy: &zbus::Proxy<'_>,
     config: &Config,
@@ -264,22 +294,26 @@ async fn prompt_and_auth(
         })
         .collect();
 
-    // Title uses the backend ID (short, stable identifier).
+    // SM uses token-based auth, not a vault password — use "Authenticate"
+    // as the action verb.  All other backends use "Unlock".
+    let is_token_auth = backend_kind.ends_with("-sm");
+    let action_verb = if is_token_auth { "Authenticate" } else { "Unlock" };
+    let confirm_label = if is_token_auth { "Authenticate" } else { "Unlock" };
+
     // The human-readable name (which may contain PII such as an email address)
     // is shown in the tooltip (hint) so it is discoverable on hover but does
     // not occupy visible space or leak into the main window text.
-    let display_name = if backend_name.is_empty() { backend_id } else { backend_name };
     let hint = if backend_name.is_empty() || backend_name == backend_id {
         String::new()
     } else {
         backend_name.to_string()
     };
     let request = PromptRequest {
-        title:             &format!("Unlock {backend_id}"),
+        title:             &format!("{action_verb} {backend_id}"),
         message:           "",
         hint:              &hint,
         backend:           backend_id,
-        confirm_label:     "Unlock",
+        confirm_label,
         cancel_label:      "Cancel",
         fields:            fields.clone(),
         theme: PromptTheme {
@@ -335,15 +369,18 @@ async fn prompt_and_auth(
                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
             {
                 // GUI binary not available — fall through to TTY
-                collect_tty(display_name, &fields).await?
+                collect_tty(&fields).await?
             }
             Err(e) => bail!("failed to launch prompt: {e}"),
         }
     } else {
-        collect_tty(display_name, &fields).await?
+        collect_tty(&fields).await?
     };
 
     // Call AuthBackend with the collected values.
+    // Keep the map alive past the first AuthBackend call — if registration is
+    // required we need to merge the already-collected credentials with the
+    // registration-specific fields rather than re-prompting for everything.
     let mut string_map: HashMap<String, String> = collected
         .into_iter()
         .map(|(k, v)| (k, v.as_str().to_string()))
@@ -351,11 +388,6 @@ async fn prompt_and_auth(
 
     let result: Result<bool, zbus::Error> =
         proxy.call("AuthBackend", &(backend_id, &string_map)).await;
-
-    // Zero the map values now that they've been sent.
-    for v in string_map.values_mut() {
-        unsafe { v.as_bytes_mut().iter_mut().for_each(|b| *b = 0) };
-    }
 
     let needs_registration = matches!(
         &result,
@@ -371,11 +403,10 @@ async fn prompt_and_auth(
         eprintln!("{instructions}");
         eprintln!();
 
-        // Re-collect all fields including registration fields via TTY
-        // (registration flow is always interactive/text-based).
-        let mut all_fields = field_descs.to_vec();
-        all_fields.extend(reg_field_descs);
-        let reg_fields: Vec<PromptField<'_>> = all_fields
+        // Only prompt for the registration-specific fields — the credentials
+        // already collected (e.g. master password) are carried forward from
+        // string_map so the user is not asked to enter them a second time.
+        let reg_only_fields: Vec<PromptField<'_>> = reg_field_descs
             .iter()
             .map(|(id, label, kind, placeholder, _)| PromptField {
                 id: id.as_str(),
@@ -384,18 +415,23 @@ async fn prompt_and_auth(
                 placeholder: placeholder.as_str(),
             })
             .collect();
-        let mut reg_map: HashMap<String, String> = collect_tty(display_name, &reg_fields)
+        let reg_extra: HashMap<String, String> = collect_tty(&reg_only_fields)
             .await?
             .into_iter()
             .map(|(k, v)| (k, v.as_str().to_string()))
             .collect();
 
-        let _ok: bool = proxy.call("AuthBackend", &(backend_id, &reg_map)).await?;
-        for v in reg_map.values_mut() {
-            unsafe { v.as_bytes_mut().iter_mut().for_each(|b| *b = 0) };
-        }
+        // Merge: registration fields overlay the original credentials.
+        string_map.extend(reg_extra);
+
+        let _ok: bool = proxy.call("AuthBackend", &(backend_id, &string_map)).await?;
     } else {
         result?;
+    }
+
+    // Zero all credential values now that they have been sent.
+    for v in string_map.values_mut() {
+        unsafe { v.as_bytes_mut().iter_mut().for_each(|b| *b = 0) };
     }
 
     Ok(())
@@ -423,16 +459,118 @@ fn extract_locked_backend(err: &zbus::Error) -> Option<String> {
 /// Attempt to interactively unlock a backend after receiving a `"locked::<id>"`
 /// D-Bus error.
 ///
+/// This function implements the Secret Service spec Prompt flow:
+///   1. Call `Service.Unlock([collection])` — the daemon allocates a Prompt object.
+///   2. Subscribe to `Prompt.Completed` on that path.
+///   3. Call `Prompt.Prompt("")` to tell the daemon to show the credential dialog.
+///   4. Await the `Completed` signal; race against Ctrl+C.
+///   5. On Ctrl+C: call `org.rosec.Daemon.CancelPrompt(prompt_path)` then exit.
+///
+/// Credentials never cross D-Bus — the daemon handles everything internally.
+///
 /// Returns `Ok(true)` if the backend was successfully unlocked (caller should
 /// retry the original operation).  Returns `Ok(false)` if the error was not a
 /// locked sentinel (caller should propagate the original error).
 async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Result<bool> {
-    let backend_id = match extract_locked_backend(err) {
-        Some(id) => id,
-        None => return Ok(false),
+    // Only trigger for the locked sentinel — not for generic errors.
+    if extract_locked_backend(err).is_none() {
+        return Ok(false);
+    }
+
+    trigger_unlock(conn).await?;
+    Ok(true)
+}
+
+/// Trigger the spec-compliant Unlock → Prompt → Completed flow.
+///
+/// Calls `Service.Unlock([default_collection])`.  If a prompt is required,
+/// subscribes to `Prompt.Completed`, fires `Prompt.Prompt("")`, and awaits the
+/// signal.  On success, triggers a cache refresh so subsequent operations see
+/// the newly-unlocked items.
+///
+/// Credentials never cross D-Bus — the daemon handles everything internally.
+async fn trigger_unlock(conn: &Connection) -> Result<()> {
+    use futures_util::StreamExt as _;
+
+    // Build a Secret Service proxy for Unlock().
+    let service_proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service",
+    )
+    .await?;
+
+    // Call Unlock([default_collection]).  Returns (unlocked_list, prompt_path).
+    // prompt_path == "/" means everything was already unlocked (auto-unlock backends).
+    let collection_path = OwnedObjectPath::try_from(
+        "/org/freedesktop/secrets/collection/default".to_string(),
+    )?;
+    let (_, prompt_path): (Vec<OwnedObjectPath>, OwnedObjectPath) =
+        service_proxy.call("Unlock", &(vec![collection_path],)).await?;
+    let prompt_path = prompt_path.to_string();
+
+    if prompt_path == "/" {
+        // Already unlocked (auto-unlock backends recovered silently).
+        return Ok(());
+    }
+
+    // Build a proxy on the prompt object so we can subscribe to Completed.
+    let prompt_proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        prompt_path.as_str(),
+        "org.freedesktop.Secret.Prompt",
+    )
+    .await?;
+
+    // Subscribe to the Completed signal *before* calling Prompt() to avoid
+    // a race where Completed fires before we start listening.
+    let mut completed_stream = prompt_proxy.receive_signal("Completed").await?;
+
+    // Tell the daemon to display the credential dialog.
+    let _: () = prompt_proxy.call("Prompt", &("",)).await?;
+
+    // Await Completed or Ctrl+C.
+    let dismissed = tokio::select! {
+        msg = completed_stream.next() => {
+            match msg {
+                None => {
+                    // Stream ended without a signal — treat as cancelled.
+                    true
+                }
+                Some(message) => {
+                    // Completed signal body: (dismissed: bool, result: Variant)
+                    // We only need the first field.
+                    let body = message.body();
+                    match body.deserialize::<(bool, zvariant::OwnedValue)>() {
+                        Ok((d, _)) => d,
+                        Err(_) => true, // parse error → treat as dismissed
+                    }
+                }
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            // User pressed Ctrl+C — cancel the prompt subprocess and exit.
+            let daemon_proxy = zbus::Proxy::new(
+                conn,
+                "org.freedesktop.secrets",
+                "/org/rosec/Daemon",
+                "org.rosec.Daemon",
+            )
+            .await?;
+            let _: Result<bool, _> = daemon_proxy.call("CancelPrompt", &(&prompt_path,)).await;
+            bail!("cancelled by user");
+        }
     };
 
-    let config = load_config();
+    if dismissed {
+        bail!("unlock cancelled or failed");
+    }
+
+    // Unlock succeeded.  Trigger a cache sync so the retry finds items.
+    // Use the daemon proxy for SyncBackend; need to look up which backend unlocked.
+    // Use "all" shorthand: call Refresh which rebuilds the cache from in-memory state.
     let daemon_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -440,31 +578,15 @@ async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Result<bool> {
         "org.rosec.Daemon",
     )
     .await?;
+    let _: Result<u32, _> = daemon_proxy.call("Refresh", &()).await;
 
-    // Look up the backend's display name for the prompt.
-    let backends: Vec<(String, String, String, bool)> =
-        daemon_proxy.call("BackendList", &()).await?;
-    let display_name = backends
-        .iter()
-        .find(|(id, _, _, _)| id == &backend_id)
-        .map(|(_, name, _, _)| name.as_str())
-        .unwrap_or(&backend_id);
-
-    let field_descs: Vec<(String, String, String, String, bool)> =
-        daemon_proxy.call("GetAuthFields", &(&backend_id,)).await?;
-
-    prompt_and_auth(&backend_id, display_name, &field_descs, &daemon_proxy, &config).await?;
-
-    Ok(true)
+    Ok(())
 }
 
 /// Collect credentials via TTY for the given fields.
 async fn collect_tty(
-    display_name: &str,
     fields: &[PromptField<'_>],
 ) -> Result<HashMap<String, Zeroizing<String>>> {
-    eprintln!();
-    eprintln!("=== Unlock {display_name} ===");
     eprintln!();
     let mut map = HashMap::new();
     for f in fields {
@@ -616,6 +738,7 @@ async fn cmd_backend(args: &[String]) -> Result<()> {
         "auth"                   => cmd_backend_auth(&args[1..]).await,
         "add"                    => cmd_backend_add(&args[1..]).await,
         "remove" | "rm"          => cmd_backend_remove(&args[1..]).await,
+        "kinds"                  => { cmd_backend_kinds(); Ok(()) }
         "help" | "--help" | "-h" => { print_backend_help(); Ok(()) }
         other => {
             eprintln!("unknown backend subcommand: {other}");
@@ -640,7 +763,7 @@ async fn cmd_backend_list() -> Result<()> {
         proxy.call("BackendList", &()).await?;
 
     if entries.is_empty() {
-        println!("No backends configured.");
+        println!("No backends configured. Run `rosec backend add <kind>` to add one.");
         return Ok(());
     }
 
@@ -688,19 +811,17 @@ async fn cmd_backend_auth(args: &[String]) -> Result<()> {
     )
     .await?;
 
-    // Resolve the friendly backend name from BackendList.
+    // Resolve the friendly backend name and kind from BackendList.
     let backends: Vec<(String, String, String, bool)> =
         proxy.call("BackendList", &()).await?;
-    let backend_name = backends
-        .iter()
-        .find(|(id, _, _, _)| id == backend_id)
-        .map(|(_, name, _, _)| name.as_str())
-        .unwrap_or("");
+    let entry = backends.iter().find(|(id, _, _, _)| id == backend_id);
+    let backend_name = entry.map(|(_, name, _, _)| name.as_str()).unwrap_or("");
+    let backend_kind = entry.map(|(_, _, k, _)| k.as_str()).unwrap_or("");
 
     let field_descs: Vec<(String, String, String, String, bool)> =
         proxy.call("GetAuthFields", &(backend_id,)).await?;
 
-    prompt_and_auth(backend_id, backend_name, &field_descs, &proxy, &config).await?;
+    prompt_and_auth(backend_id, backend_name, backend_kind, &field_descs, &proxy, &config).await?;
 
     println!("Backend '{backend_id}' authenticated.");
     Ok(())
@@ -752,7 +873,7 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
     // Collect required options first — we need them to auto-generate the ID.
     for (key, description) in config_edit::required_options_for_kind(kind) {
         if !supplied.contains(*key) {
-            let field_kind = if *key == "access_token" || key.contains("secret") || key.contains("password") {
+            let field_kind = if key.contains("secret") || key.contains("password") {
                 "secret"
             } else {
                 "text"
@@ -791,7 +912,55 @@ async fn cmd_backend_add(args: &[String]) -> Result<()> {
     let cfg = config_path();
     config_edit::add_backend(&cfg, &id, kind, &options)?;
     println!("Added backend '{id}' (kind: {kind}) to {}", cfg.display());
-    println!("rosecd will hot-reload the config automatically if it is running.");
+
+    // If rosecd is running, wait for it to hot-reload the new backend then
+    // immediately kick off the auth flow so the user doesn't have to run
+    // `rosec backend auth <id>` manually as a separate step.
+    if let Ok(conn) = conn().await {
+        if let Ok(proxy) = zbus::Proxy::new(
+            &conn,
+            "org.freedesktop.secrets",
+            "/org/rosec/Daemon",
+            "org.rosec.Daemon",
+        )
+        .await
+        {
+            // Poll BackendList until the new backend ID appears (hot-reload
+            // debounces at 500 ms) or we give up after 3 s.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let appeared = loop {
+                if let Ok(entries) = proxy
+                    .call::<_, _, Vec<(String, String, String, bool)>>("BackendList", &())
+                    .await
+                    && entries.iter().any(|(bid, ..)| bid == &id)
+                {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            };
+
+            if appeared {
+                println!("rosecd picked up the new backend — starting authentication.");
+                let config = load_config();
+                let field_descs: Vec<(String, String, String, String, bool)> =
+                    proxy.call("GetAuthFields", &(id.as_str(),)).await?;
+                prompt_and_auth(&id, kind, kind, &field_descs, &proxy, &config).await?;
+                println!("Backend '{id}' authenticated.");
+            } else {
+                println!("rosecd will hot-reload the config automatically if it is running.");
+                println!("Run `rosec backend auth {id}` to authenticate.");
+            }
+        } else {
+            println!("rosecd will hot-reload the config automatically if it is running.");
+            println!("Run `rosec backend auth {id}` to authenticate.");
+        }
+    } else {
+        println!("rosecd is not running — start it, then run `rosec backend auth {id}`.");
+    }
+
     Ok(())
 }
 
@@ -891,7 +1060,7 @@ async fn cmd_sync() -> Result<()> {
     let backends: Vec<(String, String, String, bool)> =
         proxy.call("BackendList", &()).await?;
 
-    for (id, name, _kind, _locked) in &backends {
+    for (id, name, kind, _locked) in &backends {
         eprint!("Syncing '{id}'...");
         match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
             Ok(count) => {
@@ -905,7 +1074,7 @@ async fn cmd_sync() -> Result<()> {
                 eprintln!(" locked");
                 let field_descs: Vec<(String, String, String, String, bool)> =
                     proxy.call("GetAuthFields", &(backend_id,)).await?;
-                prompt_and_auth(backend_id, name, &field_descs, &proxy, &config).await?;
+                prompt_and_auth(backend_id, name, kind, &field_descs, &proxy, &config).await?;
                 // Retry sync now that the backend is unlocked.
                 eprint!("Syncing '{id}' (retrying)...");
                 match proxy.call::<_, _, u32>("SyncBackend", &(id,)).await {
@@ -916,6 +1085,73 @@ async fn cmd_sync() -> Result<()> {
             Err(e) => eprintln!(" failed: {e}"),
         }
     }
+
+    Ok(())
+}
+
+/// Ensure the daemon's cache is fresh by syncing backends in parallel.
+///
+/// Checks `DaemonStatus.last_sync_epoch` — if the last sync was more than
+/// 60 seconds ago (matching the daemon's internal staleness threshold), calls
+/// `SyncBackend` for each unlocked backend concurrently.  If the cache is
+/// already fresh, this is a single cheap D-Bus call with no network I/O.
+///
+/// Locked backends are skipped — the caller handles unlock via the Prompt flow
+/// and can call this again afterwards to sync the newly-unlocked backends.
+async fn sync_before_get(conn: &Connection) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+
+    // Check global staleness: if last_sync_epoch is within 60 s, skip.
+    let status: (String, String, u32, u32, u64, u32) =
+        proxy.call("Status", &()).await?;
+    let last_sync_epoch = status.4;
+
+    if last_sync_epoch > 0 {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now_epoch.saturating_sub(last_sync_epoch) < 60 {
+            return Ok(());
+        }
+    }
+
+    // Stale or never synced — sync each unlocked backend in parallel.
+    let backends: Vec<(String, String, String, bool)> =
+        proxy.call("BackendList", &()).await?;
+
+    let futures: Vec<_> = backends
+        .into_iter()
+        .filter(|(_, _, _, locked)| !locked)
+        .map(|(id, _, _, _)| {
+            let conn = conn.clone();
+            async move {
+                let p = zbus::Proxy::new(
+                    &conn,
+                    "org.freedesktop.secrets",
+                    "/org/rosec/Daemon",
+                    "org.rosec.Daemon",
+                )
+                .await;
+                match p {
+                    Ok(p) => {
+                        if let Err(e) = p.call::<_, _, u32>("SyncBackend", &(&id,)).await {
+                            eprintln!("sync {id}: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("sync {id}: {e}"),
+                }
+            }
+        })
+        .collect();
+
+    futures_util::future::join_all(futures).await;
 
     Ok(())
 }
@@ -1014,6 +1250,32 @@ async fn is_rosecd(conn: &Connection) -> bool {
     proxy.call::<_, _, String>("Introspect", &()).await.is_ok()
 }
 
+/// If rosecd is running with no configured backends, print a warning to stderr
+/// and suggest next steps.  Non-fatal — the caller continues normally (an empty
+/// backend list returns empty results, which is correct behaviour).
+async fn warn_if_no_backends(conn: &Connection) {
+    let Ok(proxy) = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await
+    else {
+        return;
+    };
+    let Ok(entries) = proxy
+        .call::<_, _, Vec<(String, String, String, bool)>>("BackendList", &())
+        .await
+    else {
+        return;
+    };
+    if entries.is_empty() {
+        eprintln!("warning: rosecd is running with no configured backends.");
+        eprintln!("         Run `rosec backend add <kind>` to add a real backend.");
+    }
+}
+
 /// Glob search: try `org.rosec.Search.SearchItemsGlob` first when rosecd is running.
 ///
 /// If `is_rosecd` is false (non-rosecd provider), falls back to
@@ -1034,7 +1296,15 @@ async fn search_with_glob_fallback(
             "org.rosec.Search",
         )
         .await?;
-        return Ok(search_proxy.call("SearchItemsGlob", &(attrs,)).await?);
+        // Mirror the lazy-unlock retry that search_exact uses: if the server
+        // returns locked::<id>, prompt the user then retry once.
+        match search_proxy.call("SearchItemsGlob", &(attrs,)).await {
+            Ok(result) => return Ok(result),
+            Err(ref e) if try_lazy_unlock(conn, e).await? => {
+                return Ok(search_proxy.call("SearchItemsGlob", &(attrs,)).await?);
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
     // Fallback for non-rosecd providers: fetch all items then filter client-side.
@@ -1104,6 +1374,9 @@ async fn cmd_search(args: &[String]) -> Result<()> {
 
     let conn = conn().await?;
     let rosecd = is_rosecd(&conn).await;
+    if rosecd {
+        warn_if_no_backends(&conn).await;
+    }
     let has_globs = all_attrs.values().any(|v| is_glob(v))
         || all_attrs.contains_key("name");
 
@@ -1326,9 +1599,13 @@ fn print_search_json(items: &[ItemSummary]) -> Result<()> {
 ///   by searching all items for one whose path ends with `_{hash}`
 /// - Any other string is treated as the full last path segment and prepended
 ///   with the collection prefix (legacy behaviour)
-async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<String> {
+///
+/// Returns `(path, is_locked)` where `is_locked` is `true` if the item was
+/// found in the `locked` list of `SearchItems`.  For full paths and legacy
+/// segments (where we don't call `SearchItems`), `is_locked` is `false`.
+async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool)> {
     if raw.starts_with('/') {
-        return Ok(raw.to_string());
+        return Ok((raw.to_string(), false));
     }
 
     // 16-char lowercase hex → look up by hash suffix.
@@ -1344,35 +1621,112 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<String> {
         let suffix = format!("_{raw}");
         let (unlocked, locked): (Vec<String>, Vec<String>) =
             proxy.call("SearchItems", &(&HashMap::<String, String>::new(),)).await?;
-        let all = unlocked.into_iter().chain(locked);
-        for path in all {
+        // Check unlocked first (preferred).
+        for path in &unlocked {
             if path.ends_with(&suffix) {
-                return Ok(path);
+                return Ok((path.clone(), false));
+            }
+        }
+        // Then check locked list.
+        for path in &locked {
+            if path.ends_with(&suffix) {
+                return Ok((path.clone(), true));
             }
         }
         anyhow::bail!("no item found with ID {raw}");
     }
 
     // Legacy: treat as full path segment.
-    Ok(format!("/org/freedesktop/secrets/collection/default/{raw}"))
+    Ok((format!("/org/freedesktop/secrets/collection/default/{raw}"), false))
 }
 
 async fn cmd_get(args: &[String]) -> Result<()> {
-    let raw = args.first().ok_or_else(|| anyhow::anyhow!("missing item path or ID"))?;
+    // Parse flags: --help / -h, --attr <name> / --attr=<name>, --sync
+    let mut attr: Option<String> = None;
+    let mut sync = false;
+    let mut id: Option<&str> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_get_help();
+                return Ok(());
+            }
+            "--sync" | "-s" => {
+                sync = true;
+            }
+            "--attr" => {
+                i += 1;
+                attr = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--attr requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--attr=") => {
+                attr = Some(a.trim_start_matches("--attr=").to_string());
+            }
+            a if a.starts_with('-') => {
+                bail!("unknown flag: {a}  (try `rosec get --help`)");
+            }
+            a => {
+                if id.is_some() {
+                    bail!("unexpected argument: {a}  (try `rosec get --help`)");
+                }
+                id = Some(a);
+            }
+        }
+        i += 1;
+    }
+
+    let raw = id.ok_or_else(|| anyhow::anyhow!("missing item path or ID  (try `rosec get --help`)"))?;
 
     let conn = conn().await?;
-    let path = resolve_item_path(&conn, raw).await?;
+
+    // If --sync was requested, ensure the daemon has fresh data before resolving.
+    if sync {
+        sync_before_get(&conn).await?;
+    }
+
+    let resolve_result = resolve_item_path(&conn, raw).await;
+
+    // Determine the item path and whether unlock is needed.
+    // With --sync, if the item wasn't found at all we attempt unlock + re-sync
+    // before giving up — the item may live in a backend that hasn't been
+    // unlocked yet (so the metadata cache has no knowledge of it).
+    let (path, is_locked) = match resolve_result {
+        Ok(result) => result,
+        Err(e) if sync => {
+            // Item not found — try unlocking, syncing, and re-resolving.
+            trigger_unlock(&conn).await?;
+            sync_before_get(&conn).await?;
+            resolve_item_path(&conn, raw).await
+                .map_err(|_| e)?  // If still not found, return the original error.
+        }
+        Err(e) => return Err(e),
+    };
+
+    // If the item was in the locked partition, trigger the spec Unlock+Prompt
+    // flow before attempting to fetch the secret.
+    if is_locked {
+        trigger_unlock(&conn).await?;
+        // Re-sync the just-unlocked backends so the freshly-available items
+        // are pulled from the remote and the metadata cache is populated.
+        if sync {
+            sync_before_get(&conn).await?;
+        }
+    }
 
     // Try once; if backend is locked, prompt for credentials and retry.
-    match cmd_get_inner(&conn, &path).await {
+    match cmd_get_inner(&conn, &path, attr.as_deref()).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Check if the underlying cause is a zbus locked:: sentinel.
             let zbus_err = e.downcast_ref::<zbus::Error>();
             if let Some(ze) = zbus_err
                 && try_lazy_unlock(&conn, ze).await?
             {
-                cmd_get_inner(&conn, &path).await
+                cmd_get_inner(&conn, &path, attr.as_deref()).await
             } else {
                 Err(e)
             }
@@ -1380,8 +1734,64 @@ async fn cmd_get(args: &[String]) -> Result<()> {
     }
 }
 
-async fn cmd_get_inner(conn: &Connection, path: &str) -> Result<()> {
-    // Open a plain session
+fn print_get_help() {
+    println!(
+        "\
+rosec get - print a secret value
+
+USAGE:
+    rosec get [--sync] [--attr <name>] <id>
+
+ARGUMENTS:
+    <id>            16-char hex item ID or full D-Bus object path
+
+FLAGS:
+    -s, --sync      Sync backends before fetching if the cache is stale (>60 s).
+                    Skips the network call when data is already fresh.
+    --attr <name>   Print the named public attribute instead of the primary secret
+                    (e.g. username, uri, folder, sm.project).
+                    Use `rosec inspect <id>` to see all available attributes.
+    -h, --help      Show this help
+
+EXAMPLES:
+    rosec get a1b2c3d4e5f60718                    # primary secret (password)
+    rosec get --sync a1b2c3d4e5f60718             # sync if stale, then fetch
+    rosec get a1b2c3d4e5f60718 | xclip -sel clip  # pipe to clipboard
+    rosec get --attr username a1b2c3d4e5f60718    # print username attribute
+    rosec get --attr uri a1b2c3d4e5f60718         # print URI attribute"
+    );
+}
+
+/// Print only the secret value (or a named attribute) to stdout — pipeable.
+async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Result<()> {
+    use std::io::Write;
+
+    // --attr mode: read from the public Attributes property, no session needed.
+    if let Some(attr_name) = attr {
+        let item_proxy = zbus::Proxy::new(
+            conn,
+            "org.freedesktop.secrets",
+            path,
+            "org.freedesktop.Secret.Item",
+        )
+        .await?;
+        let attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
+        match attrs.get(attr_name) {
+            Some(v) => {
+                let mut out = std::io::stdout();
+                out.write_all(v.as_bytes())?;
+                // Attribute values are plain strings — always add newline on TTY,
+                // and only if the value doesn't already end with one.
+                if std::io::IsTerminal::is_terminal(&out) && !v.ends_with('\n') {
+                    out.write_all(b"\n")?;
+                }
+                return Ok(());
+            }
+            None => bail!("attribute '{attr_name}' not found on this item"),
+        }
+    }
+
+    // Default: fetch the primary secret via GetSecrets.
     let service_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1394,7 +1804,89 @@ async fn cmd_get_inner(conn: &Connection, path: &str) -> Result<()> {
         .call("OpenSession", &("plain", zvariant::Value::from("")))
         .await?;
 
-    // Fetch item metadata.
+    let items = vec![path.to_string()];
+    let secrets_result: Result<HashMap<String, OwnedValue>, zbus::Error> = service_proxy
+        .call("GetSecrets", &(items, &session_path))
+        .await;
+
+    let _: () = service_proxy
+        .call("CloseSession", &(&session_path,))
+        .await?;
+
+    match secrets_result {
+        Ok(secrets) if secrets.is_empty() => {
+            bail!("no secret found for item");
+        }
+        Ok(secrets) => {
+            if let Some((_item_path, value)) = secrets.into_iter().next() {
+                match <(OwnedObjectPath, Vec<u8>, Vec<u8>, String)>::try_from(value) {
+                    Ok((_session, _params, secret_bytes, _content_type)) => {
+                        let mut out = std::io::stdout();
+                        out.write_all(&secret_bytes)?;
+                        // Add a trailing newline on TTY only if the secret itself
+                        // doesn't already end with one (avoids the double-newline
+                        // that appears when the stored value has a trailing \n).
+                        if std::io::IsTerminal::is_terminal(&out)
+                            && !secret_bytes.ends_with(b"\n")
+                        {
+                            out.write_all(b"\n")?;
+                        }
+                        return Ok(());
+                    }
+                    Err(_) => bail!("could not decode secret value"),
+                }
+            }
+            bail!("no secret found for item");
+        }
+        Err(zbus::Error::MethodError(_, Some(detail), _))
+            if detail.as_str().starts_with("no secret for cipher") =>
+        {
+            bail!("item has no primary secret");
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn cmd_inspect(args: &[String]) -> Result<()> {
+    let raw = args.first().ok_or_else(|| anyhow::anyhow!("missing item path or ID"))?;
+
+    let conn = conn().await?;
+    let (path, is_locked) = resolve_item_path(&conn, raw).await?;
+
+    // If the item is locked, trigger unlock before inspecting.
+    if is_locked {
+        trigger_unlock(&conn).await?;
+    }
+
+    match cmd_inspect_inner(&conn, &path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let zbus_err = e.downcast_ref::<zbus::Error>();
+            if let Some(ze) = zbus_err
+                && try_lazy_unlock(&conn, ze).await?
+            {
+                cmd_inspect_inner(&conn, &path).await
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Print full item metadata (label, attributes) plus the secret value.
+async fn cmd_inspect_inner(conn: &Connection, path: &str) -> Result<()> {
+    let service_proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service",
+    )
+    .await?;
+
+    let (_, session_path): (OwnedValue, String) = service_proxy
+        .call("OpenSession", &("plain", zvariant::Value::from("")))
+        .await?;
+
     let item_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1406,7 +1898,8 @@ async fn cmd_get_inner(conn: &Connection, path: &str) -> Result<()> {
     let label: String = item_proxy.get_property("Label").await?;
     let attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
 
-    println!("Label: {label}");
+    println!("Label:      {label}");
+    println!("Path:       {path}");
     if !attrs.is_empty() {
         println!("Attributes:");
         let mut sorted: Vec<_> = attrs.iter().collect();
@@ -1416,17 +1909,18 @@ async fn cmd_get_inner(conn: &Connection, path: &str) -> Result<()> {
         }
     }
 
-    // GetSecrets — may fail for items without a primary secret (cards,
-    // identities, secure notes without content).  In that case we still show
-    // the metadata we already fetched above.
     let items = vec![path.to_string()];
     let secrets_result: Result<HashMap<String, OwnedValue>, zbus::Error> = service_proxy
         .call("GetSecrets", &(items, &session_path))
         .await;
 
+    let _: () = service_proxy
+        .call("CloseSession", &(&session_path,))
+        .await?;
+
     match secrets_result {
         Ok(secrets) if secrets.is_empty() => {
-            println!("Secret: <none>");
+            println!("Secret:     <none>");
         }
         Ok(secrets) => {
             for (_item_path, value) in secrets {
@@ -1434,31 +1928,23 @@ async fn cmd_get_inner(conn: &Connection, path: &str) -> Result<()> {
                     Ok((_session, _params, secret_bytes, content_type)) => {
                         let text = String::from_utf8_lossy(&secret_bytes);
                         if text.is_empty() {
-                            println!("Secret: <empty>");
+                            println!("Secret:     <empty>");
                         } else {
-                            println!("Secret ({content_type}): {text}");
+                            println!("Secret ({content_type}):");
+                            println!("  {text}");
                         }
                     }
-                    Err(_) => {
-                        println!("Secret: <could not decode>");
-                    }
+                    Err(_) => println!("Secret:     <could not decode>"),
                 }
             }
         }
         Err(zbus::Error::MethodError(_, Some(detail), _))
             if detail.as_str().starts_with("no secret for cipher") =>
         {
-            println!("Secret: <not available — this item type has no primary secret>");
+            println!("Secret:     <not available — this item type has no primary secret>");
         }
-        Err(e) => {
-            println!("Secret: <error: {e}>");
-        }
+        Err(e) => println!("Secret:     <error: {e}>"),
     }
-
-    // Close the session
-    let _: () = service_proxy
-        .call("CloseSession", &(&session_path,))
-        .await?;
 
     Ok(())
 }
@@ -1489,8 +1975,6 @@ async fn cmd_unlock() -> Result<()> {
     let conn = conn().await?;
     let config = load_config();
 
-    // Use the rosec Daemon interface — it gives us the locked::<id> signal
-    // and access to GetAuthFields / AuthBackend on the same proxy.
     let proxy = zbus::Proxy::new(
         &conn,
         "org.freedesktop.secrets",
@@ -1502,23 +1986,139 @@ async fn cmd_unlock() -> Result<()> {
     let backends: Vec<(String, String, String, bool)> =
         proxy.call("BackendList", &()).await?;
 
-    let mut any_unlocked = false;
-    for (id, name, _kind, locked) in &backends {
-        if !locked {
+    // Separate already-unlocked from locked backends.
+    let mut locked: Vec<(String, String, String)> = Vec::new(); // (id, name, kind)
+    for (id, name, kind, is_locked) in &backends {
+        if !is_locked {
             println!("'{id}' is already unlocked.");
-            any_unlocked = true;
-            continue;
+        } else {
+            locked.push((id.clone(), name.clone(), kind.clone()));
         }
-        let field_descs: Vec<(String, String, String, String, bool)> =
-            proxy.call("GetAuthFields", &(id,)).await?;
-        prompt_and_auth(id, name, &field_descs, &proxy, &config).await?;
-        println!("'{id}' unlocked.");
-        any_unlocked = true;
     }
 
-    if !any_unlocked {
-        println!("No backends configured.");
+    if locked.is_empty() {
+        if backends.is_empty() {
+            println!("No backends configured. Run `rosec backend add <kind>` to add one.");
+        }
+        return Ok(());
     }
+
+    // Opportunistic unlock: collect a password once, try it against all locked
+    // backends simultaneously.  Backends that fail (wrong password or no stored
+    // credential) are deferred and prompted for individually afterward.
+    // This means the user enters their password once if all backends share it,
+    // or as few times as there are distinct passwords.
+    //
+    // Auto-unlock backends (e.g. Bitwarden SM) are handled by the daemon itself
+    // and will not appear in this list — they are already unlocked by `recover()`.
+    let remaining = opportunistic_unlock(&locked, &proxy, &config).await?;
+
+    // Any that still failed get their own targeted prompt.
+    for (id, name, kind) in &remaining {
+        let field_descs: Vec<(String, String, String, String, bool)> =
+            proxy.call("GetAuthFields", &(id,)).await?;
+        prompt_and_auth(id, name, kind, &field_descs, &proxy, &config).await?;
+        println!("'{id}' unlocked.");
+    }
+
     Ok(())
+}
+
+/// Prompt once and try the entered password against all `backends` concurrently.
+///
+/// Returns the subset that failed (wrong password / no stored credential) so the
+/// caller can prompt for them individually.
+async fn opportunistic_unlock(
+    backends: &[(String, String, String)], // (id, name, kind)
+    proxy: &zbus::Proxy<'_>,
+    _config: &Config,
+) -> Result<Vec<(String, String, String)>> {
+    if backends.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // If there is only one backend, skip the opportunistic step and go straight
+    // to the normal targeted prompt (avoids a redundant "try and fail" round-trip).
+    if backends.len() == 1 {
+        return Ok(backends.to_vec());
+    }
+
+    // Collect field descriptors for all locked backends.
+    type FieldDesc = (String, String, String, String, bool);
+    let mut all_fields: Vec<(String, String, String, Vec<FieldDesc>)> = Vec::new(); // (id, name, kind, fields)
+    for (id, name, kind) in backends {
+        let fields: Vec<FieldDesc> = proxy.call("GetAuthFields", &(id,)).await?;
+        all_fields.push((id.clone(), name.clone(), kind.clone(), fields));
+    }
+
+    // Prompt using the first backend's field descriptors as representative
+    // (all PM backends share the same single password field).  The label is
+    // overridden to make clear this will be tried across all backends.
+    let (_first_id, first_name, _first_kind, first_fields) = &all_fields[0];
+    let label = if backends.len() == 2 {
+        format!("Unlocking {} and 1 other backend", first_name)
+    } else {
+        format!("Unlocking {} and {} other backends", first_name, backends.len() - 1)
+    };
+
+    // Build prompt fields with the combined label.
+    let combined_fields: Vec<FieldDesc> = first_fields
+        .iter()
+        .map(|(fid, _label, fkind, placeholder, required)| {
+            (fid.clone(), label.clone(), fkind.clone(), placeholder.clone(), *required)
+        })
+        .collect();
+
+    // Prompt once.
+    let collected = {
+        let pfields: Vec<PromptField<'_>> = combined_fields
+            .iter()
+            .map(|(id, lbl, fkind, ph, _)| PromptField {
+                id: id.as_str(),
+                label: lbl.as_str(),
+                kind: fkind.as_str(),
+                placeholder: ph.as_str(),
+            })
+            .collect();
+        collect_tty(&pfields).await?
+    };
+
+    let string_map: HashMap<String, String> = collected
+        .into_iter()
+        .map(|(k, v)| (k, v.as_str().to_string()))
+        .collect();
+
+    // Try the collected credentials against all locked backends concurrently.
+    let results = futures_util::future::join_all(
+        all_fields.iter().map(|(id, name, kind, _fields)| {
+            let proxy = proxy.clone();
+            let id = id.clone();
+            let name = name.clone();
+            let kind = kind.clone();
+            let map = string_map.clone();
+            async move {
+                let result: Result<bool, zbus::Error> =
+                    proxy.call("AuthBackend", &(&id, &map)).await;
+                (id, name, kind, result)
+            }
+        })
+    ).await;
+
+    // Collect failures — these need individual prompts.
+    let mut failed = Vec::new();
+    for (id, name, kind, result) in results {
+        match result {
+            Ok(_) => {
+                println!("'{id}' unlocked.");
+            }
+            Err(e) => {
+                // Don't log the error — it's expected for mismatched passwords.
+                tracing::debug!(backend = %id, "opportunistic unlock did not succeed: {e}");
+                failed.push((id, name, kind));
+            }
+        }
+    }
+
+    Ok(failed)
 }
 
