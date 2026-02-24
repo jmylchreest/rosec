@@ -2499,6 +2499,33 @@ async fn cmd_unlock() -> Result<()> {
         return Ok(());
     }
 
+    // Silently attempt auto-unlock for backends that don't need user input
+    // (e.g. Bitwarden SM with a stored token).  These call recover() internally
+    // and should never show a prompt.  Backends that fail (no stored token yet)
+    // fall through to the interactive prompt below.
+    let mut still_locked: Vec<(String, String, String)> = Vec::new();
+    for (id, name, kind) in &locked {
+        let can_auto: bool = proxy.call("CanAutoUnlock", &(id,)).await.unwrap_or(false);
+        if can_auto {
+            let result: Result<bool, zbus::Error> =
+                proxy.call("AuthBackend", &(id, HashMap::<&str, &str>::new())).await;
+            match result {
+                Ok(_) => println!("'{id}' unlocked."),
+                Err(e) => {
+                    tracing::debug!(backend = %id, "auto-unlock failed, will prompt: {e}");
+                    still_locked.push((id.clone(), name.clone(), kind.clone()));
+                }
+            }
+        } else {
+            still_locked.push((id.clone(), name.clone(), kind.clone()));
+        }
+    }
+    let locked = still_locked;
+
+    if locked.is_empty() {
+        return Ok(());
+    }
+
     // Opportunistic unlock: collect a password once, try it against all
     // password-compatible locked backends simultaneously.  Backends that fail
     // (wrong password or no stored credential) are deferred and prompted for

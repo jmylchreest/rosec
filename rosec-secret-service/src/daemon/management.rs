@@ -187,6 +187,28 @@ impl RosecManagement {
         Ok(fields)
     }
 
+    /// Return whether a backend can unlock itself without user interaction.
+    ///
+    /// Returns `true` for backends like Bitwarden SM that store an access token
+    /// and call `recover()` silently on auth.  Returns `false` for interactive
+    /// backends that require a master password from the user.
+    ///
+    /// `cmd_unlock` uses this to skip prompting for auto-unlock backends and
+    /// instead call `AuthBackend` with empty credentials to trigger `recover()`.
+    fn can_auto_unlock(
+        &self,
+        backend_id: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<bool, FdoError> {
+        log_caller("CanAutoUnlock", &header);
+        match self.state.backend_by_id(backend_id) {
+            Some(b) => Ok(b.can_auto_unlock()),
+            None => Err(FdoError::Failed(format!(
+                "backend '{backend_id}' not found"
+            ))),
+        }
+    }
+
     /// Return registration info for a backend that requires device/API-key registration.
     ///
     /// Returns `(instructions, fields)` where `fields` has the same element layout
