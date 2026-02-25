@@ -459,6 +459,15 @@ impl Drop for MountHandle {
 /// `SessionACL::Owner` in fuser 0.17.  Cleanup is handled by [`MountHandle`]'s
 /// `Drop` impl instead.
 pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHandle> {
+    // Clean up any stale FUSE mount from a previous crashed instance.
+    // `fusermount3 -uz` (lazy unmount) is safe to call unconditionally:
+    // - If a stale mount exists, it will be cleaned up
+    // - If nothing is mounted, it fails harmlessly
+    // We ignore the exit status because failure just means nothing was mounted.
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-uz", mountpoint.to_string_lossy().as_ref()])
+        .output();
+
     std::fs::create_dir_all(mountpoint)
         .with_context(|| format!("create FUSE mountpoint {:?}", mountpoint))?;
 
