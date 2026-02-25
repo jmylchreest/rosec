@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
@@ -437,55 +437,6 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
     let _: Result<u32, _> = daemon_proxy.call("Refresh", &()).await;
 
     Ok(())
-}
-
-/// Run `fut` while showing a TTY spinner on stderr.
-///
-/// Prints braille spinner frames at ~80 ms intervals until the future resolves,
-/// then clears the spinner line.  If stderr is not a terminal the spinner is
-/// skipped and `fut` runs silently.
-///
-/// Uses an `Arc<AtomicBool>` stop flag so the `spawn_blocking` thread exits
-/// cleanly — `JoinHandle::abort()` has no effect on blocking tasks.
-async fn with_spinner<F, T>(msg: &str, fut: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    use std::io::IsTerminal as _;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    if !std::io::stderr().is_terminal() {
-        return fut.await;
-    }
-
-    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let msg = msg.to_string();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-
-    let spinner = tokio::task::spawn_blocking(move || {
-        let mut i = 0usize;
-        while !stop_clone.load(Ordering::Relaxed) {
-            let frame = FRAMES[i % FRAMES.len()];
-            // \r returns to start of line; spaces overwrite previous content.
-            eprint!("\r{frame} {msg}   ");
-            let _ = std::io::stderr().flush();
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            i += 1;
-        }
-    });
-
-    let result = fut.await;
-
-    // Signal the spinner thread to stop and wait for it to exit cleanly.
-    stop.store(true, Ordering::Relaxed);
-    let _ = spinner.await;
-    // Clear the spinner line.
-    eprint!("\r\x1b[2K");
-    let _ = std::io::stderr().flush();
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2297,12 +2248,15 @@ async fn cmd_unlock() -> Result<()> {
     // Pass the caller's TTY fd to the daemon via D-Bus fd-passing.
     // All credential prompting happens inside rosecd — credentials never
     // appear in any D-Bus message payload.
+    //
+    // Do NOT wrap this call in a spinner: the daemon writes interactive
+    // prompts to the TTY fd while this call is in flight, and the spinner
+    // would interleave its \r-overwrite output with those prompts, leaving
+    // the cursor in the wrong position.
     let tty_fd = open_tty_owned_fd()?;
+    eprintln!("Unlocking…");
     type ResultEntry = (String, bool, String); // (backend_id, success, message)
-    let results: Vec<ResultEntry> = with_spinner("Unlocking…", async {
-        proxy.call("UnlockWithTty", &(tty_fd,)).await
-    })
-    .await?;
+    let results: Vec<ResultEntry> = proxy.call("UnlockWithTty", &(tty_fd,)).await?;
 
     for (id, success, message) in &results {
         if *success {
