@@ -193,6 +193,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: Build (native)
         if: matrix.cross == false
         run: |
@@ -202,12 +205,9 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross == true
-        uses: cross-rs/cross@v0.2.5
-        with:
-          command: build
-          args: >-
-            --release --locked
-            --bin rosecd --bin rosec --bin rosec-prompt
+        run: |
+          cross build --release --locked \
+            --bin rosecd --bin rosec --bin rosec-prompt \
             --target ${{ matrix.target }}
 
       - name: Package artifacts
