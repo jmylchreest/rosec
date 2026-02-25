@@ -274,6 +274,64 @@ pub struct ItemAttributes {
     pub secret_names: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// SSH agent types
+// ---------------------------------------------------------------------------
+
+/// Public metadata for a single SSH key exposed by a backend.
+///
+/// Contains no private key material — use [`VaultBackend::get_ssh_private_key`]
+/// to retrieve the actual key for signing.
+#[derive(Debug, Clone)]
+pub struct SshKeyMeta {
+    /// Opaque item identifier, passed back to `get_ssh_private_key`.
+    pub item_id: String,
+
+    /// Human-readable vault item name.
+    pub item_name: String,
+
+    /// Backend that owns this key.
+    pub backend_id: String,
+
+    /// OpenSSH wire-format public key (the `authorized_keys` line), if known.
+    ///
+    /// `None` for PEM keys discovered in text fields — the public key will be
+    /// derived from the private key when it is loaded.
+    pub public_key_openssh: Option<String>,
+
+    /// SHA-256 fingerprint string (e.g. `"SHA256:abc123…"`), if known.
+    pub fingerprint: Option<String>,
+
+    /// `Host` patterns from `custom.ssh_host` fields on this vault item.
+    pub ssh_hosts: Vec<String>,
+
+    /// Whether to require interactive confirmation before signing.
+    /// Set when the vault item has `custom.ssh_confirm = "true"`.
+    pub require_confirm: bool,
+
+    /// Last revision timestamp — used for conflict resolution in config.d/.
+    pub revision_date: Option<SystemTime>,
+}
+
+/// Raw private key material retrieved from a vault backend.
+///
+/// Contains PEM-encoded private key bytes.  The caller must parse and
+/// zeroize the material after use.  Never stored to disk.
+pub struct SshPrivateKeyMaterial {
+    /// PEM-encoded private key (e.g. `-----BEGIN OPENSSH PRIVATE KEY-----`).
+    pub pem: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for SshPrivateKeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshPrivateKeyMaterial")
+            .field("pem", &"[redacted]")
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 #[async_trait::async_trait]
 pub trait VaultBackend: Send + Sync {
     /// Return `self` as `&dyn std::any::Any` to allow downcasting to concrete types.
@@ -445,6 +503,40 @@ pub trait VaultBackend: Send + Sync {
     ///
     /// Default: returns `NotSupported`.
     async fn get_secret_attr(&self, _id: &str, _attr: &str) -> Result<SecretBytes, BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    // -----------------------------------------------------------------------
+    // SSH agent interface
+    // -----------------------------------------------------------------------
+
+    /// List all SSH keys available from this backend (public metadata only).
+    ///
+    /// Returns one [`SshKeyMeta`] per discoverable SSH key.  Keys may come
+    /// from:
+    /// - Native SSH key vault items
+    /// - PEM private key material found in notes, passwords, or hidden fields
+    ///
+    /// Called by the SSH agent layer after each sync and after unlock.  The
+    /// default returns an empty list (backend does not expose SSH keys).
+    async fn list_ssh_keys(&self) -> Result<Vec<SshKeyMeta>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    /// Retrieve the private key material for a specific SSH key by item ID.
+    ///
+    /// `id` matches [`SshKeyMeta::item_id`].  The returned
+    /// [`SshPrivateKeyMaterial`] contains the raw PEM bytes — callers are
+    /// responsible for parsing and zeroizing after use.
+    ///
+    /// Returns [`BackendError::NotFound`] if no SSH key exists for that ID,
+    /// [`BackendError::Locked`] if the backend is locked, or
+    /// [`BackendError::NotSupported`] if the backend never exposes private keys
+    /// (default).
+    async fn get_ssh_private_key(
+        &self,
+        _id: &str,
+    ) -> Result<SshPrivateKeyMaterial, BackendError> {
         Err(BackendError::NotSupported)
     }
 }

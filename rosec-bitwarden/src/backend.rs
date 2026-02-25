@@ -5,8 +5,8 @@ use std::time::SystemTime;
 
 use rosec_core::{
     AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus,
-    ItemAttributes, RegistrationInfo, SecretBytes, UnlockInput, VaultBackend, VaultItem,
-    VaultItemMeta,
+    ItemAttributes, RegistrationInfo, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial, UnlockInput,
+    VaultBackend, VaultItem, VaultItemMeta,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -963,6 +963,142 @@ impl BitwardenBackend {
             CipherType::SecureNote | CipherType::Unknown(_) => None,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // SSH key helpers
+    // -----------------------------------------------------------------------
+
+    /// PEM headers that indicate an SSH private key in a text field.
+    const PEM_HEADERS: &'static [&'static str] = &[
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----BEGIN DSA PRIVATE KEY-----",
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    ];
+
+    /// Return `true` if `text` contains a recognised PEM private key header.
+    fn contains_pem(text: &str) -> bool {
+        Self::PEM_HEADERS.iter().any(|h| text.contains(h))
+    }
+
+    /// Extract the first PEM block from `text`, or `None`.
+    fn extract_pem_from_text(text: &str) -> Option<Zeroizing<String>> {
+        for header in Self::PEM_HEADERS {
+            if let Some(start) = text.find(header) {
+                let after = &text[start..];
+                // Find the matching -----END …----- footer
+                if let Some(end_marker) = after.find("-----END ") {
+                    let after_end = &after[end_marker..];
+                    let line_end = after_end.find('\n').unwrap_or(after_end.len());
+                    let pem = &after[..end_marker + line_end + 1];
+                    return Some(Zeroizing::new(pem.to_string()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract the first recognisable PEM private key from any field of `dc`.
+    ///
+    /// Search order: native `ssh_key.private_key` → `notes` → `login.password`
+    /// → hidden custom fields (type 1).
+    fn extract_pem(dc: &DecryptedCipher) -> Option<Zeroizing<String>> {
+        // 1. Native SSH key item
+        if let Some(sk) = &dc.ssh_key
+            && let Some(pk) = &sk.private_key
+            && !pk.is_empty()
+        {
+            return Some(pk.clone());
+        }
+
+        // 2. Notes
+        if let Some(notes) = &dc.notes
+            && Self::contains_pem(notes)
+        {
+            return Self::extract_pem_from_text(notes);
+        }
+
+        // 3. Login password
+        if let Some(login) = &dc.login
+            && let Some(pw) = &login.password
+            && Self::contains_pem(pw)
+        {
+            return Self::extract_pem_from_text(pw);
+        }
+
+        // 4. Hidden custom fields (field_type == 1)
+        for field in &dc.fields {
+            if field.field_type == 1
+                && let Some(val) = &field.value
+                && Self::contains_pem(val)
+            {
+                return Self::extract_pem_from_text(val);
+            }
+        }
+
+        None
+    }
+
+    /// Build an [`SshKeyMeta`] for a cipher that has discoverable SSH key
+    /// material, or `None` if the cipher has none.
+    fn cipher_to_ssh_key_meta(backend_id: &str, dc: &DecryptedCipher) -> Option<SshKeyMeta> {
+        // Does this cipher have any SSH key material?
+        let has_native_key = dc
+            .ssh_key
+            .as_ref()
+            .is_some_and(|sk| sk.private_key.as_ref().is_some_and(|pk| !pk.is_empty()));
+
+        let has_pem = !has_native_key && Self::extract_pem(dc).is_some();
+
+        if !has_native_key && !has_pem {
+            return None;
+        }
+
+        // Public key and fingerprint — available from native SSH key items.
+        let public_key_openssh = dc
+            .ssh_key
+            .as_ref()
+            .and_then(|sk| sk.public_key.clone());
+        let fingerprint = dc
+            .ssh_key
+            .as_ref()
+            .and_then(|sk| sk.fingerprint.clone());
+
+        // Extract custom.ssh_host fields (all of them — duplicates preserved).
+        let ssh_hosts: Vec<String> = dc
+            .fields
+            .iter()
+            .filter(|f| f.name.as_deref() == Some("ssh_host"))
+            .filter_map(|f| f.value.as_ref().map(|v| v.as_str().to_string()))
+            .collect();
+
+        // Extract custom.ssh_confirm flag.
+        let require_confirm = dc
+            .fields
+            .iter()
+            .any(|f| {
+                f.name.as_deref() == Some("ssh_confirm")
+                    && f.value.as_ref().map(|v| v.as_str()) == Some("true")
+            });
+
+        let revision_date = dc
+            .revision_date
+            .as_deref()
+            .and_then(parse_iso8601);
+
+        Some(SshKeyMeta {
+            item_id: dc.id.clone(),
+            item_name: dc.name.clone(),
+            backend_id: backend_id.to_string(),
+            public_key_openssh,
+            fingerprint,
+            ssh_hosts,
+            require_confirm,
+            revision_date,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -1209,6 +1345,39 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
 
         Self::resolve_secret_attr(dc, attr).ok_or_else(|| BackendError::NotFound)
+    }
+
+    // -----------------------------------------------------------------------
+    // SSH agent interface
+    // -----------------------------------------------------------------------
+
+    async fn list_ssh_keys(&self) -> Result<Vec<SshKeyMeta>, BackendError> {
+        let guard = self.state.lock().await;
+        let state = guard.as_ref().ok_or(BackendError::Locked)?;
+        let backend_id = self.config.id.clone();
+
+        let keys = state
+            .vault
+            .ciphers()
+            .iter()
+            .filter_map(|dc| Self::cipher_to_ssh_key_meta(&backend_id, dc))
+            .collect();
+
+        Ok(keys)
+    }
+
+    async fn get_ssh_private_key(
+        &self,
+        id: &str,
+    ) -> Result<SshPrivateKeyMaterial, BackendError> {
+        let guard = self.state.lock().await;
+        let state = guard.as_ref().ok_or(BackendError::Locked)?;
+
+        let dc = state.vault.cipher_by_id(id).ok_or(BackendError::NotFound)?;
+
+        Self::extract_pem(dc)
+            .map(|pem| SshPrivateKeyMaterial { pem })
+            .ok_or(BackendError::NotFound)
     }
 }
 

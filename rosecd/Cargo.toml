@@ -12,8 +12,11 @@ rosec-core = { path = "../rosec-core" }
 rosec-bitwarden = { path = "../rosec-bitwarden" }
 rosec-bitwarden-sm = { path = "../rosec-bitwarden-sm" }
 rosec-secret-service = { path = "../rosec-secret-service" }
+rosec-ssh-agent = { path = "../rosec-ssh-agent" }
+rosec-fuse = { path = "../rosec-fuse" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ssh-key = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

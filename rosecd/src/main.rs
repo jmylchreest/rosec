@@ -1,4 +1,5 @@
 mod bootstrap;
+mod ssh;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -98,14 +99,25 @@ async fn run() -> Result<()> {
         anyhow::bail!("cannot claim org.freedesktop.secrets: {e}\n{owner_info}");
     }
 
+    // Start the SSH agent and FUSE filesystem.  Returns None if XDG_RUNTIME_DIR
+    // is unset or FUSE is unavailable — the daemon continues without SSH
+    // agent support.
+    let ssh_manager: Option<Arc<ssh::SshManager>> =
+        ssh::SshManager::start().await.map(Arc::new);
+
+    if let Some(ref sm) = ssh_manager {
+        tracing::info!(sock = %sm.agent_sock().display(), "SSH agent ready");
+    }
+
     // Start logind watcher unconditionally — it always subscribes to all
     // signals and checks the live config flags on each arrival.  This means
     // enabling on_session_lock or on_logout in the config takes effect
     // immediately without a restart.
     {
         let logind_state = Arc::clone(&state);
+        let logind_ssh = ssh_manager.clone();
         tokio::spawn(async move {
-            if let Err(e) = logind_watcher(logind_state).await {
+            if let Err(e) = logind_watcher(logind_state, logind_ssh).await {
                 tracing::warn!("logind watcher exited: {e}");
             }
         });
@@ -157,14 +169,16 @@ async fn run() -> Result<()> {
         let watch_state = Arc::clone(&state);
         let watch_path = config_path.clone();
         let initial_config = config.clone();
+        let watch_ssh = ssh_manager.clone();
         tokio::spawn(async move {
-            if let Err(e) = config_watcher(watch_state, watch_path, initial_config).await {
+            if let Err(e) = config_watcher(watch_state, watch_path, initial_config, watch_ssh).await {
                 tracing::warn!("config watcher exited: {e}");
             }
         });
     }
 
     let cache_rebuild_state = Arc::clone(&state);
+    let cache_rebuild_ssh = ssh_manager.clone();
     tokio::spawn(async move {
         let mut consecutive_failures = 0u32;
         loop {
@@ -251,6 +265,11 @@ async fn run() -> Result<()> {
                     Ok(entries) => {
                         tracing::debug!("background cache rebuild: {} items", entries.len());
                         consecutive_failures = 0;
+                        // Refresh SSH keys after a successful cache rebuild.
+                        if let Some(ref sm) = cache_rebuild_ssh {
+                            let backends = cache_rebuild_state.backends_ordered();
+                            sm.rebuild(&backends).await;
+                        }
                     }
                     Err(err) => {
                         let err_str = err.to_string();
@@ -276,6 +295,11 @@ async fn run() -> Result<()> {
                 }
             } else {
                 consecutive_failures = 0;
+                // Sync happened — rebuild SSH keys from the latest vault state.
+                if let Some(ref sm) = cache_rebuild_ssh {
+                    let backends = cache_rebuild_state.backends_ordered();
+                    sm.rebuild(&backends).await;
+                }
             }
         }
     });
@@ -284,6 +308,7 @@ async fn run() -> Result<()> {
     // Reads autolock settings from live_config on every tick so changes to the
     // config file take effect without a restart.
     let autolock_state = Arc::clone(&state);
+    let autolock_ssh = ssh_manager.clone();
     tokio::spawn(async move {
         let check_interval = tokio::time::Duration::from_secs(30);
         loop {
@@ -300,6 +325,8 @@ async fn run() -> Result<()> {
                 tracing::info!(idle_minutes = idle_min, "idle timeout expired, locking");
                 if let Err(e) = autolock_state.auto_lock().await {
                     tracing::warn!("auto-lock failed: {e}");
+                } else if let Some(ref sm) = autolock_ssh {
+                    sm.clear();
                 }
                 continue;
             }
@@ -316,6 +343,8 @@ async fn run() -> Result<()> {
                 );
                 if let Err(e) = autolock_state.auto_lock().await {
                     tracing::warn!("auto-lock failed: {e}");
+                } else if let Some(ref sm) = autolock_ssh {
+                    sm.clear();
                 }
             }
         }
@@ -324,6 +353,10 @@ async fn run() -> Result<()> {
     // Wait for SIGTERM or SIGINT for graceful shutdown.
     shutdown_signal().await;
     tracing::info!("received shutdown signal, locking all backends before exit");
+    // Clear SSH keys first so no sign requests can be served during shutdown.
+    if let Some(ref sm) = ssh_manager {
+        sm.clear();
+    }
     // Explicitly lock all backends so decrypted state is zeroed before the
     // process exits.  Errors are logged but not fatal — the process is exiting
     // anyway and Zeroizing<> drop impls will still run.
@@ -412,6 +445,7 @@ async fn shutdown_signal() {
 /// The function runs until an unrecoverable error occurs (e.g. system bus disconnected).
 async fn logind_watcher(
     state: Arc<rosec_secret_service::ServiceState>,
+    ssh_manager: Option<Arc<ssh::SshManager>>,
 ) -> anyhow::Result<()> {
     use futures_util::TryStreamExt;
     use zbus::Connection;
@@ -501,6 +535,9 @@ async fn logind_watcher(
                             && going_to_sleep.0
                         {
                             tracing::info!("logind: PrepareForSleep — locking all backends");
+                            if let Some(ref sm) = ssh_manager {
+                                sm.clear();
+                            }
                             if let Err(e) = state.auto_lock().await {
                                 tracing::warn!("auto-lock on sleep failed: {e}");
                             }
@@ -525,6 +562,9 @@ async fn logind_watcher(
                                 let removed_id = body.0;
                                 if session_id.as_deref() == Some(&removed_id) {
                                     tracing::info!(session = %removed_id, "logind: our session removed — locking");
+                                    if let Some(ref sm) = ssh_manager {
+                                        sm.clear();
+                                    }
                                     if let Err(e) = state.auto_lock().await {
                                         tracing::warn!("auto-lock on logout failed: {e}");
                                     }
@@ -546,6 +586,9 @@ async fn logind_watcher(
                         // Check live config — on_session_lock may have changed since startup.
                         if state.live_config().autolock.on_session_lock {
                             tracing::info!("logind: session Lock signal — locking all backends");
+                            if let Some(ref sm) = ssh_manager {
+                                sm.clear();
+                            }
                             if let Err(e) = state.auto_lock().await {
                                 tracing::warn!("auto-lock on session lock failed: {e}");
                             }
@@ -668,6 +711,7 @@ async fn config_watcher(
     state: Arc<rosec_secret_service::ServiceState>,
     config_path: PathBuf,
     initial_config: Config,
+    ssh_manager: Option<Arc<ssh::SshManager>>,
 ) -> anyhow::Result<()> {
     use tokio::sync::mpsc;
 
@@ -779,10 +823,15 @@ async fn config_watcher(
                 .is_none_or(|new_fp| known_map.get(id) != Some(new_fp));
             if changed && state.hotreload_remove_backend(id).await {
                 tracing::info!(backend_id = id, "hot-reload: removed backend");
+                // Evict this backend's SSH keys immediately.
+                if let Some(ref sm) = ssh_manager {
+                    sm.remove_backend(id);
+                }
             }
         }
 
         // Add backends that are new or changed.
+        let mut added_any = false;
         for entry in &new_config.backend {
             let id = entry.id.as_str();
             let is_new = !known_ids.contains(id);
@@ -794,12 +843,23 @@ async fn config_watcher(
                     Ok(backend) => {
                         state.hotreload_add_backend(backend);
                         tracing::info!(backend_id = id, "hot-reload: added backend");
+                        added_any = true;
                     }
                     Err(e) => {
                         tracing::warn!(backend_id = id, error = %e, "hot-reload: failed to construct backend");
                     }
                 }
             }
+        }
+
+        // If new backends were added, schedule an SSH key rebuild so their
+        // keys become available once they are unlocked on the next sync cycle.
+        // (The rebuild itself skips locked backends gracefully.)
+        if added_any
+            && let Some(ref sm) = ssh_manager
+        {
+            let backends = state.backends_ordered();
+            sm.rebuild(&backends).await;
         }
 
         // ── Hot-reload non-backend config sections ─────────────────────────
