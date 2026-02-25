@@ -1616,6 +1616,18 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool
         return Ok((raw.to_string(), false));
     }
 
+    // Attribute search: key=value (supports globs via SearchItemsGlob).
+    //
+    // Multiple attributes can be separated by spaces (shell quoting), but the
+    // common case is a single `name=My Item` or `name=*API*`.
+    //
+    // We detect this by looking for '=' that isn't at position 0.
+    if let Some(eq_pos) = raw.find('=')
+        && eq_pos > 0
+    {
+        return resolve_item_by_attrs(conn, raw).await;
+    }
+
     // 16-char lowercase hex → look up by hash suffix.
     let is_hash = raw.len() == 16 && raw.chars().all(|c| c.is_ascii_hexdigit());
     if is_hash {
@@ -1650,6 +1662,59 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool
         format!("/org/freedesktop/secrets/collection/default/{raw}"),
         false,
     ))
+}
+
+/// Resolve an item path from one or more `key=value` attribute filters.
+///
+/// Uses `SearchItemsGlob` when rosecd is running (supports glob patterns and
+/// the virtual `name` attribute); falls back to spec-compliant `SearchItems`
+/// for other providers.
+///
+/// Returns an error if zero or more than one item matches.
+async fn resolve_item_by_attrs(conn: &Connection, raw: &str) -> Result<(String, bool)> {
+    let mut attrs = HashMap::new();
+    // The raw string may be the single positional arg, so it's one key=value.
+    // But we also allow the caller to pass multiple space-separated pairs in
+    // the future if needed.  For now, treat the entire raw string as one pair
+    // since the shell will have already split spaces into separate args.
+    if let Some((key, value)) = raw.split_once('=') {
+        attrs.insert(key.to_string(), value.to_string());
+    } else {
+        anyhow::bail!("invalid attribute filter: {raw}  (expected key=value)");
+    }
+
+    let rosecd = is_rosecd(conn).await;
+    let has_globs = attrs.values().any(|v| is_glob(v)) || attrs.contains_key("name");
+
+    let (unlocked, locked) = if has_globs {
+        search_with_glob_fallback(conn, &attrs, rosecd).await?
+    } else {
+        search_exact(conn, &attrs).await?
+    };
+
+    let total = unlocked.len() + locked.len();
+    match total {
+        0 => anyhow::bail!("no item found matching {raw}"),
+        1 => {
+            if let Some(path) = unlocked.into_iter().next() {
+                Ok((path, false))
+            } else {
+                Ok((locked.into_iter().next().expect("locked has 1 item"), true))
+            }
+        }
+        n => {
+            let mut msg = format!("{n} items match {raw} — narrow your search:\n");
+            for path in unlocked.iter().chain(locked.iter()).take(10) {
+                // Extract the short hex ID from the path suffix.
+                let id = path.rsplit('_').next().unwrap_or(path);
+                msg.push_str(&format!("  {id}  {path}\n"));
+            }
+            if n > 10 {
+                msg.push_str(&format!("  … and {} more\n", n - 10));
+            }
+            anyhow::bail!("{msg}");
+        }
+    }
 }
 
 async fn cmd_get(args: &[String]) -> Result<()> {
@@ -1752,10 +1817,16 @@ fn print_get_help() {
 rosec get - print a secret value
 
 USAGE:
-    rosec get [--sync] [--attr <name>] <id>
+    rosec get [--sync] [--attr <name>] <item>
 
 ARGUMENTS:
-    <id>            16-char hex item ID or full D-Bus object path
+    <item>          One of:
+                      16-char hex item ID       a1b2c3d4e5f60718
+                      D-Bus object path         /org/freedesktop/secrets/…
+                      Attribute filter           name=MY_API_KEY
+                    Attribute filters use key=value syntax.  Glob patterns
+                    are supported (name=*prod*, uri=*.example.com).
+                    Exactly one item must match.
 
 FLAGS:
     -s, --sync      Sync backends before fetching if the cache is stale (>60 s).
@@ -1766,11 +1837,13 @@ FLAGS:
     -h, --help      Show this help
 
 EXAMPLES:
-    rosec get a1b2c3d4e5f60718                    # primary secret (password)
-    rosec get --sync a1b2c3d4e5f60718             # sync if stale, then fetch
+    rosec get a1b2c3d4e5f60718                    # by hex ID
+    rosec get name=MY_API_KEY                     # by exact name
+    rosec get 'name=*prod*'                       # by name glob
+    rosec get uri=github.com                      # by URI attribute
+    rosec get --sync name=MY_API_KEY              # sync first, then fetch
     rosec get a1b2c3d4e5f60718 | xclip -sel clip  # pipe to clipboard
-    rosec get --attr username a1b2c3d4e5f60718    # print username attribute
-    rosec get --attr uri a1b2c3d4e5f60718         # print URI attribute"
+    rosec get --attr username name=MY_API_KEY     # print username attribute"
     );
 }
 
