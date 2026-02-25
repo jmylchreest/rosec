@@ -8,6 +8,10 @@ A read-only [`org.freedesktop.secrets`](https://specifications.freedesktop.org/s
 
 `rosecd` replaces `gnome-keyring-daemon` as the D-Bus Secret Service provider. Any application that uses `libsecret` (GNOME Keyring API) will transparently read secrets from your Bitwarden vault without storing them on disk.
 
+**Multi-backend, multi-instance:** rosec supports multiple backends simultaneously — multiple Bitwarden accounts, Bitwarden Secrets Manager projects, and can be extended to other providers. Each backend is independently locked/unlocked and contributes items to a unified namespace.
+
+**SSH agent + FUSE:** SSH keys in your vault are exposed via a built-in agent (`$XDG_RUNTIME_DIR/rosec/agent.sock`) and a FUSE filesystem (`$XDG_RUNTIME_DIR/rosec/ssh/`). The FUSE mount includes auto-generated SSH config snippets, so hosts mapped via `custom.ssh_host` fields get working `Host` blocks automatically.
+
 All write operations return `NotSupported` — rosec is intentionally read-only.
 
 ## Install
@@ -51,8 +55,26 @@ rosec backend list
 # 4. Search and retrieve secrets
 rosec search username=admin
 rosec search name="GitHub*"
-rosec get /org/freedesktop/secrets/item/bitwarden/my-login_abc123
+rosec get name=MY_API_KEY
 ```
+
+### SSH agent usage
+
+```bash
+# Add to ~/.ssh/config (one-time setup)
+Include /run/user/1000/rosec/ssh/config.d/*
+
+# Set SSH_AUTH_SOCK for the rosec agent
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock"
+
+# List loaded keys
+ssh-add -l
+
+# SSH to a host with auto-generated config
+ssh my-server.example.com
+```
+
+Tag SSH key items in Bitwarden with a `custom.ssh_host` field (value: hostname or pattern) to generate SSH config snippets automatically. See [docs/ssh-agent.md](docs/ssh-agent.md) for details.
 
 ## Configuration
 
