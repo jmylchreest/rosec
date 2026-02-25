@@ -789,7 +789,16 @@ impl ServiceState {
         let this = Arc::clone(self);
         let backend_id = backend_id.to_string();
         self.tokio_handle
-            .spawn(async move { this.auth_backend_inner(&backend_id, fields).await })
+            .spawn(async move {
+                this.auth_backend_inner(&backend_id, fields).await?;
+                // Trigger a sync so that on_sync_succeeded callbacks (e.g. SSH
+                // key rebuild) fire immediately after the vault is unlocked,
+                // rather than waiting for the next background-timer tick.
+                if let Err(e) = this.try_sync_backend(&backend_id).await {
+                    warn!(backend = %backend_id, "post-auth sync failed: {e}");
+                }
+                Ok(())
+            })
             .await
             .map_err(|e| FdoError::Failed(format!("auth task panicked: {e}")))?
     }

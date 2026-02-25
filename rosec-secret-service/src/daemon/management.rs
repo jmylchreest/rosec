@@ -74,9 +74,30 @@ impl RosecManagement {
 
     /// Rebuild the item cache from whatever the backends currently hold in memory.
     ///
-    /// Does NOT contact the remote server — use `SyncBackend` for that.
+    /// Triggers a background sync for every unlocked backend so that
+    /// `on_sync_succeeded` callbacks (e.g. SSH key rebuild) fire even when the
+    /// caller only asks for a cache refresh.  Uses `try_sync_backend` so
+    /// concurrent in-flight syncs are skipped rather than serialised.
     async fn refresh(&self, #[zbus(header)] header: Header<'_>) -> Result<u32, FdoError> {
         log_caller("Refresh", &header);
+
+        // Kick off a sync for every unlocked backend so that lifecycle callbacks
+        // (SSH key rebuild, etc.) are triggered.  Errors are logged but do not
+        // fail the Refresh call — the cache is still rebuilt from in-memory state.
+        for backend in self.state.backends_ordered() {
+            let is_locked = backend
+                .status()
+                .await
+                .map(|s| s.locked)
+                .unwrap_or(true);
+            if !is_locked {
+                let id = backend.id().to_string();
+                if let Err(e) = self.state.try_sync_backend(&id).await {
+                    tracing::warn!(backend = %id, "Refresh: background sync failed: {e}");
+                }
+            }
+        }
+
         let entries = self.state.rebuild_cache().await?;
         Ok(entries.len() as u32)
     }

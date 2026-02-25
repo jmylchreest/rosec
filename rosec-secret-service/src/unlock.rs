@@ -70,12 +70,16 @@ pub async fn unlock_with_tty(
         let fields = backend_auth_fields(backend.as_ref());
         auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
         results.push(UnlockResult {
-            backend_id: id,
+            backend_id: id.clone(),
             success: true,
             message: "unlocked".to_string(),
         });
         state.mark_unlocked();
         state.touch_activity();
+        // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
+        if let Err(e) = state.try_sync_backend(&id).await {
+            debug!(backend = %id, "post-unlock sync failed: {e}");
+        }
         return Ok(results);
     }
 
@@ -126,10 +130,14 @@ pub async fn unlock_with_tty(
         {
             Ok(()) => {
                 results.push(UnlockResult {
-                    backend_id: id,
+                    backend_id: id.clone(),
                     success: true,
                     message: "unlocked".to_string(),
                 });
+                // Sync immediately so on_sync_succeeded callbacks fire.
+                if let Err(e) = state.try_sync_backend(&id).await {
+                    debug!(backend = %id, "post-unlock sync failed: {e}");
+                }
             }
             Err(FdoError::Failed(ref msg)) if msg == "registration_required" => {
                 debug!(backend = %id, "registration required after opportunistic unlock");
@@ -156,10 +164,13 @@ pub async fn unlock_with_tty(
         };
         auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, Some(prefill)).await?;
         results.push(UnlockResult {
-            backend_id: id,
+            backend_id: id.clone(),
             success: true,
             message: "unlocked (registered)".to_string(),
         });
+        if let Err(e) = state.try_sync_backend(&id).await {
+            debug!(backend = %id, "post-unlock sync failed: {e}");
+        }
     }
 
     // Handle backends that need a fresh individual prompt.
@@ -172,10 +183,13 @@ pub async fn unlock_with_tty(
         };
         auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
         results.push(UnlockResult {
-            backend_id: id,
+            backend_id: id.clone(),
             success: true,
             message: "unlocked".to_string(),
         });
+        if let Err(e) = state.try_sync_backend(&id).await {
+            debug!(backend = %id, "post-unlock sync failed: {e}");
+        }
     }
 
     if results.iter().any(|r| r.success) {
@@ -204,6 +218,10 @@ pub async fn auth_backend_with_tty(
     auth_backend_with_tty_inner(&state, tty_fd, backend_id, &fields, None).await?;
     state.mark_unlocked();
     state.touch_activity();
+    // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
+    if let Err(e) = state.try_sync_backend(backend_id).await {
+        debug!(backend = %backend_id, "post-unlock sync failed: {e}");
+    }
     Ok(())
 }
 

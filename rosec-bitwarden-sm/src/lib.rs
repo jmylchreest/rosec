@@ -62,11 +62,11 @@ use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use rosec_core::credential::StorageKey;
 use rosec_core::{
-    Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus, RegistrationInfo, SecretBytes,
-    UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
+    Attributes, AuthField, AuthFieldKind, BackendCallbacks, BackendError, BackendStatus,
+    RegistrationInfo, SecretBytes, UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
 use sha2::Sha256;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -135,6 +135,8 @@ pub struct SmBackend {
     access_token: Mutex<Option<Zeroizing<String>>>,
     /// Authenticated state; `None` when locked.
     state: Mutex<Option<AuthState>>,
+    /// Lifecycle event callbacks (SSH manager, etc.).
+    callbacks: RwLock<BackendCallbacks>,
 }
 
 impl std::fmt::Debug for SmBackend {
@@ -153,6 +155,7 @@ impl SmBackend {
             config,
             access_token: Mutex::new(None),
             state: Mutex::new(None),
+            callbacks: RwLock::new(BackendCallbacks::default()),
         }
     }
 
@@ -241,6 +244,12 @@ impl VaultBackend for SmBackend {
 
     fn kind(&self) -> &str {
         "bitwarden-sm"
+    }
+
+    fn set_event_callbacks(&self, callbacks: BackendCallbacks) {
+        // `blocking_write` is safe here: called once during startup/hot-reload
+        // before any concurrent unlock/sync can occur.
+        *self.callbacks.blocking_write() = callbacks;
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -366,6 +375,10 @@ stored locally — you will not need to enter it again.",
             let mut state_guard = self.state.lock().await;
             *state_guard = Some(auth);
         }
+
+        if let Some(cb) = self.callbacks.read().await.on_unlocked.as_ref() {
+            cb();
+        }
         Ok(())
     }
 
@@ -383,20 +396,49 @@ stored locally — you will not need to enter it again.",
         };
         let token = token.ok_or(BackendError::Locked)?;
 
-        let auth = self.do_unlock(token.as_str()).await?;
+        // Snapshot the current secret IDs so we can detect changes after sync.
+        let before_ids: std::collections::HashSet<uuid::Uuid> = {
+            let guard = self.state.lock().await;
+            guard
+                .as_ref()
+                .map(|s| s.secrets.iter().map(|x| x.id).collect())
+                .unwrap_or_default()
+        };
 
-        // Atomically replace the in-memory state.
-        {
-            let mut tok = self.access_token.lock().await;
-            *tok = Some(token);
-        }
-        {
-            let mut state_guard = self.state.lock().await;
-            *state_guard = Some(auth);
-        }
+        let sync_result = self.do_unlock(token.as_str()).await;
 
-        info!(backend = %self.config.id, "SM secrets synced");
-        Ok(())
+        match sync_result {
+            Ok(auth) => {
+                let changed = {
+                    let after_ids: std::collections::HashSet<uuid::Uuid> =
+                        auth.secrets.iter().map(|x| x.id).collect();
+                    after_ids != before_ids
+                };
+
+                // Atomically replace the in-memory state.
+                {
+                    let mut tok = self.access_token.lock().await;
+                    *tok = Some(token);
+                }
+                {
+                    let mut state_guard = self.state.lock().await;
+                    *state_guard = Some(auth);
+                }
+
+                info!(backend = %self.config.id, changed, "SM secrets synced");
+
+                if let Some(cb) = self.callbacks.read().await.on_sync_succeeded.as_ref() {
+                    cb(changed);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(cb) = self.callbacks.read().await.on_sync_failed.as_ref() {
+                    cb();
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn lock(&self) -> Result<(), BackendError> {
@@ -409,6 +451,10 @@ stored locally — you will not need to enter it again.",
             *state_guard = None;
         }
         info!(backend = %self.config.id, "SM backend locked");
+
+        if let Some(cb) = self.callbacks.read().await.on_locked.as_ref() {
+            cb();
+        }
         Ok(())
     }
 
