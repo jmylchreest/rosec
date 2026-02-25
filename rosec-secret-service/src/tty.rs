@@ -179,8 +179,7 @@ pub async fn collect_tty_on_fd(
 
     let mut map = HashMap::new();
     for field in fields {
-        let v =
-            prompt_field_on_fd(fd, &field.label, &field.placeholder, &field.kind).await?;
+        let v = prompt_field_on_fd(fd, &field.label, &field.placeholder, &field.kind).await?;
         map.insert(field.id.clone(), v);
     }
     Ok(map)

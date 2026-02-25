@@ -85,11 +85,7 @@ impl RosecManagement {
         // (SSH key rebuild, etc.) are triggered.  Errors are logged but do not
         // fail the Refresh call — the cache is still rebuilt from in-memory state.
         for backend in self.state.backends_ordered() {
-            let is_locked = backend
-                .status()
-                .await
-                .map(|s| s.locked)
-                .unwrap_or(true);
+            let is_locked = backend.status().await.map(|s| s.locked).unwrap_or(true);
             if !is_locked {
                 let id = backend.id().to_string();
                 if let Err(e) = self.state.try_sync_backend(&id).await {

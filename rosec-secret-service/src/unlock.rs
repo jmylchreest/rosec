@@ -40,10 +40,7 @@ pub struct UnlockResult {
 /// afterwards.
 ///
 /// This function must be called from a Tokio task context.
-pub async fn unlock_with_tty(
-    state: Arc<ServiceState>,
-    tty_fd: RawFd,
-) -> Result<Vec<UnlockResult>> {
+pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<Vec<UnlockResult>> {
     let backends = state.backends_ordered();
     let mut locked: Vec<_> = Vec::new();
 
@@ -85,13 +82,7 @@ pub async fn unlock_with_tty(
 
     // Multiple backends — print a header listing them all, then prompt once.
     print_on_fd(tty_fd, "\n");
-    print_on_fd(
-        tty_fd,
-        &format!(
-            "Unlocking {} backends:\n",
-            locked.len()
-        ),
-    );
+    print_on_fd(tty_fd, &format!("Unlocking {} backends:\n", locked.len()));
     for b in &locked {
         let id = b.id();
         let name = b.name();
@@ -124,10 +115,7 @@ pub async fn unlock_with_tty(
 
     for backend in &locked {
         let id = backend.id().to_string();
-        match state
-            .auth_backend_inner(&id, string_map.clone())
-            .await
-        {
+        match state.auth_backend_inner(&id, string_map.clone()).await {
             Ok(()) => {
                 results.push(UnlockResult {
                     backend_id: id.clone(),
@@ -271,10 +259,7 @@ async fn auth_backend_with_tty_inner(
                 print_on_fd(tty_fd, &format!("Unlocking {backend_id}\n"));
             }
         } else if is_token_auth {
-            print_on_fd(
-                tty_fd,
-                &format!("Authenticating {backend_id}  ({name})\n"),
-            );
+            print_on_fd(tty_fd, &format!("Authenticating {backend_id}  ({name})\n"));
         } else {
             print_on_fd(tty_fd, &format!("Unlocking {backend_id}  ({name})\n"));
         }
@@ -301,9 +286,9 @@ async fn auth_backend_with_tty_inner(
             .backend_by_id(backend_id)
             .ok_or_else(|| anyhow!("backend '{backend_id}' not found"))?;
 
-        let reg_info = b
-            .registration_info()
-            .ok_or_else(|| anyhow!("backend reported registration_required but has no registration_info"))?;
+        let reg_info = b.registration_info().ok_or_else(|| {
+            anyhow!("backend reported registration_required but has no registration_info")
+        })?;
 
         print_on_fd(tty_fd, "\n");
         print_on_fd(tty_fd, &format!("{}\n", reg_info.instructions));
@@ -332,8 +317,7 @@ async fn auth_backend_with_tty_inner(
                     .unwrap_or_default();
                 loop {
                     let confirm_label = format!("Confirm {}", field.label);
-                    let entry =
-                        prompt_field_on_fd(tty_fd, &confirm_label, "", &field.kind).await?;
+                    let entry = prompt_field_on_fd(tty_fd, &confirm_label, "", &field.kind).await?;
                     if entry.as_str() == original {
                         break;
                     }
@@ -416,5 +400,3 @@ fn print_on_fd(fd: RawFd, s: &str) {
         libc::write(fd, bytes.as_ptr().cast(), bytes.len());
     }
 }
-
-

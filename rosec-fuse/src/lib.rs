@@ -23,4 +23,4 @@ pub mod fs;
 pub mod naming;
 
 pub use config::build_config_snippets;
-pub use fs::{mount, MountHandle, SshFuse};
+pub use fs::{MountHandle, SshFuse, mount};

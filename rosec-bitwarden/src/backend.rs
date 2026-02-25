@@ -5,8 +5,8 @@ use std::time::SystemTime;
 
 use rosec_core::{
     AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendCallbacks, BackendError,
-    BackendStatus, ItemAttributes, RegistrationInfo, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial,
-    UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
+    BackendStatus, ItemAttributes, RegistrationInfo, SecretBytes, SshKeyMeta,
+    SshPrivateKeyMaterial, UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -425,12 +425,14 @@ impl BitwardenBackend {
         on_sync_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
         on_lock_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<(), BackendError> {
-        let mut sync_guard = self.on_sync_nudge.lock().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("on_sync_nudge mutex poisoned"))
-        })?;
-        let mut lock_guard = self.on_lock_nudge.lock().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("on_lock_nudge mutex poisoned"))
-        })?;
+        let mut sync_guard = self
+            .on_sync_nudge
+            .lock()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("on_sync_nudge mutex poisoned")))?;
+        let mut lock_guard = self
+            .on_lock_nudge
+            .lock()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("on_lock_nudge mutex poisoned")))?;
         *sync_guard = Some(on_sync_nudge);
         *lock_guard = Some(on_lock_nudge);
         Ok(())
@@ -1079,14 +1081,8 @@ impl BitwardenBackend {
         }
 
         // Public key and fingerprint — available from native SSH key items.
-        let public_key_openssh = dc
-            .ssh_key
-            .as_ref()
-            .and_then(|sk| sk.public_key.clone());
-        let fingerprint = dc
-            .ssh_key
-            .as_ref()
-            .and_then(|sk| sk.fingerprint.clone());
+        let public_key_openssh = dc.ssh_key.as_ref().and_then(|sk| sk.public_key.clone());
+        let fingerprint = dc.ssh_key.as_ref().and_then(|sk| sk.fingerprint.clone());
 
         // Extract custom.ssh_host / custom.ssh-host fields.
         // Multiple fields are supported, and each value may contain
@@ -1112,18 +1108,12 @@ impl BitwardenBackend {
             .find(|s| !s.is_empty());
 
         // Extract custom.ssh_confirm / custom.ssh-confirm flag.
-        let require_confirm = dc
-            .fields
-            .iter()
-            .any(|f| {
-                matches!(f.name.as_deref(), Some("ssh_confirm" | "ssh-confirm"))
-                    && f.value.as_ref().map(|v| v.as_str()) == Some("true")
-            });
+        let require_confirm = dc.fields.iter().any(|f| {
+            matches!(f.name.as_deref(), Some("ssh_confirm" | "ssh-confirm"))
+                && f.value.as_ref().map(|v| v.as_str()) == Some("true")
+        });
 
-        let revision_date = dc
-            .revision_date
-            .as_deref()
-            .and_then(parse_iso8601);
+        let revision_date = dc.revision_date.as_deref().and_then(parse_iso8601);
 
         Some(SshKeyMeta {
             item_id: dc.id.clone(),
@@ -1162,9 +1152,11 @@ impl VaultBackend for BitwardenBackend {
     }
 
     fn set_event_callbacks(&self, callbacks: BackendCallbacks) -> Result<(), BackendError> {
-        *self.callbacks.write().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-        })? = callbacks;
+        *self
+            .callbacks
+            .write()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))? =
+            callbacks;
         Ok(())
     }
 
@@ -1340,9 +1332,10 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
 
         // Read callbacks before dropping the guard (we need `state` above).
         let (on_sync_succeeded, on_sync_failed) = {
-            let cb = self.callbacks.read().map_err(|_| {
-                BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-            })?;
+            let cb = self
+                .callbacks
+                .read()
+                .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?;
             (cb.on_sync_succeeded.clone(), cb.on_sync_failed.clone())
         };
         drop(guard);
@@ -1482,10 +1475,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         Ok(keys)
     }
 
-    async fn get_ssh_private_key(
-        &self,
-        id: &str,
-    ) -> Result<SshPrivateKeyMaterial, BackendError> {
+    async fn get_ssh_private_key(&self, id: &str) -> Result<SshPrivateKeyMaterial, BackendError> {
         let guard = self.state.lock().await;
         let state = guard.as_ref().ok_or(BackendError::Locked)?;
 
@@ -1509,10 +1499,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
 ///
 /// `allowed_types` filters which `field_type` values to include
 /// (0 = text, 1 = hidden, 2 = boolean, 3 = linked).
-fn index_custom_fields(
-    fields: &[DecryptedField],
-    allowed_types: &[u8],
-) -> Vec<(String, String)> {
+fn index_custom_fields(fields: &[DecryptedField], allowed_types: &[u8]) -> Vec<(String, String)> {
     use std::collections::HashMap;
 
     // Group field values by name, preserving order within each name.

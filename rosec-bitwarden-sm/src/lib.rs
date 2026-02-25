@@ -249,9 +249,11 @@ impl VaultBackend for SmBackend {
     }
 
     fn set_event_callbacks(&self, callbacks: BackendCallbacks) -> Result<(), BackendError> {
-        *self.callbacks.write().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-        })? = callbacks;
+        *self
+            .callbacks
+            .write()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))? =
+            callbacks;
         Ok(())
     }
 
@@ -379,9 +381,13 @@ stored locally — you will not need to enter it again.",
             *state_guard = Some(auth);
         }
 
-        if let Some(cb) = self.callbacks.read().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-        })?.on_unlocked.clone() {
+        if let Some(cb) = self
+            .callbacks
+            .read()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
+            .on_unlocked
+            .clone()
+        {
             cb();
         }
         Ok(())
@@ -432,17 +438,25 @@ stored locally — you will not need to enter it again.",
 
                 info!(backend = %self.config.id, changed, "SM secrets synced");
 
-                if let Some(cb) = self.callbacks.read().map_err(|_| {
-                    BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-                })?.on_sync_succeeded.clone() {
+                if let Some(cb) = self
+                    .callbacks
+                    .read()
+                    .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
+                    .on_sync_succeeded
+                    .clone()
+                {
                     cb(changed);
                 }
                 Ok(())
             }
             Err(e) => {
-                if let Some(cb) = self.callbacks.read().map_err(|_| {
-                    BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-                })?.on_sync_failed.clone() {
+                if let Some(cb) = self
+                    .callbacks
+                    .read()
+                    .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
+                    .on_sync_failed
+                    .clone()
+                {
                     cb();
                 }
                 Err(e)
@@ -461,9 +475,13 @@ stored locally — you will not need to enter it again.",
         }
         info!(backend = %self.config.id, "SM backend locked");
 
-        if let Some(cb) = self.callbacks.read().map_err(|_| {
-            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
-        })?.on_locked.clone() {
+        if let Some(cb) = self
+            .callbacks
+            .read()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
+            .on_locked
+            .clone()
+        {
             cb();
         }
         Ok(())
@@ -698,8 +716,7 @@ mod tests {
     #[tokio::test]
     async fn unlock_without_stored_token_returns_registration_required() {
         // Normal unlock with no token on disk → RegistrationRequired (first-time setup).
-        let tmp =
-            std::env::temp_dir().join(format!("rosec-sm-test-{}-noreg", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("rosec-sm-test-{}-noreg", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let result = {
             let _env = scoped_env("XDG_DATA_HOME", tmp.to_str().unwrap());

@@ -96,7 +96,10 @@ async fn run() -> Result<()> {
     // waiting in the D-Bus name queue until the first instance exits.
     // If another process already owns it, report who it is before exiting.
     if let Err(e) = conn
-        .request_name_with_flags("org.freedesktop.secrets", RequestNameFlags::DoNotQueue.into())
+        .request_name_with_flags(
+            "org.freedesktop.secrets",
+            RequestNameFlags::DoNotQueue.into(),
+        )
         .await
     {
         // Query the bus for the current owner's PID and comm so the user knows what to kill.
@@ -107,8 +110,7 @@ async fn run() -> Result<()> {
     // Start the SSH agent and FUSE filesystem.  Returns None if XDG_RUNTIME_DIR
     // is unset or FUSE is unavailable — the daemon continues without SSH
     // agent support.
-    let ssh_manager: Option<Arc<ssh::SshManager>> =
-        ssh::SshManager::start().await.map(Arc::new);
+    let ssh_manager: Option<Arc<ssh::SshManager>> = ssh::SshManager::start().await.map(Arc::new);
 
     if let Some(ref sm) = ssh_manager {
         tracing::info!(sock = %sm.agent_sock().display(), "SSH agent ready");
@@ -142,7 +144,8 @@ async fn run() -> Result<()> {
         let initial_config = config.clone();
         let watch_ssh = ssh_manager.clone();
         tokio::spawn(async move {
-            if let Err(e) = config_watcher(watch_state, watch_path, initial_config, watch_ssh).await {
+            if let Err(e) = config_watcher(watch_state, watch_path, initial_config, watch_ssh).await
+            {
                 tracing::warn!("config watcher exited: {e}");
             }
         });
@@ -936,10 +939,12 @@ async fn config_watcher(
         if new_config.service.dedup_strategy != old_config.service.dedup_strategy
             || new_config.service.dedup_time_fallback != old_config.service.dedup_time_fallback
         {
-            state.router.update_config(rosec_core::router::RouterConfig {
-                dedup_strategy: new_config.service.dedup_strategy,
-                dedup_time_fallback: new_config.service.dedup_time_fallback,
-            });
+            state
+                .router
+                .update_config(rosec_core::router::RouterConfig {
+                    dedup_strategy: new_config.service.dedup_strategy,
+                    dedup_time_fallback: new_config.service.dedup_time_fallback,
+                });
             tracing::info!(
                 dedup_strategy = ?new_config.service.dedup_strategy,
                 dedup_time_fallback = ?new_config.service.dedup_time_fallback,

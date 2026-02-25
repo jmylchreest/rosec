@@ -604,10 +604,7 @@ pub trait VaultBackend: Send + Sync {
     /// [`BackendError::Locked`] if the backend is locked, or
     /// [`BackendError::NotSupported`] if the backend never exposes private keys
     /// (default).
-    async fn get_ssh_private_key(
-        &self,
-        _id: &str,
-    ) -> Result<SshPrivateKeyMaterial, BackendError> {
+    async fn get_ssh_private_key(&self, _id: &str) -> Result<SshPrivateKeyMaterial, BackendError> {
         Err(BackendError::NotSupported)
     }
 }

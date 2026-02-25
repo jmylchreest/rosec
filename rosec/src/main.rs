@@ -457,8 +457,7 @@ fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
         .map_err(|e| anyhow::anyhow!("cannot open /dev/tty: {e}"))?;
     let raw = file.into_raw_fd();
     // SAFETY: raw is a freshly-opened, valid, owned fd.
-    let std_owned: std::os::fd::OwnedFd =
-        unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    let std_owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
     Ok(zvariant::OwnedFd::from(std_owned))
 }
 
@@ -1321,9 +1320,7 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     //       locked and preemptive_sync skipped them.
     let needs_unlock = sync
         && ((!locked.is_empty() && unlocked.is_empty())
-            || (unlocked.is_empty()
-                && locked.is_empty()
-                && any_backends_locked(&conn).await?));
+            || (unlocked.is_empty() && locked.is_empty() && any_backends_locked(&conn).await?));
     let (unlocked, locked) = if needs_unlock {
         trigger_unlock(&conn).await?;
         preemptive_sync(&conn).await?;
@@ -2259,8 +2256,7 @@ async fn cmd_lock() -> Result<()> {
         "org.rosec.Daemon",
     )
     .await?;
-    let backends: Vec<(String, String, String, bool)> =
-        mgmt_proxy.call("BackendList", &()).await?;
+    let backends: Vec<(String, String, String, bool)> = mgmt_proxy.call("BackendList", &()).await?;
     let unlocked_count = backends.iter().filter(|(_, _, _, locked)| !locked).count();
 
     let proxy = zbus::Proxy::new(
@@ -2421,18 +2417,18 @@ fn cmd_config(args: &[String]) -> Result<()> {
     match sub {
         "show" => cmd_config_show(),
         "get" => {
-            let key = args.get(1).ok_or_else(|| {
-                anyhow::anyhow!("missing key  (try `rosec config --help`)")
-            })?;
+            let key = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("missing key  (try `rosec config --help`)"))?;
             cmd_config_get(key)
         }
         "set" => {
-            let key = args.get(1).ok_or_else(|| {
-                anyhow::anyhow!("missing key  (try `rosec config --help`)")
-            })?;
-            let value = args.get(2).ok_or_else(|| {
-                anyhow::anyhow!("missing value  (try `rosec config --help`)")
-            })?;
+            let key = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("missing key  (try `rosec config --help`)"))?;
+            let value = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("missing value  (try `rosec config --help`)"))?;
             cmd_config_set(key, value)
         }
         "help" | "--help" | "-h" => {
@@ -2485,9 +2481,7 @@ fn config_get_value(cfg: &Config, key: &str) -> Result<String> {
             .refresh_interval_secs
             .map(|v| v.to_string())
             .unwrap_or_else(|| "60".to_string()),
-        "service.dedup_strategy" => {
-            format!("{:?}", cfg.service.dedup_strategy).to_lowercase()
-        }
+        "service.dedup_strategy" => format!("{:?}", cfg.service.dedup_strategy).to_lowercase(),
         "service.dedup_time_fallback" => {
             format!("{:?}", cfg.service.dedup_time_fallback).to_lowercase()
         }

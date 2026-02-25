@@ -155,29 +155,6 @@ If automatic cleanup fails, unmount manually:
 fusermount3 -uz "$XDG_RUNTIME_DIR/rosec/ssh"
 ```
 
-## SSH Agent
-
-`rosecd` also runs a built-in SSH agent, exposing SSH keys from your unlocked vault over a Unix socket at `$XDG_RUNTIME_DIR/rosec/agent.sock`.
-
-A FUSE filesystem is mounted at `$XDG_RUNTIME_DIR/rosec/ssh/` and exposes:
-
-- `keys/by-name/<item-name>.pub` — public keys, named after their vault entry
-- `keys/by-fingerprint/<sha256-fingerprint>.pub` — same keys, addressed by fingerprint
-- `keys/by-host/<hostname>.pub` — public keys for hosts mapped via `custom.ssh_host` fields
-- `config.d/<item-name>.conf` — ready-to-use SSH config snippets (one per SSH key item)
-
-### Host mapping
-
-Add one or more `custom.ssh_host` text fields to any vault item containing an SSH key.  Each value is an OpenSSH `Host` pattern (e.g. `github.com`, `*.prod.example.com`).  rosec generates a `config.d/` snippet with a `Host` block per entry, wiring `IdentityFile`, `IdentityAgent`, and `IdentitiesOnly yes` automatically.
-
-To activate, add one line to `~/.ssh/config`:
-
-```
-Include /run/user/1000/rosec/ssh/config.d/*
-```
-
-See [docs/ssh-agent.md](docs/ssh-agent.md) for full details including PEM key auto-detection, conflict resolution, and multi-backend support.
-
 ## Prior Art
 
 - [`secretsd`](https://github.com/grawity/secretsd) — Generic Secret Service backend

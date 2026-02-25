@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Context as _;
 use signature::Signer as _;
-use ssh_agent_lib::agent::{listen, Session};
+use ssh_agent_lib::agent::{Session, listen};
 use ssh_agent_lib::error::AgentError;
 use ssh_agent_lib::proto::{Identity, SignRequest};
 use ssh_key::{HashAlg, Signature};
@@ -32,11 +32,8 @@ impl SshAgent {
         let listener = tokio::net::UnixListener::bind(&self.socket_path)
             .with_context(|| format!("bind SSH agent socket {:?}", self.socket_path))?;
 
-        std::fs::set_permissions(
-            &self.socket_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .with_context(|| format!("chmod 0600 {:?}", self.socket_path))?;
+        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {:?}", self.socket_path))?;
 
         listen(listener, self).await.context("SSH agent listener")
     }

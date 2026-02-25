@@ -7,9 +7,7 @@ use std::time::SystemTime;
 use rosec_core::config::{Config, PromptConfig};
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
-use rosec_core::{
-    Attributes, BackendError, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta,
-};
+use rosec_core::{Attributes, BackendError, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta};
 use tracing::{debug, info, warn};
 use zbus::Connection;
 use zbus::fdo::Error as FdoError;

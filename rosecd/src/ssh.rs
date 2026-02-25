@@ -23,7 +23,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use rosec_core::VaultBackend;
 use rosec_fuse::MountHandle;
-use rosec_ssh_agent::keystore::{build_entry, KeyStore};
+use rosec_ssh_agent::keystore::{KeyStore, build_entry};
 use rosec_ssh_agent::session::SshAgent;
 use ssh_key::PrivateKey;
 use tracing::{debug, info, warn};
@@ -101,7 +101,11 @@ impl SshManager {
             "SSH agent started"
         );
 
-        Some(Self { store, fuse_handle, agent_sock })
+        Some(Self {
+            store,
+            fuse_handle,
+            agent_sock,
+        })
     }
 
     /// Rebuild the key store from the given set of backends.

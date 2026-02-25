@@ -261,11 +261,11 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
     // the WS upgrade.  Using separate URLs is why we implement our own minimal
     // SignalR client rather than using the signalr-client crate (which shares
     // a single hub field for both URLs, making this split impossible).
-    let (negotiate_url, ws_url) =
-        match build_urls(&config.notifications_url, &config.access_token) {
-            Ok(pair) => pair,
-            Err(e) => return SessionResult::ConnectFailed(e),
-        };
+    let (negotiate_url, ws_url) = match build_urls(&config.notifications_url, &config.access_token)
+    {
+        Ok(pair) => pair,
+        Err(e) => return SessionResult::ConnectFailed(e),
+    };
 
     debug!(backend = %backend_id, "notifications: connecting to hub");
 
@@ -281,10 +281,7 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
     let negotiate_resp = match negotiate_result {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            return SessionResult::ConnectFailed(format!(
-                "negotiate returned HTTP {}",
-                r.status()
-            ));
+            return SessionResult::ConnectFailed(format!("negotiate returned HTTP {}", r.status()));
         }
         Err(e) => return SessionResult::ConnectFailed(format!("negotiate request failed: {e}")),
     };
@@ -472,8 +469,7 @@ fn build_urls(notifications_url: &str, access_token: &str) -> Result<(String, St
     let http_schema = if is_secure { "https" } else { "http" };
     let ws_schema = if is_secure { "wss" } else { "ws" };
 
-    let negotiate_url =
-        format!("{http_schema}://{host}/{base_path}/negotiate?negotiateVersion=1");
+    let negotiate_url = format!("{http_schema}://{host}/{base_path}/negotiate?negotiateVersion=1");
     let ws_url = format!("{ws_schema}://{host}/{base_path}?access_token={access_token}");
 
     Ok((negotiate_url, ws_url))
@@ -519,8 +515,7 @@ mod tests {
 
     #[test]
     fn build_urls_self_hosted() {
-        let (neg, ws) =
-            build_urls("https://vault.example.com/notifications", "TOKEN123").unwrap();
+        let (neg, ws) = build_urls("https://vault.example.com/notifications", "TOKEN123").unwrap();
         assert_eq!(
             neg,
             "https://vault.example.com/notifications/hub/negotiate?negotiateVersion=1"
@@ -534,7 +529,10 @@ mod tests {
     #[test]
     fn build_urls_insecure() {
         let (neg, ws) = build_urls("http://localhost:8080", "TOKEN").unwrap();
-        assert_eq!(neg, "http://localhost:8080/hub/negotiate?negotiateVersion=1");
+        assert_eq!(
+            neg,
+            "http://localhost:8080/hub/negotiate?negotiateVersion=1"
+        );
         assert_eq!(ws, "ws://localhost:8080/hub?access_token=TOKEN");
     }
 
@@ -572,14 +570,20 @@ mod tests {
         let frame = r#"{"type":1,"target":"ReceiveMessage","arguments":[{"type":0,"payload":{"id":"abc","userId":"xyz","organizationId":null,"collectionIds":null,"revisionDate":"2026-01-01T00:00:00Z"}}]}"#;
         let inv: Invocation = serde_json::from_str(frame).unwrap();
         assert_eq!(inv.target.as_deref(), Some("ReceiveMessage"));
-        assert_eq!(inv.arguments[0].push_type, Some(push_type::SYNC_CIPHER_UPDATE));
+        assert_eq!(
+            inv.arguments[0].push_type,
+            Some(push_type::SYNC_CIPHER_UPDATE)
+        );
     }
 
     #[test]
     fn parse_receive_message_sync_cipher_create() {
         let frame = r#"{"type":1,"target":"ReceiveMessage","arguments":[{"type":1,"payload":{"id":"abc"}}]}"#;
         let inv: Invocation = serde_json::from_str(frame).unwrap();
-        assert_eq!(inv.arguments[0].push_type, Some(push_type::SYNC_CIPHER_CREATE));
+        assert_eq!(
+            inv.arguments[0].push_type,
+            Some(push_type::SYNC_CIPHER_CREATE)
+        );
     }
 
     #[test]

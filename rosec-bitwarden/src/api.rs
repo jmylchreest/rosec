@@ -344,9 +344,10 @@ impl ApiClient {
             )));
         }
 
-        let body = resp.text().await.map_err(|e| {
-            BitwardenError::Api(format!("sync response read: {e}"))
-        })?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| BitwardenError::Api(format!("sync response read: {e}")))?;
 
         // Log raw cipher types from the JSON before deserialization so we can
         // diagnose mapping issues.  This uses a lightweight parse to extract
@@ -359,7 +360,10 @@ impl ApiClient {
             for c in arr {
                 let id = c.get("id").or_else(|| c.get("Id"));
                 let ctype = c.get("type").or_else(|| c.get("Type"));
-                let ssh_key_val = c.get("sshKey").or_else(|| c.get("SshKey")).or_else(|| c.get("SSHKey"));
+                let ssh_key_val = c
+                    .get("sshKey")
+                    .or_else(|| c.get("SshKey"))
+                    .or_else(|| c.get("SSHKey"));
                 let has_ssh = ssh_key_val.is_some();
                 trace!(
                     cipher_id = ?id,
