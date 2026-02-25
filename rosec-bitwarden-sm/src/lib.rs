@@ -248,8 +248,11 @@ impl VaultBackend for SmBackend {
         "bitwarden-sm"
     }
 
-    fn set_event_callbacks(&self, callbacks: BackendCallbacks) {
-        *self.callbacks.write().expect("callbacks lock poisoned") = callbacks;
+    fn set_event_callbacks(&self, callbacks: BackendCallbacks) -> Result<(), BackendError> {
+        *self.callbacks.write().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+        })? = callbacks;
+        Ok(())
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -376,7 +379,9 @@ stored locally — you will not need to enter it again.",
             *state_guard = Some(auth);
         }
 
-        if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_unlocked.as_ref() {
+        if let Some(cb) = self.callbacks.read().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+        })?.on_unlocked.clone() {
             cb();
         }
         Ok(())
@@ -427,13 +432,17 @@ stored locally — you will not need to enter it again.",
 
                 info!(backend = %self.config.id, changed, "SM secrets synced");
 
-                if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_sync_succeeded.as_ref() {
+                if let Some(cb) = self.callbacks.read().map_err(|_| {
+                    BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+                })?.on_sync_succeeded.clone() {
                     cb(changed);
                 }
                 Ok(())
             }
             Err(e) => {
-                if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_sync_failed.as_ref() {
+                if let Some(cb) = self.callbacks.read().map_err(|_| {
+                    BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+                })?.on_sync_failed.clone() {
                     cb();
                 }
                 Err(e)
@@ -452,7 +461,9 @@ stored locally — you will not need to enter it again.",
         }
         info!(backend = %self.config.id, "SM backend locked");
 
-        if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_locked.as_ref() {
+        if let Some(cb) = self.callbacks.read().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+        })?.on_locked.clone() {
             cb();
         }
         Ok(())

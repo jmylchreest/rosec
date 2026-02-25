@@ -417,7 +417,9 @@ pub trait VaultBackend: Send + Sync {
     ///
     /// The default is a no-op.  Backends that do not implement this method
     /// simply ignore all callbacks.
-    fn set_event_callbacks(&self, _callbacks: BackendCallbacks) {}
+    fn set_event_callbacks(&self, _callbacks: BackendCallbacks) -> Result<(), BackendError> {
+        Ok(())
+    }
 
     /// The password / local-key field for this backend.
     ///

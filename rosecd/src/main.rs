@@ -647,7 +647,9 @@ fn wire_backend_callbacks(
             })),
         };
 
-        backend.set_event_callbacks(callbacks);
+        if let Err(e) = backend.set_event_callbacks(callbacks) {
+            tracing::warn!(backend = %backend.id(), error = %e, "failed to set event callbacks (lock poisoned)");
+        }
 
         // --- SignalR nudge callbacks (Bitwarden-PM only, via downcast) ---
         if let Some(bw) = backend
@@ -659,7 +661,7 @@ fn wire_backend_callbacks(
             let bw_id = bw.id().to_string();
             let lock_id = bw_id.clone();
 
-            bw.set_signalr_callbacks(
+            if let Err(e) = bw.set_signalr_callbacks(
                 Arc::new(move || {
                     let s = Arc::clone(&sync_state);
                     let id = bw_id.clone();
@@ -680,7 +682,9 @@ fn wire_backend_callbacks(
                         }
                     });
                 }),
-            );
+            ) {
+                tracing::warn!(backend = %bw.id(), error = %e, "failed to set SignalR callbacks (lock poisoned)");
+            }
         }
     }
 }

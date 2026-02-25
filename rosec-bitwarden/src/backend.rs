@@ -424,9 +424,16 @@ impl BitwardenBackend {
         &self,
         on_sync_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
         on_lock_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
-    ) {
-        *self.on_sync_nudge.lock().expect("on_sync_nudge mutex poisoned") = Some(on_sync_nudge);
-        *self.on_lock_nudge.lock().expect("on_lock_nudge mutex poisoned") = Some(on_lock_nudge);
+    ) -> Result<(), BackendError> {
+        let mut sync_guard = self.on_sync_nudge.lock().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("on_sync_nudge mutex poisoned"))
+        })?;
+        let mut lock_guard = self.on_lock_nudge.lock().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("on_lock_nudge mutex poisoned"))
+        })?;
+        *sync_guard = Some(on_sync_nudge);
+        *lock_guard = Some(on_lock_nudge);
+        Ok(())
     }
 
     /// Perform the full authentication + sync flow.
@@ -1154,8 +1161,11 @@ impl VaultBackend for BitwardenBackend {
         "bitwarden"
     }
 
-    fn set_event_callbacks(&self, callbacks: BackendCallbacks) {
-        *self.callbacks.write().expect("callbacks lock poisoned") = callbacks;
+    fn set_event_callbacks(&self, callbacks: BackendCallbacks) -> Result<(), BackendError> {
+        *self.callbacks.write().map_err(|_| {
+            BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+        })? = callbacks;
+        Ok(())
     }
 
     fn password_field(&self) -> AuthField {
@@ -1278,7 +1288,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         if let Some(f) = self
             .callbacks
             .read()
-            .expect("callbacks lock poisoned")
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
             .on_unlocked
             .clone()
         {
@@ -1302,7 +1312,7 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         if let Some(f) = self
             .callbacks
             .read()
-            .expect("callbacks lock poisoned")
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?
             .on_locked
             .clone()
         {
@@ -1330,7 +1340,9 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
 
         // Read callbacks before dropping the guard (we need `state` above).
         let (on_sync_succeeded, on_sync_failed) = {
-            let cb = self.callbacks.read().expect("callbacks lock poisoned");
+            let cb = self.callbacks.read().map_err(|_| {
+                BackendError::Other(anyhow::anyhow!("callbacks lock poisoned"))
+            })?;
             (cb.on_sync_succeeded.clone(), cb.on_sync_failed.clone())
         };
         drop(guard);
