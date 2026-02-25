@@ -12,6 +12,9 @@
 # Logs
 *.log
 
+# Syncthing
+.syncthing.*
+
 # OS
 .DS_Store
 Thumbs.db
