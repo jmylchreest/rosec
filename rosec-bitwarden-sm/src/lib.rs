@@ -66,7 +66,9 @@ use rosec_core::{
     RegistrationInfo, SecretBytes, UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
 use sha2::Sha256;
-use tokio::sync::{Mutex, RwLock};
+use std::sync::RwLock;
+
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -247,9 +249,7 @@ impl VaultBackend for SmBackend {
     }
 
     fn set_event_callbacks(&self, callbacks: BackendCallbacks) {
-        // `blocking_write` is safe here: called once during startup/hot-reload
-        // before any concurrent unlock/sync can occur.
-        *self.callbacks.blocking_write() = callbacks;
+        *self.callbacks.write().expect("callbacks lock poisoned") = callbacks;
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -376,7 +376,7 @@ stored locally — you will not need to enter it again.",
             *state_guard = Some(auth);
         }
 
-        if let Some(cb) = self.callbacks.read().await.on_unlocked.as_ref() {
+        if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_unlocked.as_ref() {
             cb();
         }
         Ok(())
@@ -427,13 +427,13 @@ stored locally — you will not need to enter it again.",
 
                 info!(backend = %self.config.id, changed, "SM secrets synced");
 
-                if let Some(cb) = self.callbacks.read().await.on_sync_succeeded.as_ref() {
+                if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_sync_succeeded.as_ref() {
                     cb(changed);
                 }
                 Ok(())
             }
             Err(e) => {
-                if let Some(cb) = self.callbacks.read().await.on_sync_failed.as_ref() {
+                if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_sync_failed.as_ref() {
                     cb();
                 }
                 Err(e)
@@ -452,7 +452,7 @@ stored locally — you will not need to enter it again.",
         }
         info!(backend = %self.config.id, "SM backend locked");
 
-        if let Some(cb) = self.callbacks.read().await.on_locked.as_ref() {
+        if let Some(cb) = self.callbacks.read().expect("callbacks lock poisoned").on_locked.as_ref() {
             cb();
         }
         Ok(())
