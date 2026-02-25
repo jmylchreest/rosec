@@ -197,7 +197,7 @@ jobs:
         if: matrix.cross == false
         run: |
           cargo build --release --locked \
-            --bin rosecd --bin rosec \
+            --bin rosecd --bin rosec --bin rosec-prompt \
             --target ${{ matrix.target }}
 
       - name: Build (cross)
@@ -207,7 +207,7 @@ jobs:
           command: build
           args: >-
             --release --locked
-            --bin rosecd --bin rosec
+            --bin rosecd --bin rosec --bin rosec-prompt
             --target ${{ matrix.target }}
 
       - name: Package artifacts
@@ -219,6 +219,7 @@ jobs:
 
           cp "target/${TARGET}/release/rosecd" "${STAGE}/"
           cp "target/${TARGET}/release/rosec"  "${STAGE}/"
+          cp "target/${TARGET}/release/rosec-prompt" "${STAGE}/"
           cp -r contrib "${STAGE}/"
           cp README.md  "${STAGE}/" 2>/dev/null || true
 
