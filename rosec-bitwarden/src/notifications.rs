@@ -10,7 +10,7 @@
 //! Bitwarden uses the SignalR JSON hub protocol:
 //! - Negotiate: `POST {notifications_url}/hub/negotiate?negotiateVersion=1`
 //!   with `Authorization: Bearer <jwt>` header
-//! - Connect:   `wss://{notifications_host}/hub`
+//! - Connect:   `wss://{notifications_host}/hub?access_token=<jwt>`
 //! - After HTTP upgrade: JSON handshake `{"protocol":"json","version":1}\x1e`
 //! - Messages are `\x1e`-delimited JSON frames.
 //!
@@ -46,7 +46,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use signalr_client::{CallbackHandler, DisconnectionHandler, NoReconnectPolicy, ReconnectionConfig, ReconnectionHandler, SignalRClient};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -63,7 +64,7 @@ pub struct NotificationsConfig {
     /// The hub path `/hub` is appended automatically.
     pub notifications_url: String,
     /// Current JWT access token — sent as `Authorization: Bearer <jwt>` on
-    /// the negotiate POST.  Never embedded in a URL.
+    /// the negotiate POST and as `?access_token=<jwt>` on the WebSocket URL.
     pub access_token: zeroize::Zeroizing<String>,
     /// Backend instance ID (for log messages only).
     pub backend_id: String,
@@ -92,6 +93,9 @@ pub fn start(config: NotificationsConfig) -> tokio::task::JoinHandle<()> {
 // Internal types
 // ---------------------------------------------------------------------------
 
+/// SignalR record separator — every frame is terminated by this byte.
+const RS: char = '\x1e';
+
 /// Sync event target names from the Bitwarden SignalR hub.
 const SYNC_TARGETS: &[&str] = &[
     "SyncCipherUpdated",
@@ -114,20 +118,17 @@ const BACKOFF_INITIAL: Duration = Duration::from_secs(5);
 /// Maximum delay between reconnect attempts.
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 
-// ---------------------------------------------------------------------------
-// Disconnection handler — signals the session loop when the WS drops
-// ---------------------------------------------------------------------------
-
-/// Signals the outer session loop that the WebSocket connection was lost.
-struct DropSignaller {
-    tx: tokio::sync::mpsc::Sender<()>,
+/// Minimal SignalR negotiate response — only the fields we care about.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NegotiateResponse {
+    connection_id: String,
 }
 
-impl DisconnectionHandler for DropSignaller {
-    fn on_disconnected(&self, _reconnection: ReconnectionHandler) {
-        // We manage reconnection ourselves; just wake the select loop.
-        let _ = self.tx.try_send(());
-    }
+/// Minimal SignalR invocation message — only the `target` field matters.
+#[derive(Debug, Deserialize)]
+struct Invocation {
+    target: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,10 +176,6 @@ async fn notifications_loop(mut config: NotificationsConfig) {
                 // First-connect failure: the server likely doesn't support
                 // this hub endpoint (old Vaultwarden, aggressive proxy, …).
                 // Degrade to poll-only rather than retrying indefinitely.
-                //
-                // NOTE: `reason` may originate from the signalr-client crate
-                // and could theoretically contain URL fragments.  Redact any
-                // `access_token=…` query parameter defensively.
                 let safe_reason = redact_token(&reason);
                 warn!(
                     backend = %backend_id,
@@ -204,153 +201,221 @@ enum SessionResult {
 async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
     let backend_id = &config.backend_id;
 
-    // Split the notifications URL into domain + clean hub path (no token).
-    // The signalr-client crate builds:
-    //   negotiate URL  →  `{schema}://{domain}/{hub}/negotiate?negotiateVersion=1`
-    //   WebSocket URL  →  `{ws_schema}://{domain}/{hub}`
-    // A `?access_token=…` suffix in `hub` would corrupt the negotiate URL by
-    // appending `/negotiate?…` after a query string.  We pass the token as an
-    // `Authorization: Bearer` header on the negotiate POST instead.
-    let (domain, hub) = match split_for_signalr(&config.notifications_url) {
-        Ok(pair) => pair,
-        Err(e) => return SessionResult::ConnectFailed(e),
+    // Build the two URLs:
+    //   negotiate_url — clean HTTP URL, auth via Bearer header
+    //   ws_url        — WebSocket URL with ?access_token= in query string
+    //
+    // Bitwarden's server requires Bearer on negotiate and ?access_token= on
+    // the WS upgrade.  Using separate URLs is why we implement our own minimal
+    // SignalR client rather than using the signalr-client crate (which shares
+    // a single hub field for both URLs, making this split impossible).
+    let (negotiate_url, ws_url) =
+        match build_urls(&config.notifications_url, &config.access_token) {
+            Ok(pair) => pair,
+            Err(e) => return SessionResult::ConnectFailed(e),
+        };
+
+    debug!(backend = %backend_id, "notifications: connecting to hub");
+
+    // ------------------------------------------------------------------
+    // Step 1: Negotiate — POST to obtain a connectionId.
+    // ------------------------------------------------------------------
+    let negotiate_result = reqwest::Client::new()
+        .post(&negotiate_url)
+        .bearer_auth(config.access_token.as_str())
+        .send()
+        .await;
+
+    let negotiate_resp = match negotiate_result {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            return SessionResult::ConnectFailed(format!(
+                "negotiate returned HTTP {}",
+                r.status()
+            ));
+        }
+        Err(e) => return SessionResult::ConnectFailed(format!("negotiate request failed: {e}")),
     };
 
-    let is_secure = config.notifications_url.starts_with("https://");
+    let neg: NegotiateResponse = match negotiate_resp.json().await {
+        Ok(n) => n,
+        Err(e) => {
+            return SessionResult::ConnectFailed(format!("negotiate response parse failed: {e}"));
+        }
+    };
 
     debug!(
         backend = %backend_id,
-        %domain,
-        %hub,
-        "notifications: connecting to hub"
+        connection_id = %neg.connection_id,
+        "notifications: negotiate succeeded"
     );
 
-    // Channel used by DropSignaller to tell us when the WS drops.
-    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::channel::<()>(1);
-
-    // Take the token by value so it can be moved into the closure without
-    // keeping a borrow on `config`.  We clone only what we need here.
-    let bearer_token = config.access_token.as_str().to_owned();
-
-    let connect_result = SignalRClient::connect_with(&domain, &hub, |c| {
-        if !is_secure {
-            c.unsecure();
-        }
-        // Pass the JWT as a Bearer header on the negotiate POST.
-        // This is the standard SignalR authentication path and avoids
-        // embedding the token in the negotiate URL.
-        c.authenticate_bearer(bearer_token.clone());
-        // Disable automatic reconnection — we manage retries ourselves so we
-        // can check cancellation and apply our own backoff.
-        c.with_reconnection_policy(ReconnectionConfig {
-            policy: std::sync::Arc::new(NoReconnectPolicy),
-        });
-        c.with_disconnection_handler(DropSignaller { tx: drop_tx.clone() });
-    })
-    .await;
-
-    let mut client = match connect_result {
-        Ok(c) => {
-            info!(backend = %backend_id, "notifications: connected to hub");
-            c
-        }
-        Err(e) => {
-            return SessionResult::ConnectFailed(e);
-        }
+    // ------------------------------------------------------------------
+    // Step 2: WebSocket upgrade.
+    // The token must appear as ?access_token= in the WS URL — Bitwarden's
+    // server performs a separate auth check on the upgrade request.
+    // ------------------------------------------------------------------
+    let ws_uri = match ws_url.parse::<http::Uri>() {
+        Ok(u) => u,
+        Err(e) => return SessionResult::ConnectFailed(format!("invalid WS URI: {e}")),
     };
 
-    // -----------------------------------------------------------------------
-    // Register callbacks for all sync/lock targets.
-    // -----------------------------------------------------------------------
-    // We keep the handlers in a type-erased vec via a helper closure so we
-    // can call unregister() on each regardless of the concrete opaque type.
-    // `CallbackHandler::unregister` takes `self`, so we box the call.
-    let mut unregisters: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+    let ws_result = tokio_websockets::ClientBuilder::from_uri(ws_uri)
+        .connect()
+        .await;
 
-    macro_rules! register_and_keep {
-        ($client:expr, $target:expr, $cb:expr) => {{
-            let h = $client.register($target.to_string(), $cb);
-            unregisters.push(Box::new(move || h.unregister()));
-        }};
-    }
-
-    for &target in SYNC_TARGETS {
-        let cb_on_sync = config.on_sync.clone();
-        let cb_backend_id = backend_id.clone();
-        let cb_target = target.to_string();
-        register_and_keep!(client, target, move |_ctx| {
-            debug!(backend = %cb_backend_id, target = %cb_target, "notifications: sync event");
-            if let Some(f) = &cb_on_sync {
-                f();
-            }
-        });
-    }
-
-    for &target in LOCK_TARGETS {
-        let cb_on_lock = config.on_lock.clone();
-        let cb_backend_id = backend_id.clone();
-        let cb_target = target.to_string();
-        register_and_keep!(client, target, move |_ctx| {
-            warn!(backend = %cb_backend_id, target = %cb_target, "notifications: lock event");
-            if let Some(f) = &cb_on_lock {
-                f();
-            }
-        });
-    }
-
-    // -----------------------------------------------------------------------
-    // Wait until cancelled or the WebSocket drops.
-    // -----------------------------------------------------------------------
-    let outcome = tokio::select! {
-        // Vault locked — sender dropped, `changed()` returns Err.
-        result = config.cancel_rx.changed() => {
-            if result.is_err() {
-                SessionResult::Cancelled
-            } else {
-                // Spurious wake (value changed but sender still alive);
-                // treat as a disconnect and let the loop retry.
-                SessionResult::Disconnected
-            }
-        }
-        // DropSignaller fired — WebSocket was closed by the server.
-        _ = drop_rx.recv() => {
-            SessionResult::Disconnected
-        }
+    let (mut ws, _) = match ws_result {
+        Ok(pair) => pair,
+        Err(e) => return SessionResult::ConnectFailed(format!("WebSocket connect failed: {e}")),
     };
 
-    // Unregister all callbacks, then drop the client (SignalRClient::drop
-    // calls disconnect() internally via block_on).
-    for unregister in unregisters {
-        unregister();
+    // ------------------------------------------------------------------
+    // Step 3: SignalR handshake.
+    // ------------------------------------------------------------------
+    let handshake = format!("{{\"protocol\":\"json\",\"version\":1}}{RS}");
+    if let Err(e) = ws.send(tokio_websockets::Message::text(handshake)).await {
+        return SessionResult::ConnectFailed(format!("SignalR handshake send failed: {e}"));
     }
-    drop(client);
 
-    debug!(backend = %backend_id, "notifications: session ended");
-    outcome
+    // Read (and discard) the handshake acknowledgement frame.
+    match ws.next().await {
+        Some(Ok(_)) => {}
+        Some(Err(e)) => {
+            return SessionResult::ConnectFailed(format!("SignalR handshake recv failed: {e}"));
+        }
+        None => {
+            return SessionResult::ConnectFailed("WebSocket closed during handshake".to_string());
+        }
+    }
+
+    info!(backend = %backend_id, "notifications: connected to hub");
+
+    // ------------------------------------------------------------------
+    // Step 4: Event loop — read frames until cancelled or disconnected.
+    // ------------------------------------------------------------------
+    let on_sync = config.on_sync.clone();
+    let on_lock = config.on_lock.clone();
+    let backend_id_owned = backend_id.to_string();
+
+    loop {
+        tokio::select! {
+            // Vault locked — sender dropped, `changed()` returns Err.
+            result = config.cancel_rx.changed() => {
+                if result.is_err() {
+                    let _ = ws.send(tokio_websockets::Message::close(None, "")).await;
+                    return SessionResult::Cancelled;
+                }
+                // Spurious wake; keep going.
+            }
+
+            msg = ws.next() => {
+                match msg {
+                    None => return SessionResult::Disconnected,
+                    Some(Err(e)) => {
+                        debug!(backend = %backend_id_owned, error = %e, "notifications: WS error");
+                        return SessionResult::Disconnected;
+                    }
+                    Some(Ok(m)) if m.is_text() => {
+                        if let Some(text) = m.as_text() {
+                            handle_frames(text, &backend_id_owned, &on_sync, &on_lock);
+                        }
+                    }
+                    Some(Ok(_)) => {
+                        // Binary or control frames — tokio-websockets handles
+                        // ping/pong automatically; close is caught by None above.
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse one or more `\x1e`-delimited SignalR frames from a WebSocket message
+/// and dispatch sync/lock callbacks.
+fn handle_frames(
+    text: &str,
+    backend_id: &str,
+    on_sync: &Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    on_lock: &Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+) {
+    for frame in text.split(RS) {
+        let frame = frame.trim();
+        if frame.is_empty() {
+            continue;
+        }
+
+        let inv: Invocation = match serde_json::from_str(frame) {
+            Ok(i) => i,
+            Err(_) => continue, // Handshake ack, ping, or unknown — ignore.
+        };
+
+        let Some(target) = inv.target else { continue };
+
+        if SYNC_TARGETS.contains(&target.as_str()) {
+            debug!(backend = %backend_id, %target, "notifications: sync event");
+            if let Some(f) = on_sync {
+                f();
+            }
+        } else if LOCK_TARGETS.contains(&target.as_str()) {
+            warn!(backend = %backend_id, %target, "notifications: lock event");
+            if let Some(f) = on_lock {
+                f();
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // URL helpers
 // ---------------------------------------------------------------------------
 
+/// Build the negotiate URL and WebSocket URL from a notifications base URL
+/// and an access token.
+///
+/// - negotiate URL: `{https_url}/hub/negotiate?negotiateVersion=1`
+///   (no token in URL — Bearer header used instead)
+/// - WebSocket URL: `{wss_url}/hub?access_token={token}`
+///   (token in query string — required by Bitwarden's WS auth check)
+fn build_urls(notifications_url: &str, access_token: &str) -> Result<(String, String), String> {
+    let (is_secure, without_schema) = if let Some(s) = notifications_url.strip_prefix("https://") {
+        (true, s)
+    } else if let Some(s) = notifications_url.strip_prefix("http://") {
+        (false, s)
+    } else {
+        return Err(format!(
+            "unsupported schema in notifications URL: {notifications_url}"
+        ));
+    };
+
+    let (host, base_path) = match without_schema.split_once('/') {
+        Some((h, p)) => (h, format!("{p}/hub")),
+        None => (without_schema, "hub".to_string()),
+    };
+
+    let http_schema = if is_secure { "https" } else { "http" };
+    let ws_schema = if is_secure { "wss" } else { "ws" };
+
+    let negotiate_url =
+        format!("{http_schema}://{host}/{base_path}/negotiate?negotiateVersion=1");
+    let ws_url = format!("{ws_schema}://{host}/{base_path}?access_token={access_token}");
+
+    Ok((negotiate_url, ws_url))
+}
+
 /// Replace any `access_token=<value>` occurrence in `s` with a placeholder.
 ///
-/// Used to sanitise error strings that may have been built from URLs by the
-/// `signalr-client` crate before they reach log output.
+/// Used to sanitise error strings that may contain URL fragments before they
+/// reach log output.
 fn redact_token(s: &str) -> std::borrow::Cow<'_, str> {
-    // Simple scan: find the key, then replace everything up to the next `&`
-    // or end-of-string with a fixed placeholder.
     if !s.contains("access_token=") {
         return std::borrow::Cow::Borrowed(s);
     }
-    // Replace all occurrences with a regex-free approach.
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(pos) = rest.find("access_token=") {
         out.push_str(&rest[..pos]);
         out.push_str("access_token=<redacted>");
         let after = &rest[pos + "access_token=".len()..];
-        // Skip to the next `&` (query param separator) or end of string.
         let skip = after.find('&').unwrap_or(after.len());
         rest = &after[skip..];
     }
@@ -358,69 +423,52 @@ fn redact_token(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Split a `https://host/base` notifications URL into the
-/// `(domain, hub_path)` pair that `SignalRClient::connect_with` expects.
-///
-/// The returned hub path is **clean** — no `?access_token=…` suffix.
-/// Bearer authentication for the negotiate POST is configured separately
-/// via `authenticate_bearer`.  The `signalr-client` crate constructs:
-///
-/// - negotiate URL: `{schema}://{domain}/{hub}/negotiate?negotiateVersion=1`
-/// - WebSocket URL: `{ws_schema}://{domain}/{hub}`
-///
-/// The hub path must not contain a `?` or the negotiate URL becomes invalid.
-///
-/// Examples:
-/// - `"https://notifications.bitwarden.com"`
-///   → `("notifications.bitwarden.com", "hub")`
-/// - `"https://vault.example.com/notifications"`
-///   → `("vault.example.com", "notifications/hub")`
-fn split_for_signalr(notifications_url: &str) -> Result<(String, String), String> {
-    // Strip schema prefix.
-    let without_schema = notifications_url
-        .strip_prefix("https://")
-        .or_else(|| notifications_url.strip_prefix("http://"))
-        .ok_or_else(|| {
-            format!("unsupported schema in notifications URL: {notifications_url}")
-        })?;
-
-    // Split on the first `/` to separate `host[:port]` from path.
-    let (domain, hub_path) = match without_schema.split_once('/') {
-        Some((d, p)) => (d.to_string(), format!("{p}/hub")),
-        None => (without_schema.to_string(), "hub".to_string()),
-    };
-
-    Ok((domain, hub_path))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn split_official_us() {
-        let (domain, hub) = split_for_signalr("https://notifications.bitwarden.com").unwrap();
-        assert_eq!(domain, "notifications.bitwarden.com");
-        assert_eq!(hub, "hub");
+    fn build_urls_official_us() {
+        let (neg, ws) = build_urls("https://notifications.bitwarden.com", "TOKEN123").unwrap();
+        assert_eq!(
+            neg,
+            "https://notifications.bitwarden.com/hub/negotiate?negotiateVersion=1"
+        );
+        assert_eq!(
+            ws,
+            "wss://notifications.bitwarden.com/hub?access_token=TOKEN123"
+        );
     }
 
     #[test]
-    fn split_self_hosted() {
-        let (domain, hub) =
-            split_for_signalr("https://vault.example.com/notifications").unwrap();
-        assert_eq!(domain, "vault.example.com");
-        assert_eq!(hub, "notifications/hub");
+    fn build_urls_self_hosted() {
+        let (neg, ws) =
+            build_urls("https://vault.example.com/notifications", "TOKEN123").unwrap();
+        assert_eq!(
+            neg,
+            "https://vault.example.com/notifications/hub/negotiate?negotiateVersion=1"
+        );
+        assert_eq!(
+            ws,
+            "wss://vault.example.com/notifications/hub?access_token=TOKEN123"
+        );
     }
 
     #[test]
-    fn split_invalid_schema() {
-        let result = split_for_signalr("ftp://bad.example.com");
-        assert!(result.is_err());
+    fn build_urls_insecure() {
+        let (neg, ws) = build_urls("http://localhost:8080", "TOKEN").unwrap();
+        assert_eq!(neg, "http://localhost:8080/hub/negotiate?negotiateVersion=1");
+        assert_eq!(ws, "ws://localhost:8080/hub?access_token=TOKEN");
+    }
+
+    #[test]
+    fn build_urls_invalid_schema() {
+        assert!(build_urls("ftp://bad.example.com", "TOKEN").is_err());
     }
 
     #[test]
     fn redact_token_replaces_value() {
-        let input = "negotiate with https://host/hub?access_token=eyJsecret123 failed";
+        let input = "failed: https://host/hub?access_token=eyJsecret123 blah";
         let out = redact_token(input);
         assert!(!out.contains("eyJsecret123"));
         assert!(out.contains("access_token=<redacted>"));

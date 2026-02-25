@@ -18,8 +18,10 @@ async-trait = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 
-# Real-time notifications
-signalr-client = "0.2.1"
+# Real-time notifications (own minimal SignalR client over reqwest + tokio-websockets)
+tokio-websockets = { version = "0.13.1", default-features = false, features = ["client", "rustls-platform-verifier", "sha1_smol", "fastrand"] }
+futures-util = { version = "0.3", features = ["sink"] }
+http = "1"
 
 # HTTP client
 reqwest = { workspace = true }
