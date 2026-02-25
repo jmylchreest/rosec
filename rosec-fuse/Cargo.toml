@@ -1,0 +1,27 @@
+[package]
+name = "rosec-fuse"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "FUSE virtual filesystem for rosec — exposes SSH public keys and config snippets"
+
+[dependencies]
+rosec-core       = { path = "../rosec-core" }
+rosec-ssh-agent  = { path = "../rosec-ssh-agent" }
+anyhow           = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+zeroize          = { workspace = true }
+tokio            = { workspace = true }
+libc             = { workspace = true }
+
+# FUSE filesystem
+fuser = { workspace = true }
+
+# SSH key parsing (public key serialisation)
+ssh-key = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

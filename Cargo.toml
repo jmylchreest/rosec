@@ -5,6 +5,8 @@ members = [
     "rosec-secret-service",
     "rosec-bitwarden",
     "rosec-bitwarden-sm",
+    "rosec-ssh-agent",
+    "rosec-fuse",
     "rosecd",
     "rosec",
     "rosec-prompt",
@@ -51,3 +53,7 @@ zvariant = "5.10.0"
 uuid = { version = "1.21.0", features = ["v4"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "form"] }
 notify = "7"
+ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "encryption"] }
+ssh-agent-lib = "0.5.1"
+fuser = "0.17.0"
+signature = "2"
