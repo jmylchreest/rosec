@@ -6,7 +6,7 @@
 
 When `rosecd` starts, it:
 
-1. Binds an SSH agent socket at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`
+1. Binds an SSH agent socket at `$XDG_RUNTIME_DIR/rosec/agent.sock`
 2. Mounts a FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/ssh/`
 
 The FUSE filesystem is read-only and entirely in-memory.  Its contents update automatically when the vault is re-synced or a backend is locked/unlocked.  No private keys are ever written to disk.
@@ -56,13 +56,13 @@ rosec scans the `notes`, `password`, and hidden `custom.*` fields of **all** vau
 
 This means you can store SSH keys as a Secure Note or as a hidden custom field on a Login item and they will be discovered automatically — no special item type required.
 
-## Host Mapping with `custom.ssh_host`
+## Host Mapping with `ssh_host`
 
 The most powerful feature of the rosec SSH agent is automatic SSH config generation based on vault item fields.
 
 ### How it works
 
-Add one or more **text custom fields** named `ssh_host` to any vault item that contains an SSH key.  Each field value is an OpenSSH `Host` pattern:
+Add one or more **text custom fields** named `ssh_host` (or `ssh-host`) to any vault item that contains an SSH key.  Each field value is an OpenSSH `Host` pattern:
 
 | Field name | Field value | Effect |
 |---|---|---|
@@ -71,6 +71,24 @@ Add one or more **text custom fields** named `ssh_host` to any vault item that c
 | `ssh_host` | `bastion.internal` | Maps this key to the bastion |
 
 Multiple `ssh_host` fields on the same item are all honoured — each generates its own `Host` block in the config snippet.
+
+A single field can also contain **newline-separated** host patterns, which is equivalent to multiple fields:
+
+```
+github.com
+*.prod.example.com
+bastion.internal
+```
+
+### Setting the SSH user with `ssh_user`
+
+Add a text custom field named `ssh_user` (or `ssh-user`) to set the `User` directive in the generated `Host` blocks:
+
+| Field name | Field value | Effect |
+|---|---|---|
+| `ssh_user` | `deploy` | Adds `User deploy` to each Host block |
+
+Only the first `ssh_user` field is used if multiple are present.
 
 ### Generated config snippets
 
@@ -90,17 +108,22 @@ A generated snippet looks like:
 # Source: My GitHub Key (last updated: 2025-12-01T10:30:00Z)
 
 Host github.com
+    User git
     IdentityFile /run/user/1000/rosec/ssh/keys/by-name/My GitHub Key.pub
-    IdentityAgent /run/user/1000/rosec/ssh/agent.sock
+    IdentityAgent /run/user/1000/rosec/agent.sock
     IdentitiesOnly yes
 
 Host gh-alt.example.com
+    User git
     IdentityFile /run/user/1000/rosec/ssh/keys/by-name/My GitHub Key.pub
-    IdentityAgent /run/user/1000/rosec/ssh/agent.sock
+    IdentityAgent /run/user/1000/rosec/agent.sock
     IdentitiesOnly yes
 ```
 
-`IdentitiesOnly yes` prevents `ssh` from offering other keys to that host.  `IdentityAgent` ensures the correct agent socket is used even if `SSH_AUTH_SOCK` points elsewhere.  `IdentityFile` points to a `.pub` file — `ssh` reads it to identify which key to request from the agent; the private key never leaves the agent.
+- `User` is only emitted when the vault item has a `ssh_user` custom field.
+- `IdentitiesOnly yes` prevents `ssh` from offering other keys to that host.
+- `IdentityAgent` ensures the correct agent socket is used even if `SSH_AUTH_SOCK` points elsewhere.
+- `IdentityFile` points to a `.pub` file — `ssh` reads it to identify which key to request from the agent; the private key never leaves the agent.
 
 ### Conflict resolution
 
@@ -132,22 +155,35 @@ The `config.d/` snippets use the original pattern in the `Host` line — the sub
 
 ## Using the SSH Agent
 
-### As the default agent
+### As the default agent (environment variable)
 
 ```bash
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/ssh/agent.sock"
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock"
 ```
 
-Add this to your shell profile to make rosec the default agent.
+Add this to your shell profile to make rosec the default agent for all SSH connections.
+
+### As the default agent (SSH config)
+
+Alternatively, you can set `IdentityAgent` globally in `~/.ssh/config` so that all connections use the rosec agent without needing the environment variable:
+
+```
+Host *
+    IdentityAgent /run/user/1000/rosec/agent.sock
+```
+
+Replace `1000` with your actual UID (or use `${XDG_RUNTIME_DIR}` if your SSH client supports it).  This approach is useful when you want rosec to handle *all* SSH connections, not just those with explicit `ssh_host` mappings.
+
+> **Note:** Place the `Host *` block **after** the `Include config.d/*` line so that per-host `IdentityFile` and `IdentitiesOnly` settings from the generated snippets take priority (SSH uses first-match-wins per parameter).
 
 ### Per-host via generated config
 
-When you use the `Include config.d/*` approach above, each generated snippet sets `IdentityAgent` explicitly, so `SSH_AUTH_SOCK` does not need to be set.
+When you use the `Include config.d/*` approach, each generated snippet sets `IdentityAgent` explicitly, so neither `SSH_AUTH_SOCK` nor a `Host *` block is needed for those hosts.
 
 ### Checking loaded keys
 
 ```bash
-SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/ssh/agent.sock" ssh-add -l
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock" ssh-add -l
 ```
 
 ### Signing confirmation
@@ -156,7 +192,7 @@ By default, signing operations are silent (like standard `ssh-agent`).  To requi
 
 | Field name | Field value |
 |---|---|
-| `ssh_confirm` | `true` |
+| `ssh_confirm` (or `ssh-confirm`) | `true` |
 
 When this field is present, rosec will prompt for confirmation each time a signing request arrives for that key.
 
@@ -183,7 +219,7 @@ This means SSH keys from Bitwarden PM, Bitwarden SM, 1Password (future), Proton 
 
 ### `config.d/` snippet not generated
 
-The snippet is only generated for items that have at least one `ssh_host` custom field.  Verify the field name is exactly `ssh_host` (not `SSH_Host` or `ssh-host`).
+The snippet is only generated for items that have at least one `ssh_host` (or `ssh-host`) custom field.  The field must be a **text** type (not hidden).  Verify the field name is exactly `ssh_host` or `ssh-host` (case-sensitive — `SSH_Host` will not work).
 
 ### Multiple items claiming the same host
 

@@ -13,6 +13,8 @@ use std::time::SystemTime;
 
 use rosec_ssh_agent::KeyEntry;
 
+use crate::naming::sanitise_filename;
+
 use crate::naming::normalise_item_name;
 
 /// A generated SSH config snippet.
@@ -28,7 +30,7 @@ pub struct ConfigSnippet {
 /// Build config snippets for all entries that have `ssh_hosts`.
 ///
 /// `agent_sock` is the resolved path to the rosec SSH agent socket (e.g.
-/// `/run/user/1000/rosec/ssh/agent.sock`).
+/// `/run/user/1000/rosec/agent.sock`).
 ///
 /// `keys_by_name_dir` is the resolved path to `keys/by-name/` in the FUSE
 /// mount (e.g. `/run/user/1000/rosec/ssh/keys/by-name`).
@@ -73,7 +75,8 @@ pub fn build_config_snippets(
             entry.item_name, revision_str
         );
 
-        let key_file = keys_by_name_dir.join(format!("{}.pub", entry.item_name));
+        let key_file =
+            keys_by_name_dir.join(format!("{}.pub", sanitise_filename(&entry.item_name)));
         let agent_sock_str = agent_sock.display().to_string();
         let key_file_str = key_file.display().to_string();
 
@@ -101,6 +104,9 @@ pub fn build_config_snippets(
         for host in owned_hosts {
             content.push('\n');
             content.push_str(&format!("Host {host}\n"));
+            if let Some(user) = &entry.ssh_user {
+                content.push_str(&format!("    User {user}\n"));
+            }
             content.push_str(&format!("    IdentityFile {key_file_str}\n"));
             content.push_str(&format!("    IdentityAgent {agent_sock_str}\n"));
             content.push_str("    IdentitiesOnly yes\n");

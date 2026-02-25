@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use zeroize::Zeroizing;
 
 use crate::api::{SyncCipher, SyncResponse};
@@ -378,6 +378,14 @@ impl VaultState {
 
         let cipher_type = CipherType::from_u8(sc.cipher_type.unwrap_or(0));
 
+        trace!(
+            cipher_id = %id,
+            raw_type = sc.cipher_type.unwrap_or(0),
+            has_ssh_key = sc.ssh_key.is_some(),
+            cipher_type = cipher_type.as_str(),
+            "decrypting cipher"
+        );
+
         // Select the right keys: org keys for org ciphers, vault keys otherwise.
         // If a cipher belongs to an org whose key we couldn't decrypt, skip it
         // with a clear error rather than silently trying (and failing MAC) with
@@ -448,6 +456,15 @@ impl VaultState {
                 .collect(),
             None => Vec::new(),
         };
+
+        if !fields.is_empty() {
+            trace!(
+                cipher_id = %id,
+                field_count = fields.len(),
+                field_names = ?fields.iter().map(|f| f.name.as_deref().unwrap_or("<none>")).collect::<Vec<_>>(),
+                "decrypted custom fields"
+            );
+        }
 
         Ok(DecryptedCipher {
             id,

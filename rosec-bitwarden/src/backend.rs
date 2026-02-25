@@ -17,7 +17,7 @@ use crate::crypto;
 use crate::error::BitwardenError;
 use crate::notifications::{self, NotificationsConfig};
 use crate::oauth_cred;
-use crate::vault::{CipherType, DecryptedCipher, VaultState};
+use crate::vault::{CipherType, DecryptedCipher, DecryptedField, VaultState};
 
 // ---------------------------------------------------------------------------
 // Attribute catalogue
@@ -673,17 +673,17 @@ impl BitwardenBackend {
             }
         }
 
-        // Custom fields as attributes — only text (type 0) and boolean (type 2)
+        // Custom fields as attributes — only text (type 0) and boolean (type 2).
         // Hidden fields (type 1) are sensitive and excluded from public attrs.
-        for field in &dc.fields {
-            if let (Some(name), Some(value)) = (&field.name, &field.value) {
-                match field.field_type {
-                    0 | 2 => {
-                        attributes.insert(format!("custom.{name}"), value.as_str().to_string());
-                    }
-                    _ => {} // hidden (1) and linked (3) excluded
-                }
-            }
+        //
+        // When a field name appears more than once, indexed keys are emitted:
+        //   custom.ssh-host   → first value (unindexed alias)
+        //   custom.ssh-host.0 → first value
+        //   custom.ssh-host.1 → second value
+        //   custom.ssh-host.2 → third value
+        // When a name appears only once, just the unindexed key is used.
+        for (key, value) in index_custom_fields(&dc.fields, &[0, 2]) {
+            attributes.insert(key, value);
         }
 
         let created = dc.creation_date.as_ref().and_then(|s| parse_iso8601(s));
@@ -746,6 +746,9 @@ impl BitwardenBackend {
     /// Populates:
     /// - `public`: non-sensitive attributes safe for D-Bus exposure
     /// - `secret_names`: names of sensitive attributes that have values
+    ///
+    /// Duplicate custom field names are suffixed: `custom.ssh-host`,
+    /// `custom.ssh-host.1`, `custom.ssh-host.2`, etc.
     fn build_item_attributes(backend_id: &str, dc: &DecryptedCipher) -> ItemAttributes {
         let mut public = Attributes::new();
         let mut secret_names = Vec::new();
@@ -866,30 +869,13 @@ impl BitwardenBackend {
         }
 
         // -- Custom fields --
-        for field in &dc.fields {
-            if let Some(name) = &field.name {
-                let attr_name = format!("custom.{name}");
-                match field.field_type {
-                    0 => {
-                        // Text fields are public
-                        if let Some(value) = &field.value {
-                            public.insert(attr_name, value.as_str().to_string());
-                        }
-                    }
-                    1 => {
-                        // Hidden fields are sensitive
-                        if field.value.is_some() {
-                            secret_names.push(attr_name);
-                        }
-                    }
-                    // Boolean (2) and Linked (3) fields: expose as public text
-                    _ => {
-                        if let Some(value) = &field.value {
-                            public.insert(attr_name, value.as_str().to_string());
-                        }
-                    }
-                }
-            }
+        // Public (text/boolean/linked) fields are indexed via `index_custom_fields`.
+        // Hidden fields go into `secret_names` with the same indexing scheme.
+        for (key, value) in index_custom_fields(&dc.fields, &[0, 2, 3]) {
+            public.insert(key, value);
+        }
+        for (key, _) in index_custom_fields(&dc.fields, &[1]) {
+            secret_names.push(key);
         }
 
         ItemAttributes {
@@ -913,10 +899,24 @@ impl BitwardenBackend {
         }
 
         // Custom fields (prefixed with "custom.")
+        // Supports suffixed names: "custom.ssh-host" returns the first field
+        // named "ssh-host", "custom.ssh-host.1" returns the second, etc.
         if let Some(custom_name) = attr.strip_prefix("custom.") {
+            // Check if the name has a numeric suffix (e.g. "ssh-host.2")
+            let (base_name, occurrence) = match custom_name.rsplit_once('.') {
+                Some((base, suffix)) => match suffix.parse::<usize>() {
+                    Ok(idx) => (base, idx),
+                    Err(_) => (custom_name, 0),
+                },
+                None => (custom_name, 0),
+            };
+            let mut count = 0usize;
             for field in &dc.fields {
-                if field.name.as_deref() == Some(custom_name) {
-                    return field.value.as_ref().map(to_sb);
+                if field.name.as_deref() == Some(base_name) {
+                    if count == occurrence {
+                        return field.value.as_ref().map(to_sb);
+                    }
+                    count += 1;
                 }
             }
             return None;
@@ -1081,20 +1081,35 @@ impl BitwardenBackend {
             .as_ref()
             .and_then(|sk| sk.fingerprint.clone());
 
-        // Extract custom.ssh_host fields (all of them — duplicates preserved).
+        // Extract custom.ssh_host / custom.ssh-host fields.
+        // Multiple fields are supported, and each value may contain
+        // newline-separated host patterns (equivalent to multiple fields).
         let ssh_hosts: Vec<String> = dc
             .fields
             .iter()
-            .filter(|f| f.name.as_deref() == Some("ssh_host"))
-            .filter_map(|f| f.value.as_ref().map(|v| v.as_str().to_string()))
+            .filter(|f| matches!(f.name.as_deref(), Some("ssh_host" | "ssh-host")))
+            .filter_map(|f| f.value.as_ref())
+            .flat_map(|v| v.as_str().lines())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
             .collect();
 
-        // Extract custom.ssh_confirm flag.
+        // Extract custom.ssh_user / custom.ssh-user field (first wins).
+        let ssh_user = dc
+            .fields
+            .iter()
+            .filter(|f| matches!(f.name.as_deref(), Some("ssh_user" | "ssh-user")))
+            .filter_map(|f| f.value.as_ref())
+            .map(|v| v.as_str().trim().to_string())
+            .find(|s| !s.is_empty());
+
+        // Extract custom.ssh_confirm / custom.ssh-confirm flag.
         let require_confirm = dc
             .fields
             .iter()
             .any(|f| {
-                f.name.as_deref() == Some("ssh_confirm")
+                matches!(f.name.as_deref(), Some("ssh_confirm" | "ssh-confirm"))
                     && f.value.as_ref().map(|v| v.as_str()) == Some("true")
             });
 
@@ -1110,6 +1125,7 @@ impl BitwardenBackend {
             public_key_openssh,
             fingerprint,
             ssh_hosts,
+            ssh_user,
             require_confirm,
             revision_date,
         })
@@ -1467,6 +1483,59 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
             .map(|pem| SshPrivateKeyMaterial { pem })
             .ok_or(BackendError::NotFound)
     }
+}
+
+/// Index custom fields for attribute maps.
+///
+/// Returns `(key, value)` pairs with proper indexing for duplicate names:
+/// - Single occurrence: just `custom.<name>` → value
+/// - Multiple occurrences:
+///   - `custom.<name>` → first value  (unindexed alias)
+///   - `custom.<name>.0` → first value
+///   - `custom.<name>.1` → second value
+///   - `custom.<name>.2` → third value
+///
+/// `allowed_types` filters which `field_type` values to include
+/// (0 = text, 1 = hidden, 2 = boolean, 3 = linked).
+fn index_custom_fields(
+    fields: &[DecryptedField],
+    allowed_types: &[u8],
+) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+
+    // Group field values by name, preserving order within each name.
+    let mut groups: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for field in fields {
+        if !allowed_types.contains(&field.field_type) {
+            continue;
+        }
+        if let (Some(name), Some(value)) = (&field.name, &field.value) {
+            let name_str = name.as_str();
+            let entry = groups.entry(name_str).or_default();
+            if entry.is_empty() {
+                order.push(name_str);
+            }
+            entry.push(value.as_str());
+        }
+    }
+
+    let mut result = Vec::new();
+    for name in order {
+        let values = &groups[name];
+        let base_key = format!("custom.{name}");
+        if values.len() == 1 {
+            // Single occurrence — unindexed key only.
+            result.push((base_key, values[0].to_string()));
+        } else {
+            // Multiple occurrences — unindexed alias + indexed keys.
+            result.push((base_key.clone(), values[0].to_string()));
+            for (i, val) in values.iter().enumerate() {
+                result.push((format!("{base_key}.{i}"), (*val).to_string()));
+            }
+        }
+    }
+    result
 }
 
 /// Parse an ISO 8601 timestamp string to SystemTime.

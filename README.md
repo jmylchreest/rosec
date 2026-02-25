@@ -135,7 +135,7 @@ fusermount3 -uz "$XDG_RUNTIME_DIR/rosec/ssh"
 
 ## SSH Agent
 
-`rosecd` also runs a built-in SSH agent, exposing SSH keys from your unlocked vault over a Unix socket at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`.
+`rosecd` also runs a built-in SSH agent, exposing SSH keys from your unlocked vault over a Unix socket at `$XDG_RUNTIME_DIR/rosec/agent.sock`.
 
 A FUSE filesystem is mounted at `$XDG_RUNTIME_DIR/rosec/ssh/` and exposes:
 

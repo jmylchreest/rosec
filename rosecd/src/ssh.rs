@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 pub struct SshManager {
     store: Arc<RwLock<KeyStore>>,
     fuse_handle: MountHandle,
-    /// Absolute path to the Unix socket (`$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`).
+    /// Absolute path to the Unix socket (`$XDG_RUNTIME_DIR/rosec/agent.sock`).
     agent_sock: PathBuf,
 }
 
@@ -47,7 +47,7 @@ impl std::fmt::Debug for SshManager {
 impl SshManager {
     /// Start the SSH agent and FUSE filesystem.
     ///
-    /// The agent socket is placed at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`;
+    /// The agent socket is placed at `$XDG_RUNTIME_DIR/rosec/agent.sock`;
     /// the FUSE mount at `$XDG_RUNTIME_DIR/rosec/ssh/`.
     ///
     /// Returns `None` and logs a warning if `XDG_RUNTIME_DIR` is unset or the
@@ -63,9 +63,11 @@ impl SshManager {
         };
 
         let ssh_dir = runtime_dir.join("rosec").join("ssh");
-        let agent_sock = ssh_dir.join("agent.sock");
+        // Agent socket lives OUTSIDE the FUSE mountpoint (one level up) so it
+        // can be bound on the real filesystem, not through FUSE.
+        let agent_sock = runtime_dir.join("rosec").join("agent.sock");
 
-        // Remove a stale socket from a previous run.
+        // Remove stale socket from a previous run.
         if agent_sock.exists()
             && let Err(e) = std::fs::remove_file(&agent_sock)
         {
@@ -93,7 +95,7 @@ impl SshManager {
             });
         }
 
-        info!(
+        debug!(
             sock = %agent_sock.display(),
             mount = %ssh_dir.display(),
             "SSH agent started"
@@ -180,6 +182,7 @@ impl SshManager {
                     meta.item_name.clone(),
                     backend_id.clone(),
                     meta.ssh_hosts.clone(),
+                    meta.ssh_user.clone(),
                     meta.require_confirm,
                     revision_date,
                 ) {

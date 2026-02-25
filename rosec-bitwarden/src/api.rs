@@ -7,11 +7,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KdfParams};
 use crate::error::BitwardenError;
+
+/// Client version advertised to the Bitwarden server.
+///
+/// The server's `SyncController.FilterSSHKeys` strips SSH-key ciphers
+/// (type 5) for clients older than `SSHKeyCipherMinimumVersion`
+/// (`2024.12.0`).  We must send at least that version so the server
+/// includes them in sync responses.
+const CLIENT_VERSION: &str = "2025.1.0";
 
 /// API server URLs.
 #[derive(Debug, Clone)]
@@ -102,6 +110,7 @@ impl ApiClient {
             .http
             .post(&url)
             .header("Bitwarden-Client-Name", "cli")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION)
             .header("Device-Type", "8")
             .json(&body)
             .send()
@@ -171,6 +180,7 @@ impl ApiClient {
             .http
             .post(&url)
             .header("Bitwarden-Client-Name", "cli")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION)
             .header("Device-Type", "8")
             .header("auth-email", auth_email)
             .form(&form)
@@ -251,6 +261,7 @@ impl ApiClient {
             .http
             .post(&url)
             .header("Bitwarden-Client-Name", "cli")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION)
             .header("Device-Type", "8")
             .header("auth-email", auth_email)
             .form(&form)
@@ -286,6 +297,7 @@ impl ApiClient {
             .http
             .post(&url)
             .header("Bitwarden-Client-Name", "cli")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION)
             .header("Device-Type", "8")
             .form(&form)
             .send()
@@ -315,6 +327,7 @@ impl ApiClient {
             .get(&url)
             .bearer_auth(access_token)
             .header("Bitwarden-Client-Name", "cli")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION)
             .header("Device-Type", "8")
             .send()
             .await?;
@@ -331,7 +344,33 @@ impl ApiClient {
             )));
         }
 
-        let sync: SyncResponse = resp.json().await.map_err(|e| {
+        let body = resp.text().await.map_err(|e| {
+            BitwardenError::Api(format!("sync response read: {e}"))
+        })?;
+
+        // Log raw cipher types from the JSON before deserialization so we can
+        // diagnose mapping issues.  This uses a lightweight parse to extract
+        // only the type/id/name fields — no secrets are logged.
+        if tracing::enabled!(tracing::Level::TRACE)
+            && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(ciphers) = raw.get("ciphers").or_else(|| raw.get("Ciphers"))
+            && let Some(arr) = ciphers.as_array()
+        {
+            for c in arr {
+                let id = c.get("id").or_else(|| c.get("Id"));
+                let ctype = c.get("type").or_else(|| c.get("Type"));
+                let ssh_key_val = c.get("sshKey").or_else(|| c.get("SshKey")).or_else(|| c.get("SSHKey"));
+                let has_ssh = ssh_key_val.is_some();
+                trace!(
+                    cipher_id = ?id,
+                    cipher_type = ?ctype,
+                    has_ssh_key_obj = has_ssh,
+                    "raw sync cipher"
+                );
+            }
+        }
+
+        let sync: SyncResponse = serde_json::from_str(&body).map_err(|e| {
             warn!("sync response parse error: {e}");
             BitwardenError::Api(format!("sync response parse: {e}"))
         })?;
@@ -605,7 +644,7 @@ pub struct SyncCipher {
     pub identity: Option<SyncIdentity>,
     #[serde(alias = "SecureNote", alias = "secureNote")]
     pub secure_note: Option<serde_json::Value>,
-    #[serde(alias = "SshKey", alias = "sshKey")]
+    #[serde(alias = "SshKey", alias = "sshKey", alias = "SSHKey")]
     pub ssh_key: Option<SyncSshKey>,
     #[serde(alias = "Fields", default)]
     pub fields: Option<Vec<SyncField>>,

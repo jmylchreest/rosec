@@ -66,6 +66,35 @@ pub fn normalise_item_name(name: &str) -> String {
     }
 }
 
+/// Sanitise a string for use as a FUSE filename.
+///
+/// Replaces characters that are illegal or problematic in filenames:
+/// `/` (path separator), `\0` (C string terminator), and `:` (can
+/// confuse shell tab-completion and some tools).  Whitespace around
+/// the result is trimmed and interior runs of whitespace are collapsed.
+///
+/// This is a *light* sanitiser — it preserves case, hyphens, dots, and
+/// most punctuation.  Use [`normalise_item_name`] when a fully-normalised
+/// slug is needed (e.g. `config.d/` snippet filenames).
+///
+/// # Examples
+/// ```
+/// # use rosec_fuse::naming::sanitise_filename;
+/// assert_eq!(sanitise_filename("home-lab: nuc/proxmox"), "home-lab_ nuc_proxmox");
+/// assert_eq!(sanitise_filename("SHA256:/t6lSY/foo"), "SHA256__t6lSY_foo");
+/// ```
+pub fn sanitise_filename(s: &str) -> String {
+    let replaced: String = s
+        .chars()
+        .map(|c| match c {
+            '/' | '\0' | ':' => '_',
+            _ => c,
+        })
+        .collect();
+    // Collapse interior whitespace runs and trim.
+    replaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Normalise an OpenSSH host pattern for use as a filename.
 ///
 /// Substitutions:

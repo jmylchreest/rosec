@@ -29,7 +29,12 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,fuser=warn,ssh_agent_lib=warn".into()),
+        )
+        .init();
 
     // Security hardening: disable core dumps, lock memory pages.
     // Called immediately after logging is initialised so warnings are visible,

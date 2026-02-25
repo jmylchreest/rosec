@@ -37,9 +37,13 @@ pub struct KeyEntry {
     /// OpenSSH wire-format public key (the `authorized_keys` line).
     pub public_key_openssh: String,
 
-    /// Host patterns from `custom.ssh_host` fields on this vault item.
-    /// Multiple patterns are supported (one per `ssh_host` field).
+    /// Host patterns from `custom.ssh_host` / `custom.ssh-host` fields.
+    /// Multiple patterns are supported (one per field, or newline-separated).
     pub ssh_hosts: Vec<String>,
+
+    /// SSH username from `custom.ssh_user` / `custom.ssh-user` field.
+    /// Emitted as `User <value>` in generated SSH config snippets.
+    pub ssh_user: Option<String>,
 
     /// Whether to require interactive confirmation before signing.
     /// Set when the vault item has `custom.ssh_confirm = "true"`.
@@ -137,6 +141,7 @@ pub fn build_entry(
     item_name: String,
     backend_id: String,
     ssh_hosts: Vec<String>,
+    ssh_user: Option<String>,
     require_confirm: bool,
     revision_date: Option<SystemTime>,
 ) -> Option<KeyEntry> {
@@ -151,6 +156,7 @@ pub fn build_entry(
         fingerprint,
         public_key_openssh,
         ssh_hosts,
+        ssh_user,
         require_confirm,
         revision_date,
     })

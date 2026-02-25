@@ -26,15 +26,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use fuser::{
-    BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, Generation,
-    INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request, SessionACL,
+    AccessFlags, BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
+    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request, SessionACL,
 };
 use rosec_ssh_agent::KeyEntry;
 use tracing::{debug, warn};
 
 use crate::config::build_config_snippets;
-use crate::naming::normalise_host_pattern;
+use crate::naming::{normalise_host_pattern, sanitise_filename};
 
 // Well-known inode numbers for static directories
 const INO_ROOT: u64 = 1;
@@ -126,7 +126,7 @@ impl Snapshot {
             let pubkey = entry.public_key_openssh.as_bytes().to_vec();
 
             // by-name/<item-name>.pub
-            let name_file = format!("{}.pub", entry.item_name);
+            let name_file = format!("{}.pub", sanitise_filename(&entry.item_name));
             let ino_name = alloc_ino();
             snap.files.insert(
                 ino_name,
@@ -139,8 +139,8 @@ impl Snapshot {
                 .expect("by-name initialised")
                 .push((name_file, ino_name, false));
 
-            // by-fingerprint/<fp>.pub — replace ':' with '_'
-            let fp_file = format!("{}.pub", entry.fingerprint.replace(':', "_"));
+            // by-fingerprint/<fp>.pub — sanitise (replaces ':', '/' etc.)
+            let fp_file = format!("{}.pub", sanitise_filename(&entry.fingerprint));
             let ino_fp = alloc_ino();
             snap.files.insert(
                 ino_fp,
@@ -332,6 +332,53 @@ impl Filesystem for SshFuse {
         }
     }
 
+    fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        // Permission checks are handled by the kernel (SessionACL::Owner
+        // restricts to our UID), so we only need to verify the inode exists.
+        let snap = match self.snapshot.read() {
+            Ok(g) => g,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        match snap.file_attr(ino.0) {
+            None => reply.error(Errno::ENOENT),
+            Some(_) => reply.ok(),
+        }
+    }
+
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        // Read-only filesystem — just check the inode exists.
+        let snap = match self.snapshot.read() {
+            Ok(g) => g,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if snap.files.contains_key(&ino.0) {
+            reply.opened(FileHandle(0), FopenFlags::empty());
+        } else {
+            reply.error(Errno::ENOENT);
+        }
+    }
+
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let snap = match self.snapshot.read() {
+            Ok(g) => g,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if snap.is_dir(ino.0) {
+            reply.opened(FileHandle(0), FopenFlags::empty());
+        } else {
+            reply.error(Errno::ENOENT);
+        }
+    }
+
     fn read(
         &self,
         _req: &Request,
@@ -408,6 +455,20 @@ impl Filesystem for SshFuse {
             }
         }
         reply.ok();
+    }
+
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        let snap = match self.snapshot.read() {
+            Ok(g) => g,
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        let files = snap.files.len() as u64;
+        // bsize, frsize=4096; blocks=0 (virtual); bfree/bavail=0 (read-only);
+        // files=count; ffree=0; namelen=255
+        reply.statfs(0, 0, 0, files, 0, 4096, 255, 0);
     }
 }
 
@@ -500,9 +561,23 @@ impl Filesystem for ArcFuse {
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         self.0.lookup(req, parent, name, reply);
     }
+
     fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
         self.0.getattr(req, ino, fh, reply);
     }
+
+    fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        self.0.access(req, ino, mask, reply);
+    }
+
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        self.0.open(req, ino, flags, reply);
+    }
+
+    fn opendir(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        self.0.opendir(req, ino, flags, reply);
+    }
+
     fn read(
         &self,
         req: &Request,
@@ -517,6 +592,7 @@ impl Filesystem for ArcFuse {
         self.0
             .read(req, ino, fh, offset, size, flags, lock_owner, reply);
     }
+
     fn readdir(
         &self,
         req: &Request,
@@ -526,5 +602,9 @@ impl Filesystem for ArcFuse {
         reply: ReplyDirectory,
     ) {
         self.0.readdir(req, ino, fh, offset, reply);
+    }
+
+    fn statfs(&self, req: &Request, ino: INodeNo, reply: ReplyStatfs) {
+        self.0.statfs(req, ino, reply);
     }
 }

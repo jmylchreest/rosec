@@ -303,8 +303,12 @@ pub struct SshKeyMeta {
     /// SHA-256 fingerprint string (e.g. `"SHA256:abc123…"`), if known.
     pub fingerprint: Option<String>,
 
-    /// `Host` patterns from `custom.ssh_host` fields on this vault item.
+    /// `Host` patterns from `custom.ssh_host` / `custom.ssh-host` fields.
     pub ssh_hosts: Vec<String>,
+
+    /// SSH username from `custom.ssh_user` / `custom.ssh-user` field.
+    /// Emitted as `User <value>` in generated SSH config snippets.
+    pub ssh_user: Option<String>,
 
     /// Whether to require interactive confirmation before signing.
     /// Set when the vault item has `custom.ssh_confirm = "true"`.
