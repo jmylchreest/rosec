@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use rosec_core::{
-    AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendError, BackendStatus,
-    ItemAttributes, RegistrationInfo, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial, UnlockInput,
-    VaultBackend, VaultItem, VaultItemMeta,
+    AttributeDescriptor, Attributes, AuthField, AuthFieldKind, BackendCallbacks, BackendError,
+    BackendStatus, ItemAttributes, RegistrationInfo, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial,
+    UnlockInput, VaultBackend, VaultItem, VaultItemMeta,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -333,9 +333,14 @@ pub struct BitwardenBackend {
     /// Active notifications task, if any.  `None` when locked or
     /// `realtime_sync = false`.  Replaced on each unlock.
     notifications: Mutex<Option<NotificationsHandle>>,
-    /// Callbacks set after construction (once `ServiceState` is available).
-    on_sync: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
-    on_lock: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
+    /// Lifecycle event callbacks registered by `rosecd` after construction.
+    callbacks: std::sync::RwLock<BackendCallbacks>,
+    /// SignalR nudge callbacks: fired when the server pushes a sync/lock event.
+    /// These are *not* the same as `BackendCallbacks` — they trigger external
+    /// actions (ServiceState sync / auto-lock) rather than reporting backend
+    /// state changes.
+    on_sync_nudge: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
+    on_lock_nudge: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
 }
 
 /// Internal authenticated state.
@@ -396,22 +401,32 @@ impl BitwardenBackend {
             api,
             state: Mutex::new(None),
             notifications: Mutex::new(None),
-            on_sync: std::sync::Mutex::new(None),
-            on_lock: std::sync::Mutex::new(None),
+            callbacks: std::sync::RwLock::new(BackendCallbacks::default()),
+            on_sync_nudge: std::sync::Mutex::new(None),
+            on_lock_nudge: std::sync::Mutex::new(None),
         })
     }
 
-    /// Set the callbacks used by the real-time notifications task.
+    /// Set the SignalR nudge callbacks used by the real-time notifications task.
+    ///
+    /// - `on_sync_nudge` — called when the Bitwarden server pushes a cipher-update
+    ///   event; typically calls `ServiceState::try_sync_backend`.
+    /// - `on_lock_nudge` — called on a `LogOut` event; typically calls
+    ///   `ServiceState::auto_lock`.
+    ///
+    /// These are separate from the `BackendCallbacks` registered via
+    /// `set_event_callbacks` on the `VaultBackend` trait.  The nudge callbacks
+    /// trigger *external* actions; the event callbacks report *backend* state changes.
     ///
     /// Must be called after construction, once `ServiceState` is available.
-    /// Safe to call even when `realtime_sync = false` (no-op in that case).
-    pub fn set_realtime_callbacks(
+    /// Safe to call even when `realtime_sync = false` (stored but never used).
+    pub fn set_signalr_callbacks(
         &self,
-        on_sync: Arc<dyn Fn() + Send + Sync + 'static>,
-        on_lock: Arc<dyn Fn() + Send + Sync + 'static>,
+        on_sync_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
+        on_lock_nudge: Arc<dyn Fn() + Send + Sync + 'static>,
     ) {
-        *self.on_sync.lock().expect("on_sync mutex poisoned") = Some(on_sync);
-        *self.on_lock.lock().expect("on_lock mutex poisoned") = Some(on_lock);
+        *self.on_sync_nudge.lock().expect("on_sync_nudge mutex poisoned") = Some(on_sync_nudge);
+        *self.on_lock_nudge.lock().expect("on_lock_nudge mutex poisoned") = Some(on_lock_nudge);
     }
 
     /// Perform the full authentication + sync flow.
@@ -1123,6 +1138,10 @@ impl VaultBackend for BitwardenBackend {
         "bitwarden"
     }
 
+    fn set_event_callbacks(&self, callbacks: BackendCallbacks) {
+        *self.callbacks.write().expect("callbacks lock poisoned") = callbacks;
+    }
+
     fn password_field(&self) -> AuthField {
         AuthField {
             id: "password",
@@ -1203,22 +1222,22 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let notifications_handle = if self.config.realtime_sync {
             let access_token = auth_state.access_token.clone();
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
-            let on_sync = self
-                .on_sync
+            let on_sync_nudge = self
+                .on_sync_nudge
                 .lock()
-                .expect("on_sync mutex poisoned")
+                .expect("on_sync_nudge mutex poisoned")
                 .clone();
-            let on_lock = self
-                .on_lock
+            let on_lock_nudge = self
+                .on_lock_nudge
                 .lock()
-                .expect("on_lock mutex poisoned")
+                .expect("on_lock_nudge mutex poisoned")
                 .clone();
             let task = notifications::start(NotificationsConfig {
                 notifications_url: self.api.notifications_url().to_string(),
                 access_token,
                 backend_id: self.config.id.clone(),
-                on_sync,
-                on_lock,
+                on_sync_nudge,
+                on_lock_nudge,
                 cancel_rx,
             });
             Some(NotificationsHandle {
@@ -1238,6 +1257,18 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         drop(notif_guard);
 
         info!(ciphers, "Bitwarden vault unlocked");
+
+        // Fire on_unlocked callback.
+        if let Some(f) = self
+            .callbacks
+            .read()
+            .expect("callbacks lock poisoned")
+            .on_unlocked
+            .clone()
+        {
+            f();
+        }
+
         Ok(())
     }
 
@@ -1250,15 +1281,72 @@ Find it at: Bitwarden web vault → Account Settings → Security → Keys → V
         let mut guard = self.state.lock().await;
         *guard = None;
         info!("Bitwarden vault locked");
+
+        // Fire on_locked callback.
+        if let Some(f) = self
+            .callbacks
+            .read()
+            .expect("callbacks lock poisoned")
+            .on_locked
+            .clone()
+        {
+            f();
+        }
+
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), BackendError> {
         let mut guard = self.state.lock().await;
         let state = guard.as_mut().ok_or(BackendError::Locked)?;
-        Self::resync(state, &self.api)
+
+        // Snapshot cipher fingerprints before sync to detect material changes.
+        let before: std::collections::HashSet<(String, Option<String>)> = state
+            .vault
+            .ciphers()
+            .iter()
+            .map(|c| (c.id.clone(), c.revision_date.clone()))
+            .collect();
+
+        let result = Self::resync(state, &self.api)
             .await
-            .map_err(BackendError::from)
+            .map_err(BackendError::from);
+
+        // Read callbacks before dropping the guard (we need `state` above).
+        let (on_sync_succeeded, on_sync_failed) = {
+            let cb = self.callbacks.read().expect("callbacks lock poisoned");
+            (cb.on_sync_succeeded.clone(), cb.on_sync_failed.clone())
+        };
+        drop(guard);
+
+        match &result {
+            Ok(()) => {
+                if let Some(f) = on_sync_succeeded {
+                    // Re-acquire read lock to get post-sync ciphers.
+                    let guard = self.state.lock().await;
+                    let changed = if let Some(state) = guard.as_ref() {
+                        let after: std::collections::HashSet<(String, Option<String>)> = state
+                            .vault
+                            .ciphers()
+                            .iter()
+                            .map(|c| (c.id.clone(), c.revision_date.clone()))
+                            .collect();
+                        after != before
+                    } else {
+                        false
+                    };
+                    drop(guard);
+                    f(changed);
+                }
+            }
+            Err(_) => {
+                if let Some(f) = on_sync_failed {
+                    f();
+                }
+            }
+        }
+
+        result
     }
 
     async fn list_items(&self) -> Result<Vec<VaultItemMeta>, BackendError> {

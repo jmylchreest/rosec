@@ -123,44 +123,10 @@ async fn run() -> Result<()> {
         });
     }
 
-    // Wire up real-time notification callbacks for each Bitwarden backend.
-    // Must be done after `state` is created because the callbacks need to
-    // call back into `ServiceState`.
-    for backend in state.backends_ordered() {
-        // Downcast to BitwardenBackend — only that type supports set_realtime_callbacks.
-        if let Some(bw) = backend
-            .as_any()
-            .downcast_ref::<rosec_bitwarden::BitwardenBackend>()
-        {
-            let backend_id = bw.id().to_string();
-            let sync_state = Arc::clone(&state);
-            let lock_state = Arc::clone(&state);
-            let lock_id = backend_id.clone();
-
-            bw.set_realtime_callbacks(
-                Arc::new(move || {
-                    let s = Arc::clone(&sync_state);
-                    let id = backend_id.clone();
-                    tokio::spawn(async move {
-                        match s.try_sync_backend(&id).await {
-                            Ok(true) => tracing::debug!(backend = %id, "notifications: sync triggered"),
-                            Ok(false) => tracing::debug!(backend = %id, "notifications: sync already in progress"),
-                            Err(e) => tracing::debug!(backend = %id, error = %e, "notifications: sync trigger failed"),
-                        }
-                    });
-                }),
-                Arc::new(move || {
-                    let s = Arc::clone(&lock_state);
-                    let id = lock_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = s.auto_lock().await {
-                            tracing::warn!(backend = %id, error = %e, "notifications: auto-lock failed");
-                        }
-                    });
-                }),
-            );
-        }
-    }
+    // Register lifecycle event callbacks on every backend via the VaultBackend
+    // trait, and SignalR nudge callbacks on Bitwarden backends specifically.
+    // Must be done after `state` and `ssh_manager` are created.
+    wire_backend_callbacks(&state, &ssh_manager);
 
     tracing::info!("rosecd ready on session bus");
 
@@ -178,7 +144,6 @@ async fn run() -> Result<()> {
     }
 
     let cache_rebuild_state = Arc::clone(&state);
-    let cache_rebuild_ssh = ssh_manager.clone();
     tokio::spawn(async move {
         let mut consecutive_failures = 0u32;
         loop {
@@ -265,11 +230,8 @@ async fn run() -> Result<()> {
                     Ok(entries) => {
                         tracing::debug!("background cache rebuild: {} items", entries.len());
                         consecutive_failures = 0;
-                        // Refresh SSH keys after a successful cache rebuild.
-                        if let Some(ref sm) = cache_rebuild_ssh {
-                            let backends = cache_rebuild_state.backends_ordered();
-                            sm.rebuild(&backends).await;
-                        }
+                        // SSH key rebuilds are driven by on_sync_succeeded callbacks;
+                        // no explicit rebuild needed here.
                     }
                     Err(err) => {
                         let err_str = err.to_string();
@@ -295,11 +257,8 @@ async fn run() -> Result<()> {
                 }
             } else {
                 consecutive_failures = 0;
-                // Sync happened — rebuild SSH keys from the latest vault state.
-                if let Some(ref sm) = cache_rebuild_ssh {
-                    let backends = cache_rebuild_state.backends_ordered();
-                    sm.rebuild(&backends).await;
-                }
+                // SSH key rebuilds are driven by on_sync_succeeded callbacks;
+                // no explicit rebuild needed here.
             }
         }
     });
@@ -619,6 +578,108 @@ async fn poll_lock_stream(
     }
 }
 
+/// Register lifecycle event callbacks on every backend, and SignalR nudge
+/// callbacks on Bitwarden backends specifically.
+///
+/// Called once after `state` and `ssh_manager` are created, and again after
+/// each hot-reload that adds a new backend.
+fn wire_backend_callbacks(
+    state: &Arc<rosec_secret_service::ServiceState>,
+    ssh_manager: &Option<Arc<ssh::SshManager>>,
+) {
+    use rosec_core::BackendCallbacks;
+
+    for backend in state.backends_ordered() {
+        let backend_id = backend.id().to_string();
+
+        // --- Lifecycle event callbacks (all backends via trait) ---
+
+        let ssh_unlocked = ssh_manager.clone();
+        let ssh_synced = ssh_manager.clone();
+        let ssh_locked = ssh_manager.clone();
+        let backends_for_unlock = Arc::clone(state);
+        let backends_for_sync = Arc::clone(state);
+        let locked_id = backend_id.clone();
+        let synced_id = backend_id.clone();
+
+        let callbacks = BackendCallbacks {
+            on_unlocked: Some(Arc::new(move || {
+                // Trigger an immediate SSH key rebuild so keys appear as soon
+                // as the vault is unlocked — no need to wait for the next
+                // background timer tick.
+                let sm = ssh_unlocked.clone();
+                let s = Arc::clone(&backends_for_unlock);
+                tokio::spawn(async move {
+                    if let Some(ref sm) = sm {
+                        let backends = s.backends_ordered();
+                        sm.rebuild(&backends).await;
+                    }
+                });
+            })),
+            on_locked: Some(Arc::new(move || {
+                // Evict only this backend's keys; other backends stay available.
+                if let Some(ref sm) = ssh_locked {
+                    sm.remove_backend(&locked_id);
+                }
+            })),
+            on_sync_succeeded: Some(Arc::new(move |changed| {
+                if !changed {
+                    return; // Nothing new — skip the rebuild.
+                }
+                let sm = ssh_synced.clone();
+                let s = Arc::clone(&backends_for_sync);
+                let id = synced_id.clone();
+                tokio::spawn(async move {
+                    if let Some(ref sm) = sm {
+                        let backends = s.backends_ordered();
+                        tracing::debug!(backend = %id, "sync changed vault — rebuilding SSH keys");
+                        sm.rebuild(&backends).await;
+                    }
+                });
+            })),
+            on_sync_failed: Some(Arc::new(move || {
+                tracing::debug!(backend = %backend_id, "sync failed (SSH keys unchanged)");
+            })),
+        };
+
+        backend.set_event_callbacks(callbacks);
+
+        // --- SignalR nudge callbacks (Bitwarden-PM only, via downcast) ---
+        if let Some(bw) = backend
+            .as_any()
+            .downcast_ref::<rosec_bitwarden::BitwardenBackend>()
+        {
+            let sync_state = Arc::clone(state);
+            let lock_state = Arc::clone(state);
+            let bw_id = bw.id().to_string();
+            let lock_id = bw_id.clone();
+
+            bw.set_signalr_callbacks(
+                Arc::new(move || {
+                    let s = Arc::clone(&sync_state);
+                    let id = bw_id.clone();
+                    tokio::spawn(async move {
+                        match s.try_sync_backend(&id).await {
+                            Ok(true) => tracing::debug!(backend = %id, "SignalR: sync triggered"),
+                            Ok(false) => tracing::debug!(backend = %id, "SignalR: sync already in progress"),
+                            Err(e) => tracing::debug!(backend = %id, error = %e, "SignalR: sync trigger failed"),
+                        }
+                    });
+                }),
+                Arc::new(move || {
+                    let s = Arc::clone(&lock_state);
+                    let id = lock_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = s.auto_lock().await {
+                            tracing::warn!(backend = %id, error = %e, "SignalR: auto-lock failed");
+                        }
+                    });
+                }),
+            );
+        }
+    }
+}
+
 /// Build all configured backends from the config, in order.
 ///
 /// Delegates to `build_single_backend` for each entry so startup and
@@ -852,14 +913,10 @@ async fn config_watcher(
             }
         }
 
-        // If new backends were added, schedule an SSH key rebuild so their
-        // keys become available once they are unlocked on the next sync cycle.
-        // (The rebuild itself skips locked backends gracefully.)
-        if added_any
-            && let Some(ref sm) = ssh_manager
-        {
-            let backends = state.backends_ordered();
-            sm.rebuild(&backends).await;
+        // Re-wire callbacks after hot-reload so new backends get their event
+        // callbacks and SignalR nudge callbacks registered immediately.
+        if added_any {
+            wire_backend_callbacks(&state, &ssh_manager);
         }
 
         // ── Hot-reload non-backend config sections ─────────────────────────

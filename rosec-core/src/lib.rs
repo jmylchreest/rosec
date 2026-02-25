@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -331,6 +332,54 @@ impl std::fmt::Debug for SshPrivateKeyMaterial {
 }
 
 // ---------------------------------------------------------------------------
+// Backend event callbacks
+// ---------------------------------------------------------------------------
+
+/// Callback type alias: a cheaply-cloneable, send-safe, zero-argument closure.
+pub type CallbackFn = Arc<dyn Fn() + Send + Sync + 'static>;
+
+/// Optional callback fired when a sync completes.
+///
+/// `changed` is `true` when the sync produced a material change to vault
+/// contents (ciphers added, removed, or modified), `false` when the remote
+/// was checked but nothing differed.
+pub type SyncSucceededFn = Arc<dyn Fn(bool) + Send + Sync + 'static>;
+
+/// Callbacks registered by `rosecd` on each backend after construction.
+///
+/// All fields are `Option` — backends fire only the callbacks that are set.
+/// The default implementation of [`VaultBackend::set_event_callbacks`] is a
+/// no-op, so backends that do not yet support the callback system compile and
+/// run safely.
+#[derive(Clone, Default)]
+pub struct BackendCallbacks {
+    /// Fired immediately after a successful unlock.
+    pub on_unlocked: Option<CallbackFn>,
+    /// Fired immediately after a successful lock.
+    pub on_locked: Option<CallbackFn>,
+    /// Fired after a sync completes successfully.
+    ///
+    /// `changed` is `true` when the vault contents changed materially
+    /// (ciphers added / removed / modified); `false` when the sync ran
+    /// but found nothing new.  Callers typically rebuild SSH keys only
+    /// when `changed == true`.
+    pub on_sync_succeeded: Option<SyncSucceededFn>,
+    /// Fired after a sync attempt fails (network error, auth error, etc.).
+    pub on_sync_failed: Option<CallbackFn>,
+}
+
+impl std::fmt::Debug for BackendCallbacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackendCallbacks")
+            .field("on_unlocked", &self.on_unlocked.is_some())
+            .field("on_locked", &self.on_locked.is_some())
+            .field("on_sync_succeeded", &self.on_sync_succeeded.is_some())
+            .field("on_sync_failed", &self.on_sync_failed.is_some())
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
 pub trait VaultBackend: Send + Sync {
@@ -349,6 +398,22 @@ pub trait VaultBackend: Send + Sync {
     ///
     /// Used by `rosec backend list` to show what kind of backend each entry is.
     fn kind(&self) -> &str;
+
+    /// Register lifecycle event callbacks on this backend.
+    ///
+    /// Called once by `rosecd` after construction, before any unlock is
+    /// attempted.  Backends store the callbacks and fire them at the
+    /// appropriate points:
+    ///
+    /// - `on_unlocked` — after a successful [`unlock`][VaultBackend::unlock]
+    /// - `on_locked`   — after a successful [`lock`][VaultBackend::lock]
+    /// - `on_sync_succeeded(changed)` — after a successful [`sync`][VaultBackend::sync];
+    ///   `changed` is `true` iff vault contents differ from before the sync
+    /// - `on_sync_failed` — after a failed sync attempt
+    ///
+    /// The default is a no-op.  Backends that do not implement this method
+    /// simply ignore all callbacks.
+    fn set_event_callbacks(&self, _callbacks: BackendCallbacks) {}
 
     /// The password / local-key field for this backend.
     ///

@@ -130,7 +130,9 @@ impl Snapshot {
             let ino_name = alloc_ino();
             snap.files.insert(
                 ino_name,
-                VirtFile { content: pubkey.clone() },
+                VirtFile {
+                    content: pubkey.clone(),
+                },
             );
             snap.dir_children
                 .get_mut(&INO_BY_NAME)
@@ -142,7 +144,9 @@ impl Snapshot {
             let ino_fp = alloc_ino();
             snap.files.insert(
                 ino_fp,
-                VirtFile { content: pubkey.clone() },
+                VirtFile {
+                    content: pubkey.clone(),
+                },
             );
             snap.dir_children
                 .get_mut(&INO_BY_FINGERPRINT)
@@ -162,7 +166,9 @@ impl Snapshot {
                 let ino_host = alloc_ino();
                 snap.files.insert(
                     ino_host,
-                    VirtFile { content: pubkey.clone() },
+                    VirtFile {
+                        content: pubkey.clone(),
+                    },
                 );
                 snap.dir_children
                     .get_mut(&INO_BY_HOST)
@@ -178,7 +184,9 @@ impl Snapshot {
             let ino = alloc_ino();
             snap.files.insert(
                 ino,
-                VirtFile { content: snippet.content.into_bytes() },
+                VirtFile {
+                    content: snippet.content.into_bytes(),
+                },
             );
             snap.dir_children
                 .get_mut(&INO_CONFIG_D)
@@ -405,32 +413,62 @@ impl Filesystem for SshFuse {
 
 /// A handle to a mounted FUSE filesystem.
 ///
-/// Dropping this handle will unmount the filesystem.
+/// Dropping this handle unmounts the filesystem via `fusermount3 -u` and
+/// removes the agent socket file.  The `BackgroundSession` drop handles the
+/// kernel-side unmount; we call `fusermount3 -u` as a belt-and-suspenders
+/// cleanup in case the kernel mount outlives the process (e.g. on panic).
 pub struct MountHandle {
-    _session: BackgroundSession,
+    session: Option<BackgroundSession>,
     /// Shared reference to the filesystem for calling [`SshFuse::update`].
     pub fuse: Arc<SshFuse>,
+    mountpoint: PathBuf,
+    agent_sock: PathBuf,
 }
 
 impl std::fmt::Debug for MountHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MountHandle").finish_non_exhaustive()
+        f.debug_struct("MountHandle")
+            .field("mountpoint", &self.mountpoint)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for MountHandle {
+    fn drop(&mut self) {
+        // Drop the BackgroundSession first — this signals the FUSE thread to
+        // stop and performs the kernel unmount via the fuser drop handler.
+        drop(self.session.take());
+
+        // Belt-and-suspenders: also call fusermount3 -u in case the above
+        // didn't fully clean up (e.g. when the process is killed).
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", self.mountpoint.to_string_lossy().as_ref()])
+            .output();
+
+        // Remove the agent socket.
+        if self.agent_sock.exists() {
+            let _ = std::fs::remove_file(&self.agent_sock);
+        }
     }
 }
 
 /// Mount the FUSE filesystem at `mountpoint` and return a [`MountHandle`].
+///
+/// The mount is read-only and restricted to the owner (`SessionACL::Owner`).
+/// `AutoUnmount` is intentionally omitted — it is incompatible with
+/// `SessionACL::Owner` in fuser 0.17.  Cleanup is handled by [`MountHandle`]'s
+/// `Drop` impl instead.
 pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHandle> {
     std::fs::create_dir_all(mountpoint)
         .with_context(|| format!("create FUSE mountpoint {:?}", mountpoint))?;
 
     let keys_by_name_dir = mountpoint.join("keys").join("by-name");
-    let fuse = Arc::new(SshFuse::new(agent_sock, keys_by_name_dir));
+    let fuse = Arc::new(SshFuse::new(agent_sock.clone(), keys_by_name_dir));
 
     let mut config = Config::default();
     config.mount_options = vec![
         MountOption::RO,
         MountOption::FSName("rosec-ssh".to_string()),
-        MountOption::AutoUnmount,
     ];
     config.acl = SessionACL::Owner;
 
@@ -439,8 +477,10 @@ pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHand
         .with_context(|| format!("mount FUSE at {:?}", mountpoint))?;
 
     Ok(MountHandle {
-        _session: session,
+        session: Some(session),
         fuse,
+        mountpoint: mountpoint.to_path_buf(),
+        agent_sock,
     })
 }
 

@@ -71,11 +71,11 @@ pub struct NotificationsConfig {
     /// Invoked (from a Tokio task) when the hub signals a cipher change.
     /// Typically calls `ServiceState::try_sync_backend`.
     /// If `None`, sync nudges are silently ignored.
-    pub on_sync: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    pub on_sync_nudge: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     /// Invoked (from a Tokio task) when the hub sends `LogOut`.
     /// Typically calls `ServiceState::auto_lock` for this backend.
     /// If `None`, logout events are silently ignored.
-    pub on_lock: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    pub on_lock_nudge: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     /// Watch receiver used for cancellation: the task exits when the
     /// corresponding sender is dropped (i.e. when the vault is locked).
     pub cancel_rx: watch::Receiver<()>,
@@ -293,8 +293,8 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
     // ------------------------------------------------------------------
     // Step 4: Event loop — read frames until cancelled or disconnected.
     // ------------------------------------------------------------------
-    let on_sync = config.on_sync.clone();
-    let on_lock = config.on_lock.clone();
+    let on_sync = config.on_sync_nudge.clone();
+    let on_lock = config.on_lock_nudge.clone();
     let backend_id_owned = backend_id.to_string();
 
     loop {
