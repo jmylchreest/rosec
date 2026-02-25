@@ -57,3 +57,6 @@ ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "e
 ssh-agent-lib = "0.5.1"
 fuser = "0.17.0"
 signature = "2"
+
+# Dev dependencies for git hooks
+husky-rs = "0.3"
