@@ -76,7 +76,7 @@ impl SshManager {
         let fuse_handle = match rosec_fuse::mount(&ssh_dir, agent_sock.clone()) {
             Ok(h) => h,
             Err(e) => {
-                warn!("SSH FUSE mount failed (SSH agent disabled): {e}");
+                warn!("SSH FUSE mount failed (SSH agent disabled): {e:#}");
                 return None;
             }
         };
