@@ -49,7 +49,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -96,22 +96,61 @@ pub fn start(config: NotificationsConfig) -> tokio::task::JoinHandle<()> {
 /// SignalR record separator — every frame is terminated by this byte.
 const RS: char = '\x1e';
 
-/// Sync event target names from the Bitwarden SignalR hub.
-const SYNC_TARGETS: &[&str] = &[
-    "SyncCipherUpdated",
-    "SyncCipherCreated",
-    "SyncCipherDeleted",
-    "SyncCiphers",
-    "SyncVault",
-    "SyncFolderCreated",
-    "SyncFolderUpdated",
-    "SyncFolderDeleted",
-    "SyncSettings",
-    "SyncOrgKeys",
-];
+/// Bitwarden `PushType` enum values (from `server/src/Core/Enums/PushType.cs`).
+///
+/// The SignalR hub sends all events via a `ReceiveMessage` target with the
+/// actual event type as a numeric value in `arguments[0].type`.
+mod push_type {
+    // Sync events — trigger a vault re-sync.
+    pub const SYNC_CIPHER_UPDATE: u32 = 0;
+    pub const SYNC_CIPHER_CREATE: u32 = 1;
+    pub const SYNC_LOGIN_DELETE: u32 = 2;
+    pub const SYNC_FOLDER_DELETE: u32 = 3;
+    pub const SYNC_CIPHERS: u32 = 4;
+    pub const SYNC_VAULT: u32 = 5;
+    pub const SYNC_ORG_KEYS: u32 = 6;
+    pub const SYNC_FOLDER_CREATE: u32 = 7;
+    pub const SYNC_FOLDER_UPDATE: u32 = 8;
+    pub const SYNC_CIPHER_DELETE: u32 = 9;
+    pub const SYNC_SETTINGS: u32 = 10;
 
-/// Target names that indicate the session should be locked.
-const LOCK_TARGETS: &[&str] = &["LogOut"];
+    // Lock events — lock the vault.
+    pub const LOG_OUT: u32 = 11;
+
+    /// All push types that should trigger a sync.
+    pub const SYNC_TYPES: &[u32] = &[
+        SYNC_CIPHER_UPDATE,
+        SYNC_CIPHER_CREATE,
+        SYNC_LOGIN_DELETE,
+        SYNC_FOLDER_DELETE,
+        SYNC_CIPHERS,
+        SYNC_VAULT,
+        SYNC_ORG_KEYS,
+        SYNC_FOLDER_CREATE,
+        SYNC_FOLDER_UPDATE,
+        SYNC_CIPHER_DELETE,
+        SYNC_SETTINGS,
+    ];
+
+    /// Human-readable name for logging.
+    pub fn name(t: u32) -> &'static str {
+        match t {
+            SYNC_CIPHER_UPDATE => "SyncCipherUpdate",
+            SYNC_CIPHER_CREATE => "SyncCipherCreate",
+            SYNC_LOGIN_DELETE => "SyncLoginDelete",
+            SYNC_FOLDER_DELETE => "SyncFolderDelete",
+            SYNC_CIPHERS => "SyncCiphers",
+            SYNC_VAULT => "SyncVault",
+            SYNC_ORG_KEYS => "SyncOrgKeys",
+            SYNC_FOLDER_CREATE => "SyncFolderCreate",
+            SYNC_FOLDER_UPDATE => "SyncFolderUpdate",
+            SYNC_CIPHER_DELETE => "SyncCipherDelete",
+            SYNC_SETTINGS => "SyncSettings",
+            LOG_OUT => "LogOut",
+            _ => "Unknown",
+        }
+    }
+}
 
 /// Initial delay before first reconnect attempt after a disconnect.
 const BACKOFF_INITIAL: Duration = Duration::from_secs(5);
@@ -125,10 +164,23 @@ struct NegotiateResponse {
     connection_id: String,
 }
 
-/// Minimal SignalR invocation message — only the `target` field matters.
+/// Minimal SignalR invocation message.
+///
+/// The Bitwarden hub uses a single `"ReceiveMessage"` target for all events.
+/// The actual event type is a numeric `PushType` inside the first argument.
 #[derive(Debug, Deserialize)]
 struct Invocation {
     target: Option<String>,
+    #[serde(default)]
+    arguments: Vec<InvocationArgument>,
+}
+
+/// The first argument of a `ReceiveMessage` invocation.
+#[derive(Debug, Deserialize)]
+struct InvocationArgument {
+    /// `PushType` enum value — determines the event kind.
+    #[serde(rename = "type")]
+    push_type: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +369,7 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
                     }
                     Some(Ok(m)) if m.is_text() => {
                         if let Some(text) = m.as_text() {
+                            trace!(backend = %backend_id_owned, len = text.len(), "notifications: WS text message received");
                             handle_frames(text, &backend_id_owned, &on_sync, &on_lock);
                         }
                     }
@@ -344,23 +397,47 @@ fn handle_frames(
             continue;
         }
 
+        trace!(backend = %backend_id, %frame, "notifications: received frame");
+
         let inv: Invocation = match serde_json::from_str(frame) {
             Ok(i) => i,
-            Err(_) => continue, // Handshake ack, ping, or unknown — ignore.
+            Err(e) => {
+                trace!(backend = %backend_id, error = %e, %frame, "notifications: unparseable frame (ping/ack/unknown)");
+                continue;
+            }
         };
 
-        let Some(target) = inv.target else { continue };
+        let Some(target) = inv.target else {
+            trace!(backend = %backend_id, "notifications: frame with no target field");
+            continue;
+        };
 
-        if SYNC_TARGETS.contains(&target.as_str()) {
-            debug!(backend = %backend_id, %target, "notifications: sync event");
-            if let Some(f) = on_sync {
-                f();
+        // The Bitwarden hub sends all events via a `ReceiveMessage` SignalR
+        // target.  The actual event kind is a numeric `PushType` in the
+        // first argument.
+        if target == "ReceiveMessage" {
+            let Some(pt) = inv.arguments.first().and_then(|a| a.push_type) else {
+                trace!(backend = %backend_id, "notifications: ReceiveMessage with no push type");
+                continue;
+            };
+
+            let name = push_type::name(pt);
+
+            if push_type::SYNC_TYPES.contains(&pt) {
+                debug!(backend = %backend_id, push_type = name, "notifications: sync event");
+                if let Some(f) = on_sync {
+                    f();
+                }
+            } else if pt == push_type::LOG_OUT {
+                warn!(backend = %backend_id, push_type = name, "notifications: lock event");
+                if let Some(f) = on_lock {
+                    f();
+                }
+            } else {
+                trace!(backend = %backend_id, push_type = pt, push_name = name, "notifications: unhandled push type");
             }
-        } else if LOCK_TARGETS.contains(&target.as_str()) {
-            warn!(backend = %backend_id, %target, "notifications: lock event");
-            if let Some(f) = on_lock {
-                f();
-            }
+        } else {
+            trace!(backend = %backend_id, %target, "notifications: non-ReceiveMessage target");
         }
     }
 }
@@ -488,5 +565,36 @@ mod tests {
         assert!(!out.contains("abc123"));
         assert!(!out.contains("xyz"));
         assert!(out.contains("other=value"));
+    }
+
+    #[test]
+    fn parse_receive_message_sync_cipher_update() {
+        let frame = r#"{"type":1,"target":"ReceiveMessage","arguments":[{"type":0,"payload":{"id":"abc","userId":"xyz","organizationId":null,"collectionIds":null,"revisionDate":"2026-01-01T00:00:00Z"}}]}"#;
+        let inv: Invocation = serde_json::from_str(frame).unwrap();
+        assert_eq!(inv.target.as_deref(), Some("ReceiveMessage"));
+        assert_eq!(inv.arguments[0].push_type, Some(push_type::SYNC_CIPHER_UPDATE));
+    }
+
+    #[test]
+    fn parse_receive_message_sync_cipher_create() {
+        let frame = r#"{"type":1,"target":"ReceiveMessage","arguments":[{"type":1,"payload":{"id":"abc"}}]}"#;
+        let inv: Invocation = serde_json::from_str(frame).unwrap();
+        assert_eq!(inv.arguments[0].push_type, Some(push_type::SYNC_CIPHER_CREATE));
+    }
+
+    #[test]
+    fn parse_receive_message_logout() {
+        let frame = r#"{"type":1,"target":"ReceiveMessage","arguments":[{"type":11}]}"#;
+        let inv: Invocation = serde_json::from_str(frame).unwrap();
+        assert_eq!(inv.arguments[0].push_type, Some(push_type::LOG_OUT));
+    }
+
+    #[test]
+    fn parse_signalr_ping() {
+        // Ping frames have type 6, no target — should parse but have no target.
+        let frame = r#"{"type":6}"#;
+        let inv: Invocation = serde_json::from_str(frame).unwrap();
+        assert!(inv.target.is_none());
+        assert!(inv.arguments.is_empty());
     }
 }
