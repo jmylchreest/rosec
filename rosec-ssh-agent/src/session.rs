@@ -55,7 +55,7 @@ impl Session for SshAgent {
             .map_err(|_| other_err("key store lock poisoned"))?;
 
         let identities: Vec<Identity> = store
-            .iter()
+            .unique_keys()
             .map(|entry| Identity {
                 pubkey: entry.private_key.public_key().clone().into(),
                 comment: entry.item_name.clone(),

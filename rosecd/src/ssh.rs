@@ -209,11 +209,14 @@ impl SshManager {
         match self.store.write() {
             Ok(mut guard) => {
                 guard.clear();
-                let count = new_entries.len();
                 for entry in new_entries {
                     guard.insert(entry);
                 }
-                info!(count, "SSH key store rebuilt");
+                info!(
+                    entries = guard.len(),
+                    unique_keys = guard.unique_count(),
+                    "SSH key store rebuilt"
+                );
             }
             Err(e) => {
                 warn!("SSH key store lock poisoned during rebuild: {e}");

@@ -77,10 +77,22 @@ impl Drop for KeyEntry {
 /// Shared, thread-safe key store.
 ///
 /// Create with [`KeyStore::new`] and share via [`Arc::clone`].
+///
+/// Multiple vault items may share the same key material (and therefore the
+/// same fingerprint).  The store keeps **all** entries so that each item's
+/// SSH config metadata (`ssh_hosts`, `ssh_user`, etc.) is preserved.  The
+/// SSH agent protocol only needs the key material once per fingerprint, so
+/// [`unique_keys`](Self::unique_keys) returns one entry per fingerprint for
+/// `request_identities`, while [`iter`](Self::iter) returns every entry for
+/// FUSE snapshot / config snippet generation.
 #[derive(Debug, Default)]
 pub struct KeyStore {
-    /// Entries keyed by SHA-256 fingerprint for O(1) lookup during signing.
-    entries: HashMap<String, KeyEntry>,
+    /// Entries grouped by SHA-256 fingerprint.
+    ///
+    /// Each fingerprint maps to one or more vault items that share that key.
+    /// The first entry in each Vec is used for signing (key material is
+    /// identical across entries with the same fingerprint).
+    entries: HashMap<String, Vec<KeyEntry>>,
 }
 
 impl KeyStore {
@@ -89,21 +101,30 @@ impl KeyStore {
         Arc::new(RwLock::new(Self::default()))
     }
 
-    /// Insert a key entry, replacing any previous entry with the same fingerprint.
+    /// Insert a key entry, appending to any existing entries with the same
+    /// fingerprint.
     pub fn insert(&mut self, entry: KeyEntry) {
         debug!(
             fingerprint = %entry.fingerprint,
             item = %entry.item_name,
             "keystore: adding key"
         );
-        self.entries.insert(entry.fingerprint.clone(), entry);
+        self.entries
+            .entry(entry.fingerprint.clone())
+            .or_default()
+            .push(entry);
     }
 
     /// Remove all keys belonging to a specific backend.
     pub fn remove_backend(&mut self, backend_id: &str) {
-        let before = self.entries.len();
-        self.entries.retain(|_, v| v.backend_id != backend_id);
-        let removed = before - self.entries.len();
+        let before: usize = self.entries.values().map(|v| v.len()).sum();
+        for group in self.entries.values_mut() {
+            group.retain(|e| e.backend_id != backend_id);
+        }
+        // Remove empty groups.
+        self.entries.retain(|_, v| !v.is_empty());
+        let after: usize = self.entries.values().map(|v| v.len()).sum();
+        let removed = before - after;
         debug!(backend = %backend_id, removed, "keystore: removed keys for backend");
     }
 
@@ -113,17 +134,38 @@ impl KeyStore {
     }
 
     /// Look up a key by its SHA-256 fingerprint string.
+    ///
+    /// Returns the first entry for that fingerprint — all entries sharing a
+    /// fingerprint have identical key material, so any one suffices for signing.
     pub fn get_by_fingerprint(&self, fingerprint: &str) -> Option<&KeyEntry> {
-        self.entries.get(fingerprint)
+        self.entries.get(fingerprint).and_then(|v| v.first())
     }
 
-    /// Iterate all entries.
+    /// Iterate **all** entries (including multiple vault items that share the
+    /// same key material).
+    ///
+    /// Used by the FUSE snapshot builder and config snippet generator, which
+    /// need per-item metadata even when key material is duplicated.
     pub fn iter(&self) -> impl Iterator<Item = &KeyEntry> {
-        self.entries.values()
+        self.entries.values().flatten()
     }
 
-    /// Number of keys in the store.
+    /// Iterate one entry per unique fingerprint.
+    ///
+    /// Used by `request_identities` in the SSH agent protocol — the client
+    /// identifies keys by public key, so advertising the same key twice is
+    /// redundant.
+    pub fn unique_keys(&self) -> impl Iterator<Item = &KeyEntry> {
+        self.entries.values().filter_map(|v| v.first())
+    }
+
+    /// Total number of entries (including duplicates across vault items).
     pub fn len(&self) -> usize {
+        self.entries.values().map(|v| v.len()).sum()
+    }
+
+    /// Number of unique fingerprints.
+    pub fn unique_count(&self) -> usize {
         self.entries.len()
     }
 

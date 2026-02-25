@@ -139,19 +139,26 @@ impl Snapshot {
                 .expect("by-name initialised")
                 .push((name_file, ino_name, false));
 
-            // by-fingerprint/<fp>.pub — sanitise (replaces ':', '/' etc.)
+            // by-fingerprint/<fp>.pub — one file per unique fingerprint (multiple
+            // vault items may share the same key material).
             let fp_file = format!("{}.pub", sanitise_filename(&entry.fingerprint));
-            let ino_fp = alloc_ino();
-            snap.files.insert(
-                ino_fp,
-                VirtFile {
-                    content: pubkey.clone(),
-                },
-            );
-            snap.dir_children
-                .get_mut(&INO_BY_FINGERPRINT)
-                .expect("by-fingerprint initialised")
-                .push((fp_file, ino_fp, false));
+            let fp_exists = snap
+                .dir_children
+                .get(&INO_BY_FINGERPRINT)
+                .is_some_and(|v| v.iter().any(|(n, _, _)| n == &fp_file));
+            if !fp_exists {
+                let ino_fp = alloc_ino();
+                snap.files.insert(
+                    ino_fp,
+                    VirtFile {
+                        content: pubkey.clone(),
+                    },
+                );
+                snap.dir_children
+                    .get_mut(&INO_BY_FINGERPRINT)
+                    .expect("by-fingerprint initialised")
+                    .push((fp_file, ino_fp, false));
+            }
 
             // by-host/<normalised-host>.pub (one per ssh_host)
             for host in &entry.ssh_hosts {
