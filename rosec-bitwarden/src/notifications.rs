@@ -288,7 +288,7 @@ async fn run_session(config: &mut NotificationsConfig) -> SessionResult {
         }
     }
 
-    info!(backend = %backend_id, "notifications: connected to hub");
+    debug!(backend = %backend_id, "notifications: connected to hub");
 
     // ------------------------------------------------------------------
     // Step 4: Event loop — read frames until cancelled or disconnected.

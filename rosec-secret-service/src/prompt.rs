@@ -184,7 +184,7 @@ async fn run_prompt_task(
                             "post-unlock sync failed (non-fatal)");
                     }
 
-                    tracing::info!(backend = %backend_id, "backend unlocked via Prompt");
+                    tracing::debug!(backend = %backend_id, "backend unlocked via Prompt");
 
                     let collection =
                         zvariant::Value::from("/org/freedesktop/secrets/collection/default");
