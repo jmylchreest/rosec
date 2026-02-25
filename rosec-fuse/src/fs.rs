@@ -459,6 +459,13 @@ impl Drop for MountHandle {
 /// `SessionACL::Owner` in fuser 0.17.  Cleanup is handled by [`MountHandle`]'s
 /// `Drop` impl instead.
 pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHandle> {
+    // If a file (not directory) exists at the mountpoint, remove it so
+    // create_dir_all can succeed.  This handles stale sockets or other
+    // leftover files from previous runs.
+    if mountpoint.exists() && !mountpoint.is_dir() {
+        std::fs::remove_file(mountpoint)
+            .with_context(|| format!("remove stale file at {:?}", mountpoint))?;
+    }
     std::fs::create_dir_all(mountpoint)
         .with_context(|| format!("create FUSE mountpoint {:?}", mountpoint))?;
 
