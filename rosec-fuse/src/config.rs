@@ -94,6 +94,10 @@ pub fn build_config_snippets(
             }
         }
 
+        // Most-specific first: longest host pattern wins the first-match slot.
+        // Tie-break lexicographically so output is fully deterministic.
+        owned_hosts.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+
         for host in owned_hosts {
             content.push('\n');
             content.push_str(&format!("Host {host}\n"));
@@ -189,6 +193,37 @@ mod tests {
         // 2025-01-15 12:10:00 UTC = 1736943000
         let s = format_unix_timestamp(1_736_943_000);
         assert_eq!(s, "2025-01-15T12:10:00Z");
+    }
+
+    /// Verify that the owned-host sort produces longest-first, with
+    /// lexicographic tie-breaking, matching exactly what `build_config_snippets`
+    /// does before emitting `Host` blocks.
+    #[test]
+    fn host_sort_most_specific_first() {
+        let mut hosts: Vec<&str> = vec![
+            "*.example.com",
+            "bastion.example.com",
+            "dev.bastion.example.com",
+        ];
+        hosts.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        assert_eq!(
+            hosts,
+            [
+                "dev.bastion.example.com",
+                "bastion.example.com",
+                "*.example.com"
+            ]
+        );
+    }
+
+    /// Tie-break: patterns of equal length are sorted lexicographically.
+    /// "beta.host" (9) is shorter than "alpha.host"/"gamma.host" (10) so it
+    /// sorts last; the two 10-char entries sort alpha before gamma.
+    #[test]
+    fn host_sort_tie_break_lexicographic() {
+        let mut hosts: Vec<&str> = vec!["beta.host", "alpha.host", "gamma.host"];
+        hosts.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        assert_eq!(hosts, ["alpha.host", "gamma.host", "beta.host"]);
     }
 
     #[test]
