@@ -123,6 +123,16 @@ The master password is never stored. After changing it in the Bitwarden web vaul
 
 Run `rosec backend auth <id>`. Enter your key encryption password, then paste the new access token when prompted. Leaving the token field blank re-uses the stored token.
 
+### SSH agent fails with "create FUSE mountpoint: File exists"
+
+If `rosecd` was killed or crashed, a stale file may exist at the FUSE mountpoint. Remove it:
+
+```bash
+rm -f "$XDG_RUNTIME_DIR/rosec/ssh"
+```
+
+Then restart `rosecd`. The mountpoint must be a directory, not a regular file.
+
 ## SSH Agent
 
 `rosecd` also runs a built-in SSH agent, exposing SSH keys from your unlocked vault over a Unix socket at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`.
