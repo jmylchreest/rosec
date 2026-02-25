@@ -107,8 +107,8 @@ pub fn build_config_snippets(
             if let Some(user) = &entry.ssh_user {
                 content.push_str(&format!("    User {user}\n"));
             }
-            content.push_str(&format!("    IdentityFile {key_file_str}\n"));
-            content.push_str(&format!("    IdentityAgent {agent_sock_str}\n"));
+            content.push_str(&format!("    IdentityFile \"{key_file_str}\"\n"));
+            content.push_str(&format!("    IdentityAgent \"{agent_sock_str}\"\n"));
             content.push_str("    IdentitiesOnly yes\n");
         }
 
