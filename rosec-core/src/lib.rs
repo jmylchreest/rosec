@@ -24,6 +24,100 @@ pub(crate) static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new((
 
 pub type Attributes = HashMap<String, String>;
 
+/// Reserved attribute names that cannot be set by users.
+///
+/// These correspond to item fields that are managed by the backend or have
+/// special meaning (id, label, timestamps, type discriminator).
+pub const RESERVED_ATTRIBUTES: &[&str] = &["id", "label", "created", "modified", "type"];
+
+/// Item type for determining default secret attribute.
+///
+/// Used by `get_primary_secret()` to return the appropriate secret based on
+/// item type when the caller doesn't specify an attribute name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemType {
+    /// Generic secret. Default attr: "secret".
+    Generic,
+    /// Login credential. Default attr: "password".
+    Login,
+    /// SSH private key. Default attr: "private_key".
+    SshKey,
+}
+
+impl ItemType {
+    /// Derive from `attributes.type` or default to Generic.
+    pub fn from_attributes(attrs: &HashMap<String, String>) -> Self {
+        match attrs.get("type").map(|s| s.as_str()) {
+            Some("login") => Self::Login,
+            Some("ssh-key") => Self::SshKey,
+            _ => Self::Generic,
+        }
+    }
+
+    /// The default secret attribute name for this item type.
+    pub fn default_secret_attr(&self) -> &'static str {
+        match self {
+            Self::Generic => "secret",
+            Self::Login => "password",
+            Self::SshKey => "private_key",
+        }
+    }
+}
+
+/// A request to create a new vault item.
+#[derive(Debug, Clone)]
+pub struct NewItem {
+    /// Display label (required, non-empty).
+    pub label: String,
+    /// Public, searchable attributes. Reserved names are rejected by validate().
+    pub attributes: HashMap<String, String>,
+    /// Named secret values. At least one required.
+    /// Keys like "secret", "password", "private_key" depending on item type.
+    pub secrets: HashMap<String, SecretBytes>,
+}
+
+impl NewItem {
+    /// Validate the item before creation.
+    ///
+    /// Returns an error if:
+    /// - label is empty
+    /// - no secrets provided
+    /// - reserved attribute names are used
+    pub fn validate(&self) -> Result<(), BackendError> {
+        if self.label.is_empty() {
+            return Err(BackendError::InvalidInput("label cannot be empty".into()));
+        }
+        if self.secrets.is_empty() {
+            return Err(BackendError::InvalidInput(
+                "at least one secret required".into(),
+            ));
+        }
+        for key in RESERVED_ATTRIBUTES {
+            if self.attributes.contains_key(*key) {
+                return Err(BackendError::InvalidInput(
+                    format!("reserved attribute name: {}", key).into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A request to update an existing vault item.
+///
+/// All fields are optional — only provided values are changed.
+#[derive(Debug, Clone, Default)]
+pub struct ItemUpdate {
+    /// New display label (None = no change).
+    pub label: Option<String>,
+    /// Replace all public attributes (None = no change).
+    /// Reserved names are validated when applied.
+    pub attributes: Option<HashMap<String, String>>,
+    /// Merge into existing secrets (None = no change).
+    /// Only provided keys are updated; others remain untouched.
+    pub secrets: Option<HashMap<String, SecretBytes>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackendStatus {
     pub locked: bool,
@@ -210,6 +304,12 @@ pub enum BackendError {
     NotSupported,
     #[error("backend unavailable: {0}")]
     Unavailable(String),
+    /// An item with the same attributes already exists (for create with replace=false).
+    #[error("item already exists")]
+    AlreadyExists,
+    /// Invalid input (validation failed).
+    #[error("invalid input: {0}")]
+    InvalidInput(Box<str>),
     /// The backend requires device/API-key registration before it can unlock.
     ///
     /// The auth flow should prompt for `RegistrationInfo::fields` (obtained via
@@ -606,6 +706,77 @@ pub trait VaultBackend: Send + Sync {
     /// (default).
     async fn get_ssh_private_key(&self, _id: &str) -> Result<SshPrivateKeyMaterial, BackendError> {
         Err(BackendError::NotSupported)
+    }
+
+    // -----------------------------------------------------------------------
+    // Write operations (default: NotSupported)
+    // -----------------------------------------------------------------------
+
+    /// Check if this backend supports write operations.
+    ///
+    /// Used by the D-Bus layer to return appropriate errors early and by the
+    /// write router to select the target backend.
+    fn supports_writes(&self) -> bool {
+        false
+    }
+
+    /// Create a new item in this backend.
+    ///
+    /// # Arguments
+    /// * `item` - The item to create (label, attributes, secrets)
+    /// * `replace` - If true and an item with matching attributes exists,
+    ///   update it instead of creating a new one
+    ///
+    /// # Returns
+    /// * `Ok(id)` - The ID of the created or updated item
+    /// * `Err(BackendError::AlreadyExists)` - Item exists and replace=false
+    /// * `Err(BackendError::InvalidInput)` - Validation failed
+    /// * `Err(BackendError::NotSupported)` - Backend is read-only
+    /// * `Err(BackendError::Locked)` - Backend is locked
+    ///
+    /// Attribute matching for replace uses all provided attributes (case-sensitive
+    /// string equality per Secret Service spec).
+    async fn create_item(&self, _item: NewItem, _replace: bool) -> Result<String, BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    /// Update an existing item.
+    ///
+    /// - `label`: replace label if Some
+    /// - `attributes`: replace all attributes if Some (validated for reserved names)
+    /// - `secrets`: merge into existing secrets if Some (only provided keys change)
+    ///
+    /// # Returns
+    /// * `Err(BackendError::NotFound)` - Item doesn't exist
+    /// * `Err(BackendError::InvalidInput)` - Reserved attribute name used
+    /// * `Err(BackendError::NotSupported)` - Backend is read-only
+    /// * `Err(BackendError::Locked)` - Backend is locked
+    async fn update_item(&self, _id: &str, _update: ItemUpdate) -> Result<(), BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    /// Delete an item by ID.
+    ///
+    /// # Returns
+    /// * `Err(BackendError::NotFound)` - Item doesn't exist
+    /// * `Err(BackendError::NotSupported)` - Backend is read-only
+    /// * `Err(BackendError::Locked)` - Backend is locked
+    async fn delete_item(&self, _id: &str) -> Result<(), BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    /// Get the primary secret for an item using type-aware default attribute.
+    ///
+    /// Dispatches to `get_secret_attr(id, type.default_secret_attr())` based on
+    /// the item's `attributes.type` field:
+    /// - `generic` (or unset) → `"secret"`
+    /// - `login` → `"password"`
+    /// - `ssh-key` → `"private_key"`
+    async fn get_primary_secret(&self, id: &str) -> Result<SecretBytes, BackendError> {
+        let item = self.get_item(id).await?;
+        let item_type = ItemType::from_attributes(&item.meta.attributes);
+        self.get_secret_attr(id, item_type.default_secret_attr())
+            .await
     }
 }
 

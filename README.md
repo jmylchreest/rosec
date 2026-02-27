@@ -1,6 +1,6 @@
 # rosec
 
-A read-only [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/) daemon with pluggable backends and Bitwarden integration.
+A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/) daemon with pluggable backends, Bitwarden integration, and SSH agent support.
 
 **Status:** MVP — D-Bus Secret Service is implemented and the Bitwarden backend is functional.
 
@@ -8,11 +8,11 @@ A read-only [`org.freedesktop.secrets`](https://specifications.freedesktop.org/s
 
 `rosecd` replaces `gnome-keyring-daemon` as the D-Bus Secret Service provider. Any application that uses `libsecret` (GNOME Keyring API) will transparently read secrets from your Bitwarden vault without storing them on disk.
 
-**Multi-backend, multi-instance:** rosec supports multiple backends simultaneously — multiple Bitwarden accounts, Bitwarden Secrets Manager projects, and can be extended to other providers. Each backend is independently locked/unlocked and contributes items to a unified namespace.
+**Multi-backend, multi-instance:** rosec supports multiple backends simultaneously — multiple Bitwarden accounts, Bitwarden Secrets Manager projects, a local encrypted file store, and can be extended to other providers. Each backend is independently locked/unlocked and contributes items to a unified namespace.
 
 **SSH agent + FUSE:** SSH keys in your vault are exposed via a built-in agent (`$XDG_RUNTIME_DIR/rosec/agent.sock`) and a FUSE filesystem (`$XDG_RUNTIME_DIR/rosec/ssh/`). The FUSE mount includes auto-generated SSH config snippets, so hosts mapped via `custom.ssh_host` fields get working `Host` blocks automatically.
 
-All write operations return `NotSupported` — rosec is intentionally read-only.
+**Write support:** Bitwarden backends are read-only (vault changes must be made via the Bitwarden clients), but a local file backend (`rosec-file`) provides encrypted storage for machine-local secrets like session tokens and application credentials.
 
 ## Install
 
@@ -103,6 +103,34 @@ email = "user@example.com"
 ```
 
 Full reference: [docs/configuration.md](docs/configuration.md)
+
+## Local File Backend
+
+For machine-local secrets (application tokens, session credentials, development API keys), add a `local` file backend:
+
+```toml
+[[backend]]
+id = "local"
+type = "file"
+
+[backend.options]
+path = "~/.local/share/rosec/local.vault"  # encrypted vault file
+```
+
+The file backend stores secrets in an encrypted file at the specified path. It's unlocked with a master password (derived via PBKDF2, encrypted with AES-256-CBC) and supports full CRUD operations via the D-Bus Secret Service API.
+
+**When to use:**
+- Application session tokens that don't belong in Bitwarden
+- Development credentials and test API keys
+- Machine-specific secrets that shouldn't sync across devices
+- Temporary or frequently-changed credentials
+
+**Write routing:** When multiple backends are configured, the `service.write_backend` option controls which backend receives `CreateItem` calls on the virtual "default" collection:
+
+```toml
+[service]
+write_backend = "local"  # default if a "local" backend exists
+```
 
 ## Development
 

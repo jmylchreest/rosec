@@ -1496,6 +1496,10 @@ pub(crate) fn map_backend_error(err: BackendError) -> FdoError {
         BackendError::Unavailable(reason) => FdoError::Failed(reason),
         // Sentinel string detected by the CLI to trigger the registration retry flow.
         BackendError::RegistrationRequired => FdoError::Failed("registration_required".to_string()),
+        // Item already exists (for create with replace=false).
+        BackendError::AlreadyExists => FdoError::Failed("already exists".to_string()),
+        // Invalid input (validation failed).
+        BackendError::InvalidInput(reason) => FdoError::Failed(reason.to_string()),
         // Other/internal errors: log the full chain server-side, return an
         // opaque message to the D-Bus caller to avoid leaking internal detail
         // (cipher UUIDs, server HTTP bodies, file paths, etc.).
