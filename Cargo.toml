@@ -7,6 +7,7 @@ members = [
     "rosec-bitwarden-sm",
     "rosec-ssh-agent",
     "rosec-fuse",
+    "rosec-file",
     "rosecd",
     "rosec",
     "rosec-prompt",

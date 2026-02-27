@@ -1,0 +1,32 @@
+[package]
+name = "rosec-file"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Encrypted local file backend for rosec"
+
+[dependencies]
+rosec-core = { path = "../rosec-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+pbkdf2 = "0.12"
+base64 = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
