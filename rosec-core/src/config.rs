@@ -24,6 +24,10 @@ pub struct ServiceConfig {
     pub dedup_time_fallback: DedupTimeFallback,
     #[serde(default)]
     pub refresh_interval_secs: Option<u64>,
+    /// Backend ID for write operations (create_item, update_item, delete_item).
+    /// If not set, defaults to the first backend that supports writes.
+    #[serde(default)]
+    pub write_backend: Option<String>,
 }
 
 impl Default for ServiceConfig {
@@ -32,6 +36,7 @@ impl Default for ServiceConfig {
             dedup_strategy: default_dedup_strategy(),
             dedup_time_fallback: default_dedup_time_fallback(),
             refresh_interval_secs: None,
+            write_backend: None,
         }
     }
 }

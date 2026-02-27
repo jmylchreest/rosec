@@ -328,6 +328,34 @@ impl ServiceState {
             .map(Arc::clone)
     }
 
+    /// Return the backend to use for write operations.
+    ///
+    /// Resolution order:
+    /// 1. If `service.write_backend` is configured, return that backend if it supports writes
+    /// 2. Otherwise, return the first backend that supports writes
+    /// 3. If no write-capable backend exists, return None
+    pub fn write_backend(&self) -> Option<Arc<dyn VaultBackend>> {
+        let config = self.live_config();
+
+        if let Some(ref backend_id) = config.service.write_backend
+            && let Some(backend) = self.backend_by_id(backend_id)
+            && backend.supports_writes()
+        {
+            return Some(backend);
+        }
+
+        if let Some(ref backend_id) = config.service.write_backend {
+            warn!(
+                backend_id = %backend_id,
+                "configured write_backend does not support writes, falling back"
+            );
+        }
+
+        self.backends_ordered()
+            .into_iter()
+            .find(|b| b.supports_writes())
+    }
+
     /// Spawn `fut` on the Tokio runtime and await the result.
     ///
     /// zbus dispatches D-Bus handlers on an `async-io` executor that has no
@@ -1399,6 +1427,7 @@ impl ServiceState {
                 sessions: self.sessions.clone(),
                 return_attr_patterns,
                 tokio_handle: self.tokio_handle.clone(),
+                items_cache: Arc::clone(&self.items),
             };
             server
                 .at(path.clone(), SecretItem::new(state))

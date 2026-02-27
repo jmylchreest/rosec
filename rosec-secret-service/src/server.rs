@@ -84,6 +84,8 @@ pub async fn register_objects_with_full_config(
     let backends_for_collection: Vec<Arc<dyn VaultBackend>> =
         backends.iter().map(Arc::clone).collect();
     let tokio_handle = tokio::runtime::Handle::current();
+    let sessions_clone = Arc::clone(&sessions);
+    let tokio_handle_clone = tokio_handle.clone();
     let state = Arc::new(ServiceState::new_with_config(
         backends,
         router,
@@ -121,6 +123,9 @@ pub async fn register_objects_with_full_config(
         label: "default".to_string(),
         items: shared_items,
         backends: backends_for_collection,
+        service_state: Arc::clone(&state),
+        sessions: sessions_clone,
+        tokio_handle: tokio_handle_clone,
     };
     server
         .at(

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use rosec_core::{BackendError, VaultBackend, VaultItemMeta};
+use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 
@@ -22,6 +23,8 @@ pub struct ItemState {
     /// Tokio runtime handle — required to bridge zbus's async-io executor with
     /// backend futures that depend on the Tokio reactor (e.g. reqwest).
     pub tokio_handle: tokio::runtime::Handle,
+    /// Reference to service state for cache updates.
+    pub items_cache: Arc<std::sync::Mutex<HashMap<String, VaultItemMeta>>>,
 }
 
 pub struct SecretItem {
@@ -123,11 +126,39 @@ impl SecretItem {
     }
 
     fn set_secret(&self, _secret: zvariant::Value) -> Result<(), FdoError> {
-        Err(FdoError::NotSupported("read-only".to_string()))
+        Err(FdoError::NotSupported(
+            "use CreateItem with replace=true".to_string(),
+        ))
     }
 
-    fn delete(&self) -> Result<(), FdoError> {
-        Err(FdoError::NotSupported("read-only".to_string()))
+    async fn delete(&self) -> Result<(), FdoError> {
+        if !self.state.backend.supports_writes() {
+            return Err(FdoError::NotSupported(
+                "backend does not support write operations".to_string(),
+            ));
+        }
+
+        let item_id = self.state.meta.id.clone();
+        let item_path = self.state.path.clone();
+        let backend = Arc::clone(&self.state.backend);
+        let items_cache = Arc::clone(&self.state.items_cache);
+        let backend_id = backend.id().to_string();
+        let item_id_for_log = item_id.clone();
+
+        self.state
+            .tokio_handle
+            .spawn(async move { backend.delete_item(&item_id).await })
+            .await
+            .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?
+            .map_err(map_backend_error)?;
+
+        info!(item_id = %item_id_for_log, backend = %backend_id, "deleted item via D-Bus");
+
+        if let Ok(mut items) = items_cache.lock() {
+            items.remove(&item_path);
+        }
+
+        Ok(())
     }
 }
 
@@ -220,6 +251,7 @@ mod tests {
     async fn get_secret_requires_valid_session() {
         let sessions = Arc::new(SessionManager::new());
         let backend = Arc::new(MockBackend);
+        let items_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let state = ItemState {
             meta: meta(false),
             path: "/org/freedesktop/secrets/item/mock/one".to_string(),
@@ -227,6 +259,7 @@ mod tests {
             sessions: sessions.clone(),
             return_attr_patterns: vec![],
             tokio_handle: tokio::runtime::Handle::current(),
+            items_cache,
         };
         let item = SecretItem::new(state);
 
@@ -245,6 +278,7 @@ mod tests {
     async fn get_secret_fails_when_locked() {
         let sessions = Arc::new(SessionManager::new());
         let backend = Arc::new(MockBackend);
+        let items_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let state = ItemState {
             meta: meta(true),
             path: "/org/freedesktop/secrets/item/mock/two".to_string(),
@@ -252,6 +286,7 @@ mod tests {
             sessions: sessions.clone(),
             return_attr_patterns: vec![],
             tokio_handle: tokio::runtime::Handle::current(),
+            items_cache,
         };
         let item = SecretItem::new(state);
 
