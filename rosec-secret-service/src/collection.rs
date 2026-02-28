@@ -5,8 +5,10 @@ use rosec_core::{NewItem, SecretBytes, VaultBackend, VaultItemMeta};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
+use zvariant::OwnedObjectPath;
 
 use crate::crypto::aes128_cbc_decrypt;
+use crate::service::to_object_path;
 use crate::session::SessionManager;
 use crate::state::{ServiceState, map_backend_error};
 
@@ -49,29 +51,32 @@ impl SecretCollection {
     }
 
     #[zbus(property)]
-    fn items(&self) -> Vec<String> {
+    fn items(&self) -> Vec<OwnedObjectPath> {
         self.state
             .items
             .lock()
-            .map(|items| items.keys().cloned().collect())
+            .map(|items| items.keys().map(|s| to_object_path(s)).collect())
             .unwrap_or_default()
     }
 
-    fn search_items(&self, attributes: HashMap<String, String>) -> Result<Vec<String>, FdoError> {
+    fn search_items(
+        &self,
+        attributes: HashMap<String, String>,
+    ) -> Result<Vec<OwnedObjectPath>, FdoError> {
         let items = self
             .state
             .items
             .lock()
             .map_err(|_| FdoError::Failed("items lock poisoned".to_string()))?;
 
-        let matched: Vec<String> = items
+        let matched: Vec<OwnedObjectPath> = items
             .iter()
             .filter(|(_, item)| {
                 attributes
                     .iter()
                     .all(|(k, v)| item.attributes.get(k) == Some(v))
             })
-            .map(|(path, _)| path.clone())
+            .map(|(path, _)| to_object_path(path))
             .collect();
 
         Ok(matched)
@@ -82,7 +87,7 @@ impl SecretCollection {
         properties: HashMap<String, zvariant::Value<'_>>,
         secret: zvariant::Value<'_>,
         replace: bool,
-    ) -> Result<(String, String), FdoError> {
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), FdoError> {
         let write_backend = self.state.service_state.write_backend().ok_or_else(|| {
             FdoError::NotSupported("no write-capable backend available".to_string())
         })?;
@@ -151,7 +156,7 @@ impl SecretCollection {
             items.insert(item_path.clone(), meta);
         }
 
-        Ok((item_path.clone(), "/".to_string()))
+        Ok((to_object_path(&item_path), to_object_path("/")))
     }
 
     fn delete(&self) -> Result<(), FdoError> {

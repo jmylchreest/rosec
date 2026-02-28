@@ -14,6 +14,7 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zeroize::Zeroizing;
 
+use crate::service::to_object_path;
 use crate::state::{ServiceState, map_backend_error};
 use rosec_core::UnlockInput;
 
@@ -90,7 +91,7 @@ impl SecretPrompt {
         #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         self.state.cancel_prompt(&self.path);
-        Self::completed(&ctxt, true, &zvariant::Value::from(""))
+        Self::completed(&ctxt, true, &zvariant::Value::from(to_object_path("/")))
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("signal: {e}")))?;
         Ok(())
@@ -122,7 +123,9 @@ async fn run_prompt_task(
 ) {
     // Inline helper: emit Completed(dismissed=true).
     async fn emit_dismissed(ctxt: &SignalEmitter<'_>) {
-        if let Err(e) = SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await {
+        if let Err(e) =
+            SecretPrompt::completed(ctxt, true, &zvariant::Value::from(to_object_path("/"))).await
+        {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
     }
@@ -186,8 +189,9 @@ async fn run_prompt_task(
 
                     tracing::debug!(backend = %backend_id, "backend unlocked via Prompt");
 
-                    let collection =
-                        zvariant::Value::from("/org/freedesktop/secrets/collection/default");
+                    let collection = zvariant::Value::from(to_object_path(
+                        "/org/freedesktop/secrets/collection/default",
+                    ));
                     if let Err(e) = SecretPrompt::completed(&ctxt, false, &collection).await {
                         tracing::warn!(error = %e, "failed to emit Completed(unlocked)");
                     }

@@ -19,6 +19,16 @@ fn log_caller(method: &str, header: &Header<'_>) {
     debug!(method, sender, "D-Bus call");
 }
 
+/// Convert a string to an `OwnedObjectPath`, falling back to `"/"` on parse
+/// error.  `"/"` is always a valid D-Bus object path so the fallback cannot
+/// fail.
+pub(crate) fn to_object_path(s: &str) -> OwnedObjectPath {
+    OwnedObjectPath::try_from(s.to_string()).unwrap_or_else(|_| {
+        OwnedObjectPath::try_from("/".to_string())
+            .unwrap_or_else(|_| unreachable!("'/' is always a valid D-Bus object path"))
+    })
+}
+
 pub struct SecretService {
     state: Arc<ServiceState>,
 }
@@ -32,8 +42,10 @@ impl SecretService {
 #[interface(name = "org.freedesktop.Secret.Service")]
 impl SecretService {
     #[zbus(property)]
-    fn collections(&self) -> Vec<String> {
-        vec!["/org/freedesktop/secrets/collection/default".to_string()]
+    fn collections(&self) -> Vec<OwnedObjectPath> {
+        vec![to_object_path(
+            "/org/freedesktop/secrets/collection/default",
+        )]
     }
 
     async fn open_session(
@@ -41,7 +53,7 @@ impl SecretService {
         algorithm: &str,
         input: zvariant::Value<'_>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(zvariant::Value<'static>, String), FdoError> {
+    ) -> Result<(zvariant::Value<'static>, OwnedObjectPath), FdoError> {
         log_caller("OpenSession", &header);
         let (output, path) = self
             .state
@@ -57,21 +69,25 @@ impl SecretService {
             .await
             .map_err(map_zbus_error)?;
 
-        Ok((output, path))
+        Ok((output, to_object_path(&path)))
     }
 
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
+    ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), FdoError> {
         log_caller("SearchItems", &header);
         self.state.touch_activity();
         // Per the Secret Service spec, SearchItems is a metadata-only operation
         // that MUST never error when backends are locked.  Items from locked
         // backends are returned in the `locked` list.  Read from the persistent
         // metadata_cache which survives lock/unlock cycles.
-        self.state.search_metadata_cache(&attributes)
+        let (unlocked, locked) = self.state.search_metadata_cache(&attributes)?;
+        Ok((
+            unlocked.into_iter().map(|s| to_object_path(&s)).collect(),
+            locked.into_iter().map(|s| to_object_path(&s)).collect(),
+        ))
     }
 
     async fn get_secrets(
@@ -79,7 +95,7 @@ impl SecretService {
         items: Vec<String>,
         session: &str,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<HashMap<String, zvariant::Value<'static>>, FdoError> {
+    ) -> Result<HashMap<OwnedObjectPath, zvariant::Value<'static>>, FdoError> {
         log_caller("GetSecrets", &header);
         self.state.touch_activity();
         self.state.ensure_session(session)?;
@@ -122,7 +138,7 @@ impl SecretService {
                 Err(e) => return Err(map_backend_error(e)),
             };
             let value = build_secret_value(session, &secret, aes_key.as_deref())?;
-            secrets.insert(path, value);
+            secrets.insert(to_object_path(&path), value);
         }
         Ok(secrets)
     }
@@ -143,12 +159,14 @@ impl SecretService {
         &self,
         name: &str,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<String, FdoError> {
+    ) -> Result<OwnedObjectPath, FdoError> {
         log_caller("ReadAlias", &header);
         if name == "default" {
-            Ok("/org/freedesktop/secrets/collection/default".to_string())
+            Ok(to_object_path(
+                "/org/freedesktop/secrets/collection/default",
+            ))
         } else {
-            Ok("/".to_string())
+            Ok(to_object_path("/"))
         }
     }
 
@@ -166,7 +184,7 @@ impl SecretService {
         &self,
         objects: Vec<String>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(Vec<String>, String), FdoError> {
+    ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_caller("Lock", &header);
         for backend in self.state.backends_ordered() {
             let bid = backend.id().to_string();
@@ -178,7 +196,10 @@ impl SecretService {
         }
         self.state.mark_locked();
         // Return the requested objects as "locked" and no prompt needed
-        Ok((objects, "/".to_string()))
+        Ok((
+            objects.iter().map(|s| to_object_path(s)).collect(),
+            to_object_path("/"),
+        ))
     }
 
     async fn unlock(
@@ -207,21 +228,10 @@ impl SecretService {
             })
             .await??;
 
-        // Helper to build an OwnedObjectPath, falling back to "/" on parse error.
-        // "/" is a well-known valid D-Bus object path; the second try_from cannot
-        // fail, but we handle the unreachable error path explicitly to stay
-        // consistent with the no-naked-unwrap policy.
-        let make_path = |s: &str| {
-            OwnedObjectPath::try_from(s.to_string()).unwrap_or_else(|_| {
-                OwnedObjectPath::try_from("/".to_string())
-                    .unwrap_or_else(|_| unreachable!("'/' is always a valid D-Bus object path"))
-            })
-        };
-
         match prompt_path_opt {
             None => {
                 // All backends unlocked — no prompt needed.
-                Ok((objects, make_path("/")))
+                Ok((objects, to_object_path("/")))
             }
             Some(backend_id) => {
                 // Allocate a unique prompt path and register the object.
@@ -235,7 +245,7 @@ impl SecretService {
                     .await
                     .map_err(map_zbus_error)?;
                 // Return empty unlocked list + the prompt path.
-                Ok((vec![], make_path(&prompt_path)))
+                Ok((vec![], to_object_path(&prompt_path)))
             }
         }
     }
@@ -245,7 +255,7 @@ impl SecretService {
         _properties: HashMap<String, zvariant::Value<'_>>,
         _alias: String,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(String, String), FdoError> {
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), FdoError> {
         log_caller("CreateCollection", &header);
         Err(FdoError::NotSupported("read-only".to_string()))
     }
