@@ -20,7 +20,7 @@ tokio = { workspace = true }
 
 # Real-time notifications (own minimal SignalR client over reqwest + tokio-websockets)
 tokio-websockets = { version = "0.13.1", default-features = false, features = ["client", "rustls-platform-verifier", "sha1_smol", "fastrand"] }
-futures-util = { version = "0.3", features = ["sink"] }
+futures-util = { workspace = true }
 http = "1"
 
 # HTTP client
@@ -35,7 +35,7 @@ sha1 = "0.10.6"
 pbkdf2 = "0.12.2"
 argon2 = "0.5.3"
 hkdf = { workspace = true }
-rsa = "0.9.9"
+rsa = "0.9.10"
 pkcs8 = { version = "0.10.2", features = ["pkcs5", "encryption"] }
 base64 = { workspace = true }
 rand = { workspace = true }

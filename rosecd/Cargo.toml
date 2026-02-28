@@ -27,4 +27,6 @@ zbus = { workspace = true }
 futures-util = { workspace = true }
 notify = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
 husky-rs = { workspace = true }

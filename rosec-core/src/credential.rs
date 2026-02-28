@@ -80,7 +80,7 @@ impl std::fmt::Debug for StorageKey {
 /// Returns `(iv_b64, ciphertext_b64, mac_b64)` — all Base64-encoded.
 /// A fresh random IV is generated on every call.
 pub fn encrypt(key: &StorageKey, plaintext: &[u8]) -> Result<EncryptedFields, String> {
-    use rand::RngCore;
+    use rand::Rng;
 
     let mut iv = vec![0u8; 16];
     rand::rng().fill_bytes(&mut iv);

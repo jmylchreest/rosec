@@ -3,7 +3,7 @@ use base64::prelude::{BASE64_STANDARD, Engine};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;

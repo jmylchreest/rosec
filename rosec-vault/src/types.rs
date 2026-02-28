@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use base64::prelude::{BASE64_STANDARD, Engine};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub const VAULT_FORMAT_VERSION: u32 = 2;

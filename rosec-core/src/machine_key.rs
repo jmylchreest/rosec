@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroizing;
 
 /// Load the machine key seed, generating and persisting it if absent.

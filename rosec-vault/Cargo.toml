@@ -21,7 +21,7 @@ aes = { workspace = true }
 cbc = { workspace = true }
 hmac = { workspace = true }
 hkdf = { workspace = true }
-pbkdf2 = "0.12"
+pbkdf2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
@@ -29,4 +29,4 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

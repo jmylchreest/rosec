@@ -22,39 +22,41 @@ license = "MIT"
 repository = "https://github.com/jmylchreest/rosec"
 
 [workspace.dependencies]
-anyhow = "1.0.97"
-thiserror = "2.0.16"
-serde = { version = "1.0.216", features = ["derive"] }
-serde_json = "1.0.133"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
-async-trait = "0.1.86"
-zeroize = "1.8.1"
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+async-trait = "0.1.89"
+zeroize = "1.8.2"
 iced = { version = "0.13.1", default-features = false, features = ["tiny-skia"] }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
-toml = "0.8.20"
+toml = "1.0.3"
 sha2 = "0.10.9"
 aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc", "std"] }
 hmac = "0.12.1"
 hkdf = "0.12.4"
 base64 = "0.22.1"
-rand = "0.9.2"
+rand = "0.10.0"
 block-padding = "0.3.3"
 num-bigint = { version = "0.4.6", features = ["rand"] }
 rpassword = "7"
 libc = "0.2"
-toml_edit = "0.22"
-futures-util = "0.3"
+toml_edit = "0.25"
+futures-util = { version = "0.3", features = ["sink"] }
 wildmatch = "2.6.1"
 chrono = { version = "0.4", features = ["serde"] }
+pbkdf2 = "0.12.2"
+tempfile = "3"
 
 # Hoisted from per-crate declarations to ensure version consistency
 zbus = "5.14.0"
 zvariant = "5.10.0"
 uuid = { version = "1.21.0", features = ["v4"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "form"] }
-notify = "7"
+notify = "8"
 ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "encryption"] }
 ssh-agent-lib = "0.5.1"
 fuser = "0.17.0"

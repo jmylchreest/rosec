@@ -15,7 +15,7 @@ tracing    = { workspace = true }
 zeroize    = { workspace = true }
 tokio      = { workspace = true, features = ["net", "io-util"] }
 libc       = { workspace = true }
-signature  = "2"
+signature  = { workspace = true }
 
 # SSH agent protocol
 ssh-agent-lib = { workspace = true }

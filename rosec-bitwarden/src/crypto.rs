@@ -189,7 +189,7 @@ pub(crate) fn encrypt_symmetric(
 ) -> Result<EncryptResult, BitwardenError> {
     use cbc::Encryptor;
     use cbc::cipher::BlockEncryptMut;
-    use rand::RngCore;
+    use rand::Rng;
 
     type Aes256CbcEnc = Encryptor<Aes256>;
 

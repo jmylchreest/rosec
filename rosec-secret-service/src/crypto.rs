@@ -103,7 +103,7 @@ pub fn generate_dh_keypair() -> Result<DhKeypair, BackendError> {
 
     // Generate 128 random bytes for the private key
     let mut priv_bytes = Zeroizing::new([0u8; DH_KEY_BYTES]);
-    rand::Rng::fill(&mut rand::rng(), priv_bytes.as_mut_slice());
+    rand::RngExt::fill(&mut rand::rng(), priv_bytes.as_mut_slice());
     let private = BigUint::from_bytes_be(priv_bytes.as_ref());
 
     let public = g.modpow(&private, &p);
@@ -174,7 +174,7 @@ pub fn aes128_cbc_encrypt(
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), BackendError> {
     let mut iv = [0u8; AES_BLOCK_BYTES];
-    rand::Rng::fill(&mut rand::rng(), &mut iv[..]);
+    rand::RngExt::fill(&mut rand::rng(), &mut iv[..]);
 
     let encryptor = Aes128CbcEnc::new(key.into(), &iv.into());
     let ciphertext = encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
