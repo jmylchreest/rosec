@@ -515,23 +515,52 @@ fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
 /// clears `ECHO`/`ECHONL`, reads a line, then restores the original settings.
 /// The returned string has the trailing newline stripped.
 ///
+/// A `TermiosGuard` ensures the original terminal settings are restored even
+/// if the read is interrupted, the thread panics, or the function exits early
+/// via `?`.  Additionally, the original termios is registered in a
+/// process-global so that a SIGINT handler can restore it if the process is
+/// killed while echo is disabled.
+///
 /// The read buffer is `Zeroizing<Vec<u8>>` so the raw bytes are scrubbed on
 /// drop — no plain copy of the secret ever lingers on the heap.
 #[cfg(unix)]
 fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<Zeroizing<String>> {
     use std::os::unix::io::FromRawFd as _;
 
-    // Save current termios.
+    /// RAII guard that restores the original `termios` on drop.
+    struct TermiosGuard {
+        fd: std::os::unix::io::RawFd,
+        orig: libc::termios,
+    }
+
+    impl Drop for TermiosGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig);
+            }
+            // Clear the global signal-handler backup since we've restored.
+            tty_signal::clear();
+        }
+    }
+
+    // Save current termios and install the RAII guard immediately.
     // SAFETY: fd is valid (we just opened it) and term is properly initialised.
-    let orig = unsafe {
+    let guard = unsafe {
         let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
         if libc::tcgetattr(fd, term.as_mut_ptr()) != 0 {
             return Err(io::Error::last_os_error());
         }
-        term.assume_init()
+        TermiosGuard {
+            fd,
+            orig: term.assume_init(),
+        }
     };
 
-    let mut noecho = orig;
+    // Register the original termios in a process-global so the SIGINT handler
+    // can restore it if the process is killed while echo is off.
+    tty_signal::install(fd, &guard.orig);
+
+    let mut noecho = guard.orig;
     // Disable echo and the newline-echo-when-echo-off flag.
     noecho.c_lflag &= !(libc::ECHO as libc::tcflag_t);
     noecho.c_lflag &= !(libc::ECHONL as libc::tcflag_t);
@@ -556,8 +585,10 @@ fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<Zeroizing<String>> {
         reader.read_until(b'\n', &mut buf)
     };
 
-    // Always restore original settings (including echo) before propagating errors.
-    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
+    // The guard restores termios on drop (runs when this function returns),
+    // but we also restore explicitly here so the newline write below sees
+    // the original settings.
+    drop(guard);
 
     // Print a newline since ECHO is off (the user's Enter was not echoed).
     let _ = unsafe { libc::write(fd, b"\n".as_ptr().cast(), 1) };
@@ -573,6 +604,79 @@ fn read_hidden(fd: std::os::unix::io::RawFd) -> io::Result<Zeroizing<String>> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .to_string();
     Ok(Zeroizing::new(s))
+}
+
+/// Process-global SIGINT handler that restores terminal settings.
+///
+/// When `read_hidden` disables echo, it registers the original termios here.
+/// If SIGINT arrives before the guard drops, the handler restores the terminal
+/// then re-raises SIGINT with the default disposition so the process exits
+/// with the correct signal status.
+#[cfg(unix)]
+mod tty_signal {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// The fd on which echo was disabled, or -1 if none.
+    static TTY_FD: AtomicI32 = AtomicI32::new(-1);
+
+    /// Original termios to restore.  Protected by a Mutex, but the signal
+    /// handler only reads it via a `try_lock` (non-blocking) to avoid
+    /// deadlock.  Worst-case the handler can't acquire the lock and skips
+    /// the restore — the process is dying anyway.
+    static ORIG_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
+
+    /// One-shot flag for installing the signal handler.
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+
+    /// Register the original termios and install the SIGINT handler (once).
+    pub(super) fn install(fd: std::os::unix::io::RawFd, orig: &libc::termios) {
+        TTY_FD.store(fd, Ordering::Release);
+        if let Ok(mut guard) = ORIG_TERMIOS.lock() {
+            *guard = Some(*orig);
+        }
+        INSTALLED.call_once(|| unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = sigint_handler as *const () as libc::sighandler_t;
+            sa.sa_flags = libc::SA_RESETHAND; // one-shot: auto-restores default
+            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        });
+    }
+
+    /// Clear the saved state (called by `TermiosGuard::drop` after normal restore).
+    pub(super) fn clear() {
+        TTY_FD.store(-1, Ordering::Release);
+        if let Ok(mut guard) = ORIG_TERMIOS.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Async-signal-safe(ish) SIGINT handler.
+    ///
+    /// Restores the original termios using `tcsetattr` (async-signal-safe per
+    /// POSIX) then re-raises SIGINT with the default handler.  The `SA_RESETHAND`
+    /// flag ensures this handler runs at most once.
+    extern "C" fn sigint_handler(_sig: libc::c_int) {
+        let fd = TTY_FD.load(Ordering::Acquire);
+        if fd >= 0 {
+            // try_lock avoids deadlock if the signal arrived while the main
+            // thread holds the mutex.  If it fails, we skip — the process is
+            // about to die.
+            if let Ok(guard) = ORIG_TERMIOS.try_lock()
+                && let Some(ref orig) = *guard
+            {
+                unsafe {
+                    libc::tcsetattr(fd, libc::TCSANOW, orig);
+                    // Write a newline so the shell prompt starts on a clean line.
+                    libc::write(fd, b"\n".as_ptr().cast(), 1);
+                }
+            }
+        }
+        // Re-raise SIGINT with default handler (SA_RESETHAND already cleared us).
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+    }
 }
 
 /// Collect a single field value from the terminal.

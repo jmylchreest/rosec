@@ -27,6 +27,30 @@ pub struct TtyField {
 }
 
 // ---------------------------------------------------------------------------
+// TermiosGuard — RAII terminal-state restoration
+// ---------------------------------------------------------------------------
+
+/// Restores the original `termios` settings on the given fd when dropped.
+///
+/// This ensures that even if the calling thread panics, is cancelled, or exits
+/// abnormally, the terminal echo flag (and all other settings) are restored.
+struct TermiosGuard {
+    fd: RawFd,
+    orig: libc::termios,
+}
+
+impl Drop for TermiosGuard {
+    fn drop(&mut self) {
+        // Best-effort restore; if the fd is already closed (EBADF) or the
+        // terminal is gone, there is nothing we can do — and that is fine
+        // because the terminal state no longer matters for a dead fd.
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Low-level read
 // ---------------------------------------------------------------------------
 
@@ -36,22 +60,29 @@ pub struct TtyField {
 /// clears `ECHO`/`ECHONL`, reads a line, then restores the original settings.
 /// The returned string has the trailing newline stripped.
 ///
+/// A `TermiosGuard` ensures the original terminal settings are restored even
+/// if the read is interrupted, the thread panics, or the function exits early
+/// via `?`.
+///
 /// The read buffer is `Zeroizing<Vec<u8>>` so the raw bytes are scrubbed on
 /// drop — no plain copy of the secret ever lingers on the heap.
 pub fn read_hidden(fd: RawFd) -> io::Result<Zeroizing<String>> {
     use std::os::unix::io::FromRawFd as _;
 
-    // Save current termios.
+    // Save current termios and install the RAII guard immediately.
     // SAFETY: fd is valid (caller verified) and term is properly initialised.
-    let orig = unsafe {
+    let guard = unsafe {
         let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
         if libc::tcgetattr(fd, term.as_mut_ptr()) != 0 {
             return Err(io::Error::last_os_error());
         }
-        term.assume_init()
+        TermiosGuard {
+            fd,
+            orig: term.assume_init(),
+        }
     };
 
-    let mut noecho = orig;
+    let mut noecho = guard.orig;
     // Disable echo and the newline-echo-when-echo-off flag.
     noecho.c_lflag &= !(libc::ECHO as libc::tcflag_t);
     noecho.c_lflag &= !(libc::ECHONL as libc::tcflag_t);
@@ -76,8 +107,10 @@ pub fn read_hidden(fd: RawFd) -> io::Result<Zeroizing<String>> {
         reader.read_until(b'\n', &mut buf)
     };
 
-    // Always restore original settings (including echo) before propagating errors.
-    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
+    // The guard restores termios on drop (runs when this function returns),
+    // but we also restore explicitly here so the newline write below sees
+    // the original settings.
+    drop(guard);
 
     // Print a newline since ECHO is off (the user's Enter was not echoed).
     let _ = unsafe { libc::write(fd, b"\n".as_ptr().cast(), 1) };
