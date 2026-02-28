@@ -30,6 +30,24 @@ pub type Attributes = HashMap<String, String>;
 /// special meaning (id, label, timestamps, type discriminator).
 pub const RESERVED_ATTRIBUTES: &[&str] = &["id", "label", "created", "modified", "type"];
 
+/// Classification of a backend for user-facing separation.
+///
+/// Vaults are rosec's own local encrypted stores, managed via `rosec vault`
+/// CLI commands. External backends connect to third-party password managers
+/// (Bitwarden, etc.) and are managed via `rosec backend` commands.
+///
+/// Internally both implement `VaultBackend` and participate in the same
+/// unlock sweep, router, and D-Bus interface. The distinction is purely
+/// user-facing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendClass {
+    /// Local encrypted vault owned by rosec.
+    Vault,
+    /// External password manager or secret store.
+    External,
+}
+
 /// Item type for determining default secret attribute.
 ///
 /// Used by `get_primary_secret()` to return the appropriate secret based on
@@ -498,10 +516,21 @@ pub trait VaultBackend: Send + Sync {
     fn id(&self) -> &str;
     fn name(&self) -> &str;
 
-    /// The backend type identifier (e.g. `"bitwarden"`, `"bitwarden-sm"`).
+    /// The backend type identifier (e.g. `"bitwarden"`, `"bitwarden-sm"`, `"vault"`).
     ///
-    /// Used by `rosec backend list` to show what kind of backend each entry is.
+    /// Used by `rosec backend list` / `rosec vault list` to show what kind of
+    /// backend each entry is.
     fn kind(&self) -> &str;
+
+    /// Whether this is a local vault or an external backend.
+    ///
+    /// Used by the CLI to separate `rosec vault` commands (for [`BackendClass::Vault`])
+    /// from `rosec backend` commands (for [`BackendClass::External`]).
+    ///
+    /// Default: [`BackendClass::External`].
+    fn backend_class(&self) -> BackendClass {
+        BackendClass::External
+    }
 
     /// Register lifecycle event callbacks on this backend.
     ///
@@ -795,11 +824,52 @@ pub enum DedupTimeFallback {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AutoLockPolicy {
     pub on_logout: bool,
     pub on_session_lock: bool,
     pub idle_timeout_minutes: Option<u64>,
     pub max_unlocked_minutes: Option<u64>,
+}
+
+/// Per-backend/per-vault autolock overrides.
+///
+/// All fields are optional — `None` means "inherit from the global `[autolock]`
+/// section".  Only explicitly set fields override the global defaults.
+///
+/// For timeout fields, `Some(0)` explicitly disables the timeout (equivalent
+/// to the global `None`), and `Some(N)` sets a timeout of N minutes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutoLockOverride {
+    pub on_logout: Option<bool>,
+    pub on_session_lock: Option<bool>,
+    pub idle_timeout_minutes: Option<u64>,
+    pub max_unlocked_minutes: Option<u64>,
+}
+
+impl AutoLockPolicy {
+    /// Produce an effective policy by layering per-backend overrides on top of
+    /// the global policy.  Fields present in `overrides` replace the
+    /// corresponding global field; `None` fields inherit from `self`.
+    ///
+    /// For timeout fields in the override, `Some(0)` maps to `None` (disabled)
+    /// in the resulting policy, matching the "0 means disabled" convention.
+    pub fn merge(&self, overrides: &AutoLockOverride) -> Self {
+        Self {
+            on_logout: overrides.on_logout.unwrap_or(self.on_logout),
+            on_session_lock: overrides.on_session_lock.unwrap_or(self.on_session_lock),
+            idle_timeout_minutes: match overrides.idle_timeout_minutes {
+                Some(0) => None,
+                Some(n) => Some(n),
+                None => self.idle_timeout_minutes,
+            },
+            max_unlocked_minutes: match overrides.max_unlocked_minutes {
+                Some(0) => None,
+                Some(n) => Some(n),
+                None => self.max_unlocked_minutes,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -890,5 +960,94 @@ mod tests {
         let debug = format!("{input:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("123456"));
+    }
+
+    #[test]
+    fn autolock_merge_inherits_when_no_overrides() {
+        let global = AutoLockPolicy {
+            on_logout: true,
+            on_session_lock: false,
+            idle_timeout_minutes: Some(15),
+            max_unlocked_minutes: Some(240),
+        };
+        let overrides = AutoLockOverride::default();
+        let merged = global.merge(&overrides);
+        assert_eq!(merged, global);
+    }
+
+    #[test]
+    fn autolock_merge_overrides_booleans() {
+        let global = AutoLockPolicy {
+            on_logout: true,
+            on_session_lock: false,
+            idle_timeout_minutes: None,
+            max_unlocked_minutes: None,
+        };
+        let overrides = AutoLockOverride {
+            on_logout: Some(false),
+            on_session_lock: Some(true),
+            ..Default::default()
+        };
+        let merged = global.merge(&overrides);
+        assert!(!merged.on_logout);
+        assert!(merged.on_session_lock);
+        assert!(merged.idle_timeout_minutes.is_none());
+        assert!(merged.max_unlocked_minutes.is_none());
+    }
+
+    #[test]
+    fn autolock_merge_overrides_timeouts() {
+        let global = AutoLockPolicy {
+            on_logout: true,
+            on_session_lock: false,
+            idle_timeout_minutes: Some(15),
+            max_unlocked_minutes: Some(240),
+        };
+        let overrides = AutoLockOverride {
+            idle_timeout_minutes: Some(30),
+            max_unlocked_minutes: Some(480),
+            ..Default::default()
+        };
+        let merged = global.merge(&overrides);
+        assert_eq!(merged.idle_timeout_minutes, Some(30));
+        assert_eq!(merged.max_unlocked_minutes, Some(480));
+    }
+
+    #[test]
+    fn autolock_merge_zero_disables_timeout() {
+        let global = AutoLockPolicy {
+            on_logout: true,
+            on_session_lock: false,
+            idle_timeout_minutes: Some(15),
+            max_unlocked_minutes: Some(240),
+        };
+        let overrides = AutoLockOverride {
+            idle_timeout_minutes: Some(0),
+            max_unlocked_minutes: Some(0),
+            ..Default::default()
+        };
+        let merged = global.merge(&overrides);
+        assert!(merged.idle_timeout_minutes.is_none());
+        assert!(merged.max_unlocked_minutes.is_none());
+    }
+
+    #[test]
+    fn autolock_merge_partial_override() {
+        let global = AutoLockPolicy {
+            on_logout: true,
+            on_session_lock: false,
+            idle_timeout_minutes: Some(15),
+            max_unlocked_minutes: Some(240),
+        };
+        // Only override idle_timeout, everything else inherits
+        let overrides = AutoLockOverride {
+            idle_timeout_minutes: Some(60),
+            ..Default::default()
+        };
+        let merged = global.merge(&overrides);
+        assert!(merged.on_logout);
+        assert!(!merged.on_session_lock);
+        assert_eq!(merged.idle_timeout_minutes, Some(60));
+        assert_eq!(merged.max_unlocked_minutes, Some(240));
     }
 }

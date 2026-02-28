@@ -216,6 +216,114 @@ fn parse_toml_value(s: &str) -> Item {
 }
 
 // ---------------------------------------------------------------------------
+// Vault config editing
+// ---------------------------------------------------------------------------
+
+/// Add a new `[[vault]]` entry to the config file.
+///
+/// `id` must be unique across both vaults and backends; returns an error if it
+/// is already present.  `path` is the on-disk vault file path.
+pub fn add_vault(
+    config_path: &Path,
+    id: &str,
+    vault_path: &str,
+    collection: Option<&str>,
+) -> Result<()> {
+    let raw = read_or_empty(config_path)?;
+    let mut doc: DocumentMut = raw.parse().context("failed to parse config as TOML")?;
+
+    // Reject duplicate IDs (check both vaults and backends).
+    if vault_ids(&doc).any(|existing| existing == id) {
+        bail!("vault '{id}' already exists in {}", config_path.display());
+    }
+    if backend_ids(&doc).any(|existing| existing == id) {
+        bail!(
+            "a backend with id '{id}' already exists in {}",
+            config_path.display()
+        );
+    }
+
+    let mut entry = Table::new();
+    entry.set_implicit(false);
+    entry["id"] = value(id);
+    entry["path"] = value(vault_path);
+
+    if let Some(col) = collection {
+        entry["collection"] = value(col);
+    }
+
+    let vaults = doc
+        .entry("vault")
+        .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .context("`vault` key is not an array-of-tables")?;
+
+    vaults.push(entry);
+
+    write_doc(config_path, &doc)
+}
+
+/// Remove a `[[vault]]` entry by id.
+///
+/// Returns an error if no entry with that id exists.
+pub fn remove_vault(config_path: &Path, id: &str) -> Result<()> {
+    let raw = read_or_empty(config_path)?;
+    let mut doc: DocumentMut = raw.parse().context("failed to parse config as TOML")?;
+
+    let vaults = match doc
+        .get_mut("vault")
+        .and_then(|item| item.as_array_of_tables_mut())
+    {
+        Some(v) => v,
+        None => bail!("no vaults configured in {}", config_path.display()),
+    };
+
+    let before = vaults.len();
+    let indices_to_remove: Vec<usize> = (0..vaults.len())
+        .filter(|&i| {
+            vaults
+                .get(i)
+                .and_then(|t| t.get("id"))
+                .and_then(|v| v.as_str())
+                == Some(id)
+        })
+        .collect();
+
+    if indices_to_remove.is_empty() {
+        bail!("vault '{id}' not found in {}", config_path.display());
+    }
+
+    // Remove in reverse order so earlier indices stay valid.
+    for i in indices_to_remove.into_iter().rev() {
+        vaults.remove(i);
+    }
+
+    let after = vaults.len();
+
+    // If the array is now empty, remove the key entirely so the file stays clean.
+    if after == 0 {
+        doc.remove("vault");
+    }
+
+    tracing::debug!(
+        removed = before - after,
+        config = %config_path.display(),
+        "removed vault '{id}' from config"
+    );
+
+    write_doc(config_path, &doc)
+}
+
+/// Iterate over the vault IDs present in a parsed config document.
+fn vault_ids(doc: &DocumentMut) -> impl Iterator<Item = &str> {
+    doc.get("vault")
+        .and_then(|item| item.as_array_of_tables())
+        .into_iter()
+        .flat_map(|aot| aot.iter())
+        .filter_map(|t| t.get("id")?.as_str())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -363,6 +471,111 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("# my comment"));
         assert!(contents.contains("dedup_strategy = \"priority\""));
+        assert!(contents.contains("id = \"bw1\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Vault config editing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_vault_creates_file() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(
+            &path,
+            "personal",
+            "~/.local/share/rosec/vaults/personal.vault",
+            None,
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("[[vault]]"));
+        assert!(contents.contains("id = \"personal\""));
+        assert!(contents.contains("path = \"~/.local/share/rosec/vaults/personal.vault\""));
+    }
+
+    #[test]
+    fn add_vault_with_collection() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(&path, "work", "/mnt/work.vault", Some("work")).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("collection = \"work\""));
+    }
+
+    #[test]
+    fn add_vault_rejects_duplicate_id() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(&path, "v1", "/tmp/v1.vault", None).unwrap();
+        let err = add_vault(&path, "v1", "/tmp/v1b.vault", None).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn add_vault_rejects_id_colliding_with_backend() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_backend(&path, "shared-id", "bitwarden", &[]).unwrap();
+        let err = add_vault(&path, "shared-id", "/tmp/v.vault", None).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn remove_vault_by_id() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(&path, "v1", "/tmp/v1.vault", None).unwrap();
+        add_vault(&path, "v2", "/tmp/v2.vault", None).unwrap();
+        remove_vault(&path, "v1").unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("id = \"v1\""));
+        assert!(contents.contains("id = \"v2\""));
+    }
+
+    #[test]
+    fn remove_last_vault_cleans_key() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(&path, "v1", "/tmp/v1.vault", None).unwrap();
+        remove_vault(&path, "v1").unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("v1"));
+        assert!(!contents.contains("[[vault]]"));
+    }
+
+    #[test]
+    fn remove_nonexistent_vault_errors() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        let err = remove_vault(&path, "ghost").unwrap_err();
+        assert!(err.to_string().contains("not found") || err.to_string().contains("no vaults"));
+    }
+
+    #[test]
+    fn mixed_vault_and_backend_preserved() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        add_vault(&path, "local", "/tmp/local.vault", None).unwrap();
+        add_backend(
+            &path,
+            "bw1",
+            "bitwarden",
+            &[("email".into(), "a@b.com".into())],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("[[vault]]"));
+        assert!(contents.contains("[[backend]]"));
+        assert!(contents.contains("id = \"local\""));
+        assert!(contents.contains("id = \"bw1\""));
+
+        // Remove the vault, backend should remain.
+        remove_vault(&path, "local").unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("[[vault]]"));
+        assert!(contents.contains("[[backend]]"));
         assert!(contents.contains("id = \"bw1\""));
     }
 }

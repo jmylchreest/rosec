@@ -9,6 +9,7 @@ repository = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 rosec-core = { path = "../rosec-core" }
+rosec-vault = { path = "../rosec-vault" }
 rosec-bitwarden = { path = "../rosec-bitwarden" }
 rosec-bitwarden-sm = { path = "../rosec-bitwarden-sm" }
 rosec-secret-service = { path = "../rosec-secret-service" }

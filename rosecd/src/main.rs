@@ -44,7 +44,11 @@ async fn run() -> Result<()> {
     let config_path = parse_config_path();
     let config = load_config(&config_path)?;
     tracing::info!("loaded config from {}", config_path.display());
-    tracing::info!("backends configured: {}", config.backend.len());
+    tracing::info!(
+        "vaults: {}, backends: {}",
+        config.vault.len(),
+        config.backend.len()
+    );
 
     let router_config = RouterConfig {
         dedup_strategy: config.service.dedup_strategy,
@@ -56,8 +60,9 @@ async fn run() -> Result<()> {
     let backends: Vec<Arc<dyn VaultBackend>> = build_backends(&config).await?;
 
     // Build per-backend return_attr and collection maps from config.
-    let return_attr_map: std::collections::HashMap<String, Vec<String>> = config
-        .backend
+    // Include both vault entries and backend entries.
+    let mut return_attr_map: std::collections::HashMap<String, Vec<String>> = config
+        .vault
         .iter()
         .filter_map(|entry| {
             entry
@@ -66,9 +71,15 @@ async fn run() -> Result<()> {
                 .map(|patterns| (entry.id.clone(), patterns.clone()))
         })
         .collect();
+    return_attr_map.extend(config.backend.iter().filter_map(|entry| {
+        entry
+            .return_attr
+            .as_ref()
+            .map(|patterns| (entry.id.clone(), patterns.clone()))
+    }));
 
-    let collection_map: std::collections::HashMap<String, String> = config
-        .backend
+    let mut collection_map: std::collections::HashMap<String, String> = config
+        .vault
         .iter()
         .filter_map(|entry| {
             entry
@@ -77,6 +88,12 @@ async fn run() -> Result<()> {
                 .map(|col| (entry.id.clone(), col.clone()))
         })
         .collect();
+    collection_map.extend(config.backend.iter().filter_map(|entry| {
+        entry
+            .collection
+            .as_ref()
+            .map(|col| (entry.id.clone(), col.clone()))
+    }));
 
     let conn = zbus::Connection::session().await?;
     let state = register_objects_with_full_config(
@@ -273,7 +290,9 @@ async fn run() -> Result<()> {
 
     // Auto-lock policy background task.
     // Reads autolock settings from live_config on every tick so changes to the
-    // config file take effect without a restart.
+    // config file take effect without a restart.  Each backend is evaluated
+    // independently against its effective policy (global defaults merged with
+    // any per-backend/per-vault overrides).
     let autolock_state = Arc::clone(&state);
     let autolock_ssh = ssh_manager.clone();
     tokio::spawn(async move {
@@ -281,38 +300,58 @@ async fn run() -> Result<()> {
         loop {
             tokio::time::sleep(check_interval).await;
 
-            let autolock = autolock_state.live_config().autolock;
+            let mut any_locked = false;
 
-            // Check idle timeout.
-            // 0 means disabled (same as omitting the field); skip the check.
-            if let Some(idle_min) = autolock.idle_timeout_minutes
-                && idle_min != 0
-                && autolock_state.is_idle_expired(idle_min)
-            {
-                tracing::info!(idle_minutes = idle_min, "idle timeout expired, locking");
-                if let Err(e) = autolock_state.auto_lock().await {
-                    tracing::warn!("auto-lock failed: {e}");
-                } else if let Some(ref sm) = autolock_ssh {
-                    sm.clear();
+            for backend in autolock_state.backends_ordered() {
+                let backend_id = backend.id().to_string();
+                let policy = autolock_state.effective_autolock_policy(&backend_id);
+
+                // Check idle timeout (global idle time, per-backend threshold).
+                // 0 means disabled (same as omitting the field); skip the check.
+                if let Some(idle_min) = policy.idle_timeout_minutes
+                    && idle_min != 0
+                    && autolock_state.is_idle_expired(idle_min)
+                {
+                    tracing::info!(
+                        backend = %backend_id,
+                        idle_minutes = idle_min,
+                        "idle timeout expired, locking backend"
+                    );
+                    if let Err(e) = autolock_state.auto_lock_backend(&backend_id).await {
+                        tracing::warn!(backend = %backend_id, "auto-lock failed: {e}");
+                    } else {
+                        any_locked = true;
+                    }
+                    continue;
                 }
-                continue;
+
+                // Check max-unlocked timeout (per-backend unlock timestamp).
+                // 0 means disabled (same as omitting the field); skip the check.
+                if let Some(max_min) = policy.max_unlocked_minutes
+                    && max_min != 0
+                    && autolock_state.is_backend_max_unlocked_expired(&backend_id, max_min)
+                {
+                    tracing::info!(
+                        backend = %backend_id,
+                        max_minutes = max_min,
+                        "max-unlocked timeout expired, locking backend"
+                    );
+                    if let Err(e) = autolock_state.auto_lock_backend(&backend_id).await {
+                        tracing::warn!(backend = %backend_id, "auto-lock failed: {e}");
+                    } else {
+                        any_locked = true;
+                    }
+                }
             }
 
-            // Check max-unlocked timeout.
-            // 0 means disabled (same as omitting the field); skip the check.
-            if let Some(max_min) = autolock.max_unlocked_minutes
-                && max_min != 0
-                && autolock_state.is_max_unlocked_expired(max_min)
-            {
-                tracing::info!(
-                    max_minutes = max_min,
-                    "max-unlocked timeout expired, locking"
-                );
-                if let Err(e) = autolock_state.auto_lock().await {
-                    tracing::warn!("auto-lock failed: {e}");
-                } else if let Some(ref sm) = autolock_ssh {
+            // If any backends were locked and all are now locked, clear SSH keys.
+            if any_locked && autolock_state.all_backends_locked() {
+                if let Some(ref sm) = autolock_ssh {
                     sm.clear();
                 }
+                // Clear the global activity timestamp so the idle check doesn't
+                // keep re-firing every poll interval on already-locked backends.
+                autolock_state.mark_locked();
             }
         }
     });
@@ -521,20 +560,34 @@ async fn logind_watcher(
             msg = session_removed_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
-                        // Check live config — on_logout may have changed since startup.
-                        if state.live_config().autolock.on_logout {
-                            // SessionRemoved(id: &str, path: OwnedObjectPath)
-                            // Only lock if the removed session is *our* session.
-                            if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
-                                let removed_id = body.0;
-                                if session_id.as_deref() == Some(&removed_id) {
-                                    tracing::info!(session = %removed_id, "logind: our session removed — locking");
+                        // SessionRemoved(id: &str, path: OwnedObjectPath)
+                        // Only lock if the removed session is *our* session.
+                        if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
+                            let removed_id = body.0;
+                            if session_id.as_deref() == Some(&removed_id) {
+                                // Check per-backend on_logout policies.
+                                let mut any_locked = false;
+                                for backend in state.backends_ordered() {
+                                    let bid = backend.id().to_string();
+                                    let policy = state.effective_autolock_policy(&bid);
+                                    if policy.on_logout {
+                                        tracing::info!(
+                                            session = %removed_id,
+                                            backend = %bid,
+                                            "logind: our session removed — locking backend"
+                                        );
+                                        if let Err(e) = state.auto_lock_backend(&bid).await {
+                                            tracing::warn!(backend = %bid, "auto-lock on logout failed: {e}");
+                                        } else {
+                                            any_locked = true;
+                                        }
+                                    }
+                                }
+                                if any_locked && state.all_backends_locked() {
                                     if let Some(ref sm) = ssh_manager {
                                         sm.clear();
                                     }
-                                    if let Err(e) = state.auto_lock().await {
-                                        tracing::warn!("auto-lock on logout failed: {e}");
-                                    }
+                                    state.mark_locked();
                                 }
                             }
                         }
@@ -550,15 +603,28 @@ async fn logind_watcher(
             msg = poll_lock_stream(&mut lock_stream_opt), if lock_stream_opt.is_some() => {
                 match msg {
                     Some(Ok(_)) => {
-                        // Check live config — on_session_lock may have changed since startup.
-                        if state.live_config().autolock.on_session_lock {
-                            tracing::info!("logind: session Lock signal — locking all backends");
+                        // Check per-backend on_session_lock policies.
+                        let mut any_locked = false;
+                        for backend in state.backends_ordered() {
+                            let bid = backend.id().to_string();
+                            let policy = state.effective_autolock_policy(&bid);
+                            if policy.on_session_lock {
+                                tracing::info!(
+                                    backend = %bid,
+                                    "logind: session Lock signal — locking backend"
+                                );
+                                if let Err(e) = state.auto_lock_backend(&bid).await {
+                                    tracing::warn!(backend = %bid, "auto-lock on session lock failed: {e}");
+                                } else {
+                                    any_locked = true;
+                                }
+                            }
+                        }
+                        if any_locked && state.all_backends_locked() {
                             if let Some(ref sm) = ssh_manager {
                                 sm.clear();
                             }
-                            if let Err(e) = state.auto_lock().await {
-                                tracing::warn!("auto-lock on session lock failed: {e}");
-                            }
+                            state.mark_locked();
                         }
                     }
                     Some(Err(e)) => {
@@ -692,19 +758,32 @@ fn wire_backend_callbacks(
     }
 }
 
-/// Build all configured backends from the config, in order.
+/// Build all configured backends (both vaults and external backends), in order.
 ///
-/// Delegates to `build_single_backend` for each entry so startup and
-/// hot-reload share identical construction logic.  Returns an empty vec if no
-/// backends are configured — the daemon handles that state gracefully.
+/// Vaults are built first (from `[[vault]]` config entries), then external
+/// backends (from `[[backend]]` entries).  Both go through the same
+/// `VaultBackend` trait — the distinction is user-facing only.
 async fn build_backends(config: &Config) -> Result<Vec<Arc<dyn VaultBackend>>> {
-    if config.backend.is_empty() {
-        tracing::warn!("no backends configured");
+    let total = config.vault.len() + config.backend.len();
+    if total == 0 {
+        tracing::warn!("no vaults or backends configured");
         return Ok(Vec::new());
     }
 
-    let mut backends: Vec<Arc<dyn VaultBackend>> = Vec::with_capacity(config.backend.len());
+    let mut backends: Vec<Arc<dyn VaultBackend>> = Vec::with_capacity(total);
 
+    // Build vault backends.
+    for entry in &config.vault {
+        let backend = build_vault_backend(entry);
+        tracing::info!(
+            vault_id = %entry.id,
+            path = %entry.path,
+            "vault initialized"
+        );
+        backends.push(backend);
+    }
+
+    // Build external backends.
     for entry in &config.backend {
         match build_single_backend(entry).await {
             Ok(backend) => {
@@ -732,6 +811,43 @@ async fn build_backends(config: &Config) -> Result<Vec<Arc<dyn VaultBackend>>> {
     }
 
     Ok(backends)
+}
+
+/// Construct a vault backend from a `[[vault]]` config entry.
+///
+/// The path undergoes `~` expansion and, if relative, is resolved against
+/// `$XDG_DATA_HOME/rosec/vaults/`.
+fn build_vault_backend(entry: &rosec_core::config::VaultEntry) -> Arc<dyn VaultBackend> {
+    let path = expand_vault_path(&entry.path);
+    Arc::new(rosec_vault::LocalVault::new(&entry.id, path))
+}
+
+/// Expand `~` in a vault path and resolve relative paths against the default
+/// vault directory.
+fn expand_vault_path(raw: &str) -> PathBuf {
+    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home).join(stripped)
+        } else {
+            PathBuf::from(raw)
+        }
+    } else {
+        PathBuf::from(raw)
+    };
+
+    if expanded.is_relative() {
+        // Default vault directory: $XDG_DATA_HOME/rosec/vaults/
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                PathBuf::from(home).join(".local/share")
+            })
+            .join("rosec/vaults");
+        data_dir.join(expanded)
+    } else {
+        expanded
+    }
 }
 
 /// Compute a stable fingerprint string for a backend config entry.
@@ -764,6 +880,20 @@ fn backend_fingerprint(entry: &rosec_core::config::BackendEntry) -> String {
         opts.join(","),
         return_attr,
         match_attr,
+    )
+}
+
+/// Compute a stable fingerprint string for a vault config entry.
+fn vault_fingerprint(entry: &rosec_core::config::VaultEntry) -> String {
+    let return_attr = entry
+        .return_attr
+        .as_deref()
+        .map(|v| v.join(","))
+        .unwrap_or_default();
+    let collection = entry.collection.as_deref().unwrap_or_default();
+    format!(
+        "vault:path={}:return_attr={return_attr}:collection={collection}",
+        entry.path
     )
 }
 
@@ -829,10 +959,17 @@ async fn config_watcher(
 
     // Seed `known` from the initial config fingerprints so the first diff
     // compares actual config values — not bare backend IDs.
+    // Include both vault entries and backend entries.
     let mut known: Vec<(String, String)> = initial_config
-        .backend
+        .vault
         .iter()
-        .map(|entry| (entry.id.clone(), backend_fingerprint(entry)))
+        .map(|entry| (entry.id.clone(), vault_fingerprint(entry)))
+        .chain(
+            initial_config
+                .backend
+                .iter()
+                .map(|entry| (entry.id.clone(), backend_fingerprint(entry))),
+        )
         .collect();
 
     loop {
@@ -864,11 +1001,17 @@ async fn config_watcher(
             }
         };
 
-        // Build fingerprints for the new config.
+        // Build fingerprints for the new config (vaults + backends).
         let new_fingerprints: Vec<(String, String)> = new_config
-            .backend
+            .vault
             .iter()
-            .map(|entry| (entry.id.clone(), backend_fingerprint(entry)))
+            .map(|entry| (entry.id.clone(), vault_fingerprint(entry)))
+            .chain(
+                new_config
+                    .backend
+                    .iter()
+                    .map(|entry| (entry.id.clone(), backend_fingerprint(entry))),
+            )
             .collect();
 
         if new_fingerprints == known {
@@ -903,8 +1046,25 @@ async fn config_watcher(
             }
         }
 
-        // Add backends that are new or changed.
+        // Add vaults and backends that are new or changed.
         let mut added_any = false;
+
+        // Add new/changed vaults.
+        for entry in &new_config.vault {
+            let id = entry.id.as_str();
+            let is_new = !known_ids.contains(id);
+            let is_changed = known_map
+                .get(id)
+                .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
+            if is_new || is_changed {
+                let backend = build_vault_backend(entry);
+                state.hotreload_add_backend(backend);
+                tracing::info!(vault_id = id, "hot-reload: added vault");
+                added_any = true;
+            }
+        }
+
+        // Add new/changed external backends.
         for entry in &new_config.backend {
             let id = entry.id.as_str();
             let is_new = !known_ids.contains(id);

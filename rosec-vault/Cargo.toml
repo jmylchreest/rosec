@@ -1,11 +1,11 @@
 [package]
-name = "rosec-file"
+name = "rosec-vault"
 version.workspace = true
 edition = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
-description = "Encrypted local file backend for rosec"
+description = "Encrypted local vault backend for rosec"
 
 [dependencies]
 rosec-core = { path = "../rosec-core" }

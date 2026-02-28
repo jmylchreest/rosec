@@ -7,7 +7,9 @@ use std::time::SystemTime;
 use rosec_core::config::{Config, PromptConfig};
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
-use rosec_core::{Attributes, BackendError, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta};
+use rosec_core::{
+    Attributes, AutoLockPolicy, BackendError, SecretBytes, UnlockInput, VaultBackend, VaultItemMeta,
+};
 use tracing::{debug, info, warn};
 use zbus::Connection;
 use zbus::fdo::Error as FdoError;
@@ -77,7 +79,16 @@ pub struct ServiceState {
     /// Timestamp of the last client activity (D-Bus method call).
     last_activity: Mutex<Option<SystemTime>>,
     /// Timestamp when any backend was first unlocked (for max-unlocked policy).
+    ///
+    /// Legacy global field — kept for the `auto_lock` (lock-all) path.
+    /// Per-backend max-unlocked checks use `unlocked_since_map` instead.
     unlocked_since: Mutex<Option<SystemTime>>,
+    /// Per-backend unlock timestamps for per-backend max-unlocked checking.
+    ///
+    /// Key: backend ID.  Value: when that backend was unlocked.
+    /// Populated by `mark_backend_unlocked()`, cleared by
+    /// `clear_backend_unlocked()` or bulk `mark_locked()`.
+    unlocked_since_map: Mutex<HashMap<String, SystemTime>>,
     /// Tokio runtime handle.
     ///
     /// zbus dispatches D-Bus method calls on its own `async-io` executor, which
@@ -195,6 +206,7 @@ impl ServiceState {
             sync_in_progress: std::sync::Mutex::new(HashMap::new()),
             last_activity: Mutex::new(None),
             unlocked_since: Mutex::new(None),
+            unlocked_since_map: Mutex::new(HashMap::new()),
             tokio_handle,
             prompt_counter: AtomicU32::new(0),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -491,17 +503,52 @@ impl ServiceState {
         }
     }
 
-    /// Record that the backend has been unlocked (starts max-unlocked timer).
+    /// Record that a backend has been unlocked (starts max-unlocked timer).
+    ///
+    /// Updates both the global `unlocked_since` (for the lock-all path) and the
+    /// per-backend `unlocked_since_map` (for per-backend autolock).
     pub(crate) fn mark_unlocked(&self) {
+        let now = SystemTime::now();
         if let Ok(mut guard) = self.unlocked_since.lock() {
-            *guard = Some(SystemTime::now());
+            *guard = Some(now);
         }
     }
 
-    /// Clear the unlock timestamp (backend was locked).
-    pub(crate) fn mark_locked(&self) {
+    /// Record that a specific backend has been unlocked.
+    ///
+    /// Also updates the global `unlocked_since` timestamp.
+    pub(crate) fn mark_backend_unlocked(&self, backend_id: &str) {
+        let now = SystemTime::now();
+        if let Ok(mut guard) = self.unlocked_since.lock() {
+            *guard = Some(now);
+        }
+        if let Ok(mut guard) = self.unlocked_since_map.lock() {
+            guard.insert(backend_id.to_string(), now);
+        }
+    }
+
+    /// Clear the unlock timestamp for all backends (all locked).
+    pub fn mark_locked(&self) {
         if let Ok(mut guard) = self.unlocked_since.lock() {
             *guard = None;
+        }
+        if let Ok(mut guard) = self.unlocked_since_map.lock() {
+            guard.clear();
+        }
+    }
+
+    /// Clear the unlock timestamp for a specific backend.
+    pub(crate) fn clear_backend_unlocked(&self, backend_id: &str) {
+        if let Ok(mut guard) = self.unlocked_since_map.lock() {
+            guard.remove(backend_id);
+        }
+    }
+
+    /// Returns `true` if no backends are currently tracked as unlocked.
+    pub fn all_backends_locked(&self) -> bool {
+        match self.unlocked_since_map.lock() {
+            Ok(guard) => guard.is_empty(),
+            Err(_) => true,
         }
     }
 
@@ -535,6 +582,64 @@ impl ServiceState {
             }
             None => false,
         }
+    }
+
+    /// Check if a specific backend has been unlocked longer than `max_minutes`.
+    pub fn is_backend_max_unlocked_expired(&self, backend_id: &str, max_minutes: u64) -> bool {
+        let guard = match self.unlocked_since_map.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        match guard.get(backend_id) {
+            Some(since) => {
+                let elapsed = SystemTime::now().duration_since(*since).unwrap_or_default();
+                elapsed.as_secs() >= max_minutes * 60
+            }
+            None => false,
+        }
+    }
+
+    /// Resolve the effective autolock policy for a given backend/vault ID.
+    ///
+    /// Looks up per-backend/per-vault overrides from the live config and merges
+    /// them on top of the global `[autolock]` section.  If no override is
+    /// configured for this backend, returns the global policy as-is.
+    pub fn effective_autolock_policy(&self, backend_id: &str) -> AutoLockPolicy {
+        let config = self.live_config();
+        let global = &config.autolock;
+
+        // Check backend entries first, then vault entries.
+        let overrides = config
+            .backend
+            .iter()
+            .find(|b| b.id == backend_id)
+            .and_then(|b| b.autolock.as_ref())
+            .or_else(|| {
+                config
+                    .vault
+                    .iter()
+                    .find(|v| v.id == backend_id)
+                    .and_then(|v| v.autolock.as_ref())
+            });
+
+        match overrides {
+            Some(o) => global.merge(o),
+            None => global.clone(),
+        }
+    }
+
+    /// Lock a single backend by ID and update related state.
+    pub async fn auto_lock_backend(&self, backend_id: &str) -> Result<(), FdoError> {
+        let backend = self
+            .backend_by_id(backend_id)
+            .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+        self.run_on_tokio(async move { backend.lock().await })
+            .await?
+            .map_err(map_backend_error)?;
+        self.clear_backend_unlocked(backend_id);
+        self.mark_backend_locked_in_cache(backend_id);
+        info!(backend = %backend_id, "backend auto-locked");
+        Ok(())
     }
 
     /// Collect a password from the user for the given backend, using whichever
@@ -807,15 +912,28 @@ impl ServiceState {
     ///
     /// Called by the `AuthBackend` D-Bus method (used by `rosec auth`).
     /// Dispatches to Tokio so that the unlock future runs on the Tokio reactor.
+    ///
+    /// After the target backend is successfully unlocked, an opportunistic
+    /// sweep tries the same password against all other locked backends.
     pub async fn auth_backend(
         self: &Arc<Self>,
         backend_id: &str,
-        fields: HashMap<String, String>,
+        fields: HashMap<String, Zeroizing<String>>,
     ) -> Result<(), FdoError> {
         let this = Arc::clone(self);
         let backend_id = backend_id.to_string();
         self.tokio_handle
             .spawn(async move {
+                // Extract the password before auth_backend_inner consumes `fields`,
+                // so we can use it for the opportunistic sweep afterwards.
+                let password_for_sweep = {
+                    let backend = this.backend_by_id(&backend_id).ok_or_else(|| {
+                        FdoError::Failed(format!("backend '{backend_id}' not found"))
+                    })?;
+                    let pw_field_id = backend.password_field().id;
+                    fields.get(pw_field_id).cloned()
+                };
+
                 this.auth_backend_inner(&backend_id, fields).await?;
                 // Trigger a sync so that on_sync_succeeded callbacks (e.g. SSH
                 // key rebuild) fire immediately after the vault is unlocked,
@@ -823,6 +941,20 @@ impl ServiceState {
                 if let Err(e) = this.try_sync_backend(&backend_id).await {
                     warn!(backend = %backend_id, "post-auth sync failed: {e}");
                 }
+
+                // Opportunistically try the same password against other locked
+                // backends.  Spawn as a detached task so the caller's D-Bus
+                // response returns immediately — the sweep can take seconds
+                // when it triggers full Bitwarden syncs.
+                if let Some(password) = password_for_sweep {
+                    let sweep_state = Arc::clone(&this);
+                    let sweep_id = backend_id.clone();
+                    tokio::spawn(async move {
+                        sweep_state.opportunistic_sweep(&password, &sweep_id).await;
+                        debug!("opportunistic sweep complete (from auth_backend)");
+                    });
+                }
+
                 Ok(())
             })
             .await
@@ -832,7 +964,7 @@ impl ServiceState {
     pub(crate) async fn auth_backend_inner(
         &self,
         backend_id: &str,
-        fields: HashMap<String, String>,
+        fields: HashMap<String, Zeroizing<String>>,
     ) -> Result<(), FdoError> {
         let backend = self
             .backend_by_id(backend_id)
@@ -853,7 +985,7 @@ impl ServiceState {
             )));
         }
 
-        let password = Zeroizing::new(password_value.clone());
+        let password = password_value.clone();
 
         // Collect any non-empty registration/auth fields supplied alongside the password.
         // Sources: registration_info fields (first-time setup) and auth_fields (e.g. token
@@ -871,7 +1003,7 @@ impl ServiceState {
         let registration_fields: HashMap<String, Zeroizing<String>> = fields
             .iter()
             .filter(|(k, v)| all_extra_ids.contains(k.as_str()) && !v.is_empty())
-            .map(|(k, v)| (k.clone(), Zeroizing::new(v.clone())))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
         let input = if registration_fields.is_empty() {
@@ -885,10 +1017,62 @@ impl ServiceState {
 
         backend.unlock(input).await.map_err(map_backend_error)?;
 
-        self.mark_unlocked();
+        self.mark_backend_unlocked(backend_id);
         self.touch_activity();
         info!(backend = %backend_id, "backend authenticated via AuthBackend");
         Ok(())
+    }
+
+    /// Try the password from a successful auth against all other locked backends.
+    ///
+    /// This is best-effort: failures are silently logged at `debug` level and
+    /// never surface to the caller.  The goal is to reduce the number of
+    /// password prompts when multiple backends share the same credentials.
+    ///
+    /// Only the password field is forwarded — registration fields, 2FA tokens,
+    /// etc. are backend-specific and cannot be reused.
+    pub(crate) async fn opportunistic_sweep(
+        self: &Arc<Self>,
+        password: &Zeroizing<String>,
+        exclude_id: &str,
+    ) {
+        let backends = {
+            let order = self.backend_order.read().unwrap_or_else(|e| e.into_inner());
+            let map = self.backends.read().unwrap_or_else(|e| e.into_inner());
+            order
+                .iter()
+                .filter(|id| id.as_str() != exclude_id)
+                .filter_map(|id| map.get(id).map(|b| (id.clone(), Arc::clone(b))))
+                .collect::<Vec<_>>()
+        };
+
+        for (id, backend) in &backends {
+            // Skip already-unlocked backends.
+            let locked = match backend.status().await {
+                Ok(s) => s.locked,
+                Err(_) => continue,
+            };
+            if !locked {
+                continue;
+            }
+
+            // Map the password to this backend's expected field name.
+            let pw_field_id = backend.password_field().id.to_string();
+            let mut fields = HashMap::new();
+            fields.insert(pw_field_id, password.clone());
+
+            match self.auth_backend_inner(id, fields).await {
+                Ok(()) => {
+                    info!(backend = %id, "opportunistic sweep: unlocked");
+                    if let Err(e) = self.try_sync_backend(id).await {
+                        debug!(backend = %id, "opportunistic sweep: post-unlock sync failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    debug!(backend = %id, "opportunistic sweep: unlock failed (expected): {e}");
+                }
+            }
+        }
     }
 
     /// Search items using glob patterns on their public attributes.

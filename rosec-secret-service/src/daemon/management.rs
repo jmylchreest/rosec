@@ -255,14 +255,29 @@ impl RosecManagement {
     ///
     /// The `fields` map must contain the keys returned by `GetAuthFields`.
     /// Returns `true` on success, or a D-Bus error on failure.
+    ///
+    /// # Security
+    ///
+    /// The incoming `HashMap<String, String>` arrives as plain D-Bus `a{ss}` —
+    /// passwords are visible to `dbus-monitor`.  Prefer `AuthBackendWithTty`
+    /// (fd-passing) for interactive clients.  This method converts values into
+    /// `Zeroizing<String>` at the D-Bus boundary and explicitly zeroizes the
+    /// original map so plain-text copies are scrubbed as soon as possible.
     async fn auth_backend(
         &self,
         backend_id: &str,
-        fields: HashMap<String, String>,
+        mut fields: HashMap<String, String>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<bool, FdoError> {
         log_caller("AuthBackend", &header);
-        self.state.auth_backend(backend_id, fields).await?;
+
+        // Convert to Zeroizing at the D-Bus boundary, then zeroize originals.
+        let secure_fields: HashMap<String, zeroize::Zeroizing<String>> = fields
+            .drain()
+            .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
+            .collect();
+
+        self.state.auth_backend(backend_id, secure_fields).await?;
         Ok(true)
     }
 
@@ -352,6 +367,275 @@ impl RosecManagement {
             .map_err(|e| FdoError::Failed(format!("auth_backend_with_tty error: {e}")))
     }
 
+    /// Authenticate a backend by reading a password from a pipe fd.
+    ///
+    /// The caller creates a pipe, writes the password to the write end (then
+    /// closes it), and passes the read end via D-Bus fd-passing (SCM_RIGHTS).
+    /// The daemon reads the password from the pipe, wraps it in `Zeroizing`,
+    /// and calls `auth_backend`.
+    ///
+    /// This is the preferred method for PAM modules and other non-interactive
+    /// callers that already have the password but want to avoid sending it as
+    /// a plain D-Bus message payload (visible to `dbus-monitor`).
+    ///
+    /// **Access restricted**: The daemon resolves the caller's PID via
+    /// `GetConnectionCredentials` and verifies that `/proc/<pid>/exe` matches
+    /// one of the paths in `[service] pam_helper_paths`.  If the caller is
+    /// not the PAM helper binary, the request is rejected.
+    ///
+    /// Returns `true` on success.  Returns a D-Bus error if the backend is not
+    /// found, the password is wrong, or reading from the pipe fails.
+    async fn auth_backend_from_pipe(
+        &self,
+        backend_id: String,
+        pipe_fd: OwnedFd,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<bool, FdoError> {
+        log_caller("AuthBackendFromPipe", &header);
+
+        // --- Caller verification ---
+        let allowed_paths = self.state.live_config().service.pam_helper_paths;
+        if !allowed_paths.is_empty() {
+            let sender = header.sender().ok_or_else(|| {
+                FdoError::AccessDenied("AuthBackendFromPipe: missing D-Bus sender".into())
+            })?;
+            let dbus_proxy = zbus::fdo::DBusProxy::new(&self.state.conn)
+                .await
+                .map_err(|e| FdoError::Failed(format!("DBusProxy: {e}")))?;
+            let pid = dbus_proxy
+                .get_connection_unix_process_id(zbus::names::BusName::from(sender.clone()))
+                .await
+                .map_err(|e| {
+                    FdoError::AccessDenied(format!(
+                        "AuthBackendFromPipe: cannot resolve caller PID: {e}"
+                    ))
+                })?;
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|e| {
+                FdoError::AccessDenied(format!(
+                    "AuthBackendFromPipe: cannot read /proc/{pid}/exe: {e}"
+                ))
+            })?;
+            if !allowed_paths.iter().any(|p| exe == std::path::Path::new(p)) {
+                return Err(FdoError::AccessDenied(format!(
+                    "AuthBackendFromPipe: caller exe '{}' not in pam_helper_paths",
+                    exe.display(),
+                )));
+            }
+            debug!(
+                pid,
+                exe = %exe.display(),
+                "AuthBackendFromPipe: caller verified"
+            );
+        }
+        // --- End caller verification ---
+
+        use std::os::unix::io::AsRawFd as _;
+        let raw: libc::c_int = unsafe { libc::dup(pipe_fd.as_raw_fd()) };
+        if raw < 0 {
+            return Err(FdoError::Failed(format!(
+                "dup(pipe_fd) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let state = Arc::clone(&self.state);
+        self.state
+            .run_on_tokio(async move {
+                // Read password from the pipe into a zeroizing buffer.
+                let password = {
+                    use std::io::Read as _;
+                    // SAFETY: raw is a valid fd from dup() above.
+                    let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(raw) };
+                    let mut file: std::fs::File = file;
+                    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
+                    file.read_to_end(&mut buf)
+                        .map_err(|e| FdoError::Failed(format!("read from pipe failed: {e}")))?;
+                    // file is dropped here → fd closed
+
+                    // Strip trailing null byte (pam_exec null-terminates).
+                    if buf.last() == Some(&0) {
+                        buf.pop();
+                    }
+                    // Strip trailing newline.
+                    if buf.last() == Some(&b'\n') {
+                        buf.pop();
+                    }
+
+                    if buf.is_empty() {
+                        return Err(FdoError::Failed("pipe password is empty".to_string()));
+                    }
+
+                    // Convert to Zeroizing<String> for auth_backend.
+                    let s = String::from_utf8(std::mem::take(&mut *buf)).map_err(|_| {
+                        FdoError::Failed("pipe password is not valid UTF-8".to_string())
+                    })?;
+                    zeroize::Zeroizing::new(s)
+                };
+
+                // Look up the password field ID for this backend.
+                let backend = state
+                    .backend_by_id(&backend_id)
+                    .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+                let pw_field_id = backend.password_field().id.to_string();
+
+                let mut fields = std::collections::HashMap::new();
+                fields.insert(pw_field_id, password);
+
+                state.auth_backend(&backend_id, fields).await?;
+                Ok(true)
+            })
+            .await?
+    }
+
+    // -----------------------------------------------------------------------
+    // Vault password (wrapping entry) management
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Vault password (wrapping entry) management
+    // -----------------------------------------------------------------------
+
+    /// Add a password (wrapping entry) to a local vault.
+    ///
+    /// The vault must be unlocked.  The new password wraps the same vault key
+    /// that existing entries protect, enabling multi-password unlock.
+    ///
+    /// `password` is the raw password bytes (caller collects from the user).
+    /// `label` is an optional human-readable name for the entry (e.g. "login",
+    /// "pam", "backup").
+    ///
+    /// Returns the wrapping entry ID on success.
+    ///
+    /// # Security
+    ///
+    /// The incoming `Vec<u8>` is wrapped in `Zeroizing` at the D-Bus boundary
+    /// so the password bytes are scrubbed on drop.
+    async fn vault_add_password(
+        &self,
+        vault_id: String,
+        password: Vec<u8>,
+        label: String,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<String, FdoError> {
+        log_caller("VaultAddPassword", &header);
+
+        // Wrap in Zeroizing at the D-Bus boundary so the password is scrubbed on drop.
+        let password = zeroize::Zeroizing::new(password);
+
+        let backend = self
+            .state
+            .backend_by_id(&vault_id)
+            .ok_or_else(|| FdoError::Failed(format!("vault '{vault_id}' not found")))?;
+
+        // Verify this is a local vault before spawning the tokio task.
+        if !backend.as_any().is::<rosec_vault::LocalVault>() {
+            return Err(FdoError::Failed(format!(
+                "'{vault_id}' is not a local vault"
+            )));
+        }
+
+        let label = if label.is_empty() {
+            return Err(FdoError::Failed("password label cannot be empty".into()));
+        } else {
+            label
+        };
+
+        self.state
+            .run_on_tokio(async move {
+                let local_vault = backend
+                    .as_any()
+                    .downcast_ref::<rosec_vault::LocalVault>()
+                    .expect("type check passed above");
+                local_vault
+                    .add_password(&password, label)
+                    .await
+                    .map_err(|e| FdoError::Failed(format!("add_password failed: {e}")))
+            })
+            .await?
+    }
+
+    /// Remove a password (wrapping entry) from a local vault by entry ID.
+    ///
+    /// The vault must be unlocked and must have at least 2 wrapping entries
+    /// (the last entry cannot be removed).
+    async fn vault_remove_password(
+        &self,
+        vault_id: String,
+        entry_id: String,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), FdoError> {
+        log_caller("VaultRemovePassword", &header);
+
+        let backend = self
+            .state
+            .backend_by_id(&vault_id)
+            .ok_or_else(|| FdoError::Failed(format!("vault '{vault_id}' not found")))?;
+
+        if !backend.as_any().is::<rosec_vault::LocalVault>() {
+            return Err(FdoError::Failed(format!(
+                "'{vault_id}' is not a local vault"
+            )));
+        }
+
+        self.state
+            .run_on_tokio(async move {
+                let local_vault = backend
+                    .as_any()
+                    .downcast_ref::<rosec_vault::LocalVault>()
+                    .expect("type check passed above");
+                local_vault
+                    .remove_password(&entry_id)
+                    .await
+                    .map_err(|e| FdoError::Failed(format!("remove_password failed: {e}")))
+            })
+            .await?
+    }
+
+    /// List all wrapping entries (passwords) for a local vault.
+    ///
+    /// Returns `Vec<(entry_id, label)>` where `label` is empty if none was set.
+    /// The vault must be unlocked.
+    async fn vault_list_passwords(
+        &self,
+        vault_id: String,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<VaultPasswordEntry>, FdoError> {
+        log_caller("VaultListPasswords", &header);
+
+        let backend = self
+            .state
+            .backend_by_id(&vault_id)
+            .ok_or_else(|| FdoError::Failed(format!("vault '{vault_id}' not found")))?;
+
+        if !backend.as_any().is::<rosec_vault::LocalVault>() {
+            return Err(FdoError::Failed(format!(
+                "'{vault_id}' is not a local vault"
+            )));
+        }
+
+        let entries = self
+            .state
+            .run_on_tokio(async move {
+                let local_vault = backend
+                    .as_any()
+                    .downcast_ref::<rosec_vault::LocalVault>()
+                    .expect("type check passed above");
+                local_vault
+                    .list_passwords()
+                    .await
+                    .map_err(|e| FdoError::Failed(format!("list_passwords failed: {e}")))
+            })
+            .await??;
+
+        Ok(entries
+            .into_iter()
+            .map(|(id, label)| VaultPasswordEntry {
+                id,
+                label: label.unwrap_or_default(),
+            })
+            .collect())
+    }
+
     /// Cancel an active prompt subprocess by its D-Bus object path.
     ///
     /// Used by the `rosec` CLI (and other clients) to cleanly cancel a running
@@ -427,4 +711,13 @@ pub struct UnlockResultEntry {
     pub success: bool,
     /// Human-readable status message (e.g. "unlocked", "wrong password").
     pub message: String,
+}
+
+/// A vault wrapping entry (password) descriptor returned by `VaultListPasswords`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+pub struct VaultPasswordEntry {
+    /// Unique entry ID (UUID).
+    pub id: String,
+    /// Human-readable label (empty if none was set).
+    pub label: String,
 }

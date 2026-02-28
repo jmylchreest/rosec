@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AutoLockPolicy, DedupStrategy, DedupTimeFallback};
+use crate::{AutoLockOverride, AutoLockPolicy, DedupStrategy, DedupTimeFallback};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -13,7 +13,34 @@ pub struct Config {
     #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
+    pub vault: Vec<VaultEntry>,
+    #[serde(default)]
     pub backend: Vec<BackendEntry>,
+}
+
+/// A local vault configuration entry.
+///
+/// Vaults are rosec's own encrypted local stores, managed via `rosec vault`
+/// CLI commands. Each vault maps to a single encrypted file on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultEntry {
+    /// Unique identifier for this vault (used as the backend ID internally).
+    pub id: String,
+    /// Path to the vault file on disk.
+    ///
+    /// Supports `~` expansion. If relative, resolved relative to
+    /// `$XDG_DATA_HOME/rosec/vaults/`.
+    pub path: String,
+    /// Optional collection label for grouping items.
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Glob patterns for secret attribute selection (same as backend return_attr).
+    #[serde(default)]
+    pub return_attr: Option<Vec<String>>,
+    /// Per-vault autolock overrides.  Fields not set here inherit from the
+    /// global `[autolock]` section.
+    #[serde(default)]
+    pub autolock: Option<AutoLockOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +55,17 @@ pub struct ServiceConfig {
     /// If not set, defaults to the first backend that supports writes.
     #[serde(default)]
     pub write_backend: Option<String>,
+    /// Allowed executable paths for `AuthBackendFromPipe` callers.
+    ///
+    /// The daemon resolves the caller's PID via D-Bus `GetConnectionCredentials`
+    /// and checks `/proc/<pid>/exe` against this list.  If the caller's binary
+    /// does not match any entry, the request is rejected.
+    ///
+    /// Defaults to standard FHS install locations for the `rosec-pam-unlock`
+    /// helper.  Set to an empty list to reject all pipe-based auth, or add
+    /// custom paths for development / non-standard installs.
+    #[serde(default = "default_pam_helper_paths")]
+    pub pam_helper_paths: Vec<String>,
 }
 
 impl Default for ServiceConfig {
@@ -37,6 +75,7 @@ impl Default for ServiceConfig {
             dedup_time_fallback: default_dedup_time_fallback(),
             refresh_interval_secs: None,
             write_backend: None,
+            pam_helper_paths: default_pam_helper_paths(),
         }
     }
 }
@@ -164,6 +203,11 @@ pub struct BackendEntry {
     /// ```
     #[serde(default)]
     pub collection: Option<String>,
+
+    /// Per-backend autolock overrides.  Fields not set here inherit from the
+    /// global `[autolock]` section.
+    #[serde(default)]
+    pub autolock: Option<AutoLockOverride>,
 }
 
 /// Option keys whose values must never appear in logs or debug output.
@@ -209,9 +253,9 @@ impl Default for AutoLockPolicy {
     fn default() -> Self {
         Self {
             on_logout: true,
-            on_session_lock: true,
-            idle_timeout_minutes: Some(15),
-            max_unlocked_minutes: Some(240),
+            on_session_lock: false,
+            idle_timeout_minutes: None,
+            max_unlocked_minutes: None,
         }
     }
 }
@@ -226,6 +270,18 @@ fn default_dedup_time_fallback() -> DedupTimeFallback {
 
 fn default_prompt_backend() -> String {
     "builtin".to_string()
+}
+
+/// Default allowed paths for the PAM unlock helper binary.
+///
+/// Follows the Filesystem Hierarchy Standard (FHS):
+/// - `/usr/lib/rosec/` — Arch Linux, most distros (PKGBUILD)
+/// - `/usr/libexec/` — Fedora, RHEL, SUSE
+fn default_pam_helper_paths() -> Vec<String> {
+    vec![
+        "/usr/lib/rosec/rosec-pam-unlock".to_string(),
+        "/usr/libexec/rosec-pam-unlock".to_string(),
+    ]
 }
 
 fn default_color_background() -> String {
@@ -296,11 +352,14 @@ mod tests {
         assert!(cfg.service.refresh_interval_secs.is_none());
         assert_eq!(cfg.prompt.backend, "builtin");
         assert!(cfg.prompt.args.is_empty());
+        assert!(cfg.vault.is_empty());
         assert!(cfg.backend.is_empty());
         assert!(cfg.autolock.on_logout);
-        assert!(cfg.autolock.on_session_lock);
-        assert_eq!(cfg.autolock.idle_timeout_minutes, Some(15));
-        assert_eq!(cfg.autolock.max_unlocked_minutes, Some(240));
+        assert!(!cfg.autolock.on_session_lock);
+        assert!(cfg.autolock.idle_timeout_minutes.is_none());
+        assert!(cfg.autolock.max_unlocked_minutes.is_none());
+        assert_eq!(cfg.service.pam_helper_paths.len(), 2);
+        assert!(cfg.service.pam_helper_paths[0].contains("rosec-pam-unlock"));
     }
 
     #[test]
@@ -525,5 +584,141 @@ mod tests {
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert!(cfg.backend[0].return_attr.is_none());
         assert!(cfg.backend[0].match_attr.is_none());
+    }
+
+    #[test]
+    fn parse_vault_entries() {
+        let toml_str = r#"
+            [[vault]]
+            id = "personal"
+            path = "~/.local/share/rosec/vaults/personal.vault"
+
+            [[vault]]
+            id = "work"
+            path = "/mnt/syncthing/work.vault"
+            collection = "work"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.vault.len(), 2);
+        assert_eq!(cfg.vault[0].id, "personal");
+        assert_eq!(
+            cfg.vault[0].path,
+            "~/.local/share/rosec/vaults/personal.vault"
+        );
+        assert!(cfg.vault[0].collection.is_none());
+
+        assert_eq!(cfg.vault[1].id, "work");
+        assert_eq!(cfg.vault[1].path, "/mnt/syncthing/work.vault");
+        assert_eq!(cfg.vault[1].collection.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn mixed_vault_and_backend_entries() {
+        let toml_str = r#"
+            [[vault]]
+            id = "local"
+            path = "~/.local/share/rosec/vaults/local.vault"
+
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+
+            [backend.options]
+            email = "test@example.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.vault.len(), 1);
+        assert_eq!(cfg.backend.len(), 1);
+        assert_eq!(cfg.vault[0].id, "local");
+        assert_eq!(cfg.backend[0].id, "bw1");
+    }
+
+    #[test]
+    fn parse_backend_autolock_override() {
+        let toml_str = r#"
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+
+            [backend.autolock]
+            idle_timeout_minutes = 5
+            on_session_lock = true
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let entry = &cfg.backend[0];
+        let al = entry.autolock.as_ref().unwrap();
+        assert_eq!(al.idle_timeout_minutes, Some(5));
+        assert_eq!(al.on_session_lock, Some(true));
+        // Unset fields are None (inherit from global)
+        assert!(al.on_logout.is_none());
+        assert!(al.max_unlocked_minutes.is_none());
+    }
+
+    #[test]
+    fn parse_vault_autolock_override() {
+        let toml_str = r#"
+            [[vault]]
+            id = "work"
+            path = "/tmp/work.vault"
+
+            [vault.autolock]
+            max_unlocked_minutes = 60
+            on_logout = false
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let entry = &cfg.vault[0];
+        let al = entry.autolock.as_ref().unwrap();
+        assert_eq!(al.max_unlocked_minutes, Some(60));
+        assert_eq!(al.on_logout, Some(false));
+        assert!(al.on_session_lock.is_none());
+        assert!(al.idle_timeout_minutes.is_none());
+    }
+
+    #[test]
+    fn backend_autolock_defaults_to_none() {
+        let toml_str = r#"
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.backend[0].autolock.is_none());
+    }
+
+    #[test]
+    fn vault_autolock_defaults_to_none() {
+        let toml_str = r#"
+            [[vault]]
+            id = "local"
+            path = "/tmp/test.vault"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.vault[0].autolock.is_none());
+    }
+
+    #[test]
+    fn backend_autolock_zero_disables_via_merge() {
+        use crate::AutoLockOverride;
+
+        let toml_str = r#"
+            [autolock]
+            idle_timeout_minutes = 15
+            max_unlocked_minutes = 240
+
+            [[backend]]
+            id = "bw1"
+            type = "bitwarden"
+
+            [backend.autolock]
+            idle_timeout_minutes = 0
+            max_unlocked_minutes = 0
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let global = &cfg.autolock;
+        let overrides: &AutoLockOverride = cfg.backend[0].autolock.as_ref().unwrap();
+        let merged = global.merge(overrides);
+        // 0 in override → None in merged (disabled)
+        assert!(merged.idle_timeout_minutes.is_none());
+        assert!(merged.max_unlocked_minutes.is_none());
     }
 }

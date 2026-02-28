@@ -13,6 +13,8 @@ pub mod search;
 pub mod secrets;
 
 // Flat re-exports so callers can use short names.
-pub use management::{AuthFieldInfo, BackendInfo, BackendListEntry, DaemonStatus, RosecManagement};
+pub use management::{
+    AuthFieldInfo, BackendInfo, BackendListEntry, DaemonStatus, RosecManagement, VaultPasswordEntry,
+};
 pub use search::RosecSearch;
 pub use secrets::RosecSecrets;

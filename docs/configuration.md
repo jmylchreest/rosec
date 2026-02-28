@@ -13,6 +13,7 @@ Controls vault caching and deduplication behaviour.
 | `dedup_strategy` | string | `"newest"` | How to resolve duplicate items across backends. See [Deduplication](#deduplication). |
 | `dedup_time_fallback` | string | `"created"` | Timestamp field used when `dedup_strategy = "newest"`. `"created"` or `"none"`. |
 | `refresh_interval_secs` | integer | `60` | How often (seconds) to re-sync each backend. Set to `0` to disable periodic refresh. |
+| `pam_helper_paths` | array of strings | `["/usr/lib/rosec/rosec-pam-unlock", "/usr/libexec/rosec-pam-unlock"]` | Allowed executable paths for `AuthBackendFromPipe` callers. The daemon verifies the caller's `/proc/<pid>/exe` against this list. Set to a custom path for non-standard installs or development. |
 
 ### Deduplication
 
@@ -29,14 +30,22 @@ picks one winner according to `dedup_strategy`:
 
 ## `[autolock]`
 
-Controls when the daemon locks the vault automatically.
+Controls when the daemon locks backends automatically. These are **global
+defaults** — individual backends and vaults can override any field via
+`[backend.autolock]` or `[vault.autolock]` (see below).
+
+The defaults mirror KWallet/GNOME Keyring behaviour: backends stay unlocked for
+the session duration and lock only on logout.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `on_logout` | bool | `true` | Lock when the user session ends. |
-| `on_session_lock` | bool | `true` | Lock when the screen is locked (logind `LockedHint`). |
-| `idle_timeout_minutes` | integer or `null` | `15` | Lock after this many minutes of inactivity. `null` or `0` disables. |
-| `max_unlocked_minutes` | integer or `null` | `240` | Hard upper limit on how long the vault stays unlocked. `null` or `0` disables. |
+| `on_logout` | bool | `true` | Lock when the user session ends (logind `SessionRemoved`). |
+| `on_session_lock` | bool | `false` | Lock when the screen is locked (logind `Lock` signal). |
+| `idle_timeout_minutes` | integer or omitted | _(none)_ | Lock after this many minutes of D-Bus inactivity. Omit or set to `0` to disable. |
+| `max_unlocked_minutes` | integer or omitted | _(none)_ | Hard upper limit on how long a backend stays unlocked. Omit or set to `0` to disable. |
+
+> **Note:** `PrepareForSleep` (suspend/hibernate) always locks all backends
+> regardless of config — this is not configurable.
 
 ---
 
@@ -128,6 +137,35 @@ be listed; items are deduplicated across them (see [Deduplication](#deduplicatio
 | `return_attr` | array of strings | no | Ordered list of glob patterns selecting which sensitive attribute to return via `GetSecret`. First match wins. Default: `["password", "number", "private_key", "notes"]`. |
 | `match_attr` | array of strings | no | Glob patterns controlling which attributes participate in `SearchItems` filtering. Reserved for future use. |
 
+### `[backend.autolock]` — Per-backend autolock overrides
+
+Each backend can have its own `[backend.autolock]` sub-table. Fields not
+specified inherit from the global `[autolock]` section. This lets you, for
+example, keep a work backend locked more aggressively while leaving your
+personal backend unlocked for the session.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `on_logout` | bool | _(inherit)_ | Override the global `on_logout` for this backend. |
+| `on_session_lock` | bool | _(inherit)_ | Override the global `on_session_lock` for this backend. |
+| `idle_timeout_minutes` | integer | _(inherit)_ | Override the global idle timeout. `0` explicitly disables. |
+| `max_unlocked_minutes` | integer | _(inherit)_ | Override the global max-unlocked timeout. `0` explicitly disables. |
+
+Example:
+
+```toml
+[[backend]]
+id   = "work"
+type = "bitwarden"
+
+[backend.options]
+email = "work@example.com"
+
+[backend.autolock]
+idle_timeout_minutes = 5
+on_session_lock      = true
+```
+
 ### `[backend.options]` — Bitwarden Personal Vault (`type = "bitwarden"`)
 
 | Key | Required | Description |
@@ -147,6 +185,31 @@ Available when the `bitwarden-sm` feature is compiled in.
 
 ---
 
+## `[[vault]]`
+
+Each `[[vault]]` section registers a local encrypted vault. Multiple vaults can
+be listed. Vaults implement the same backend interface internally but are managed
+via `rosec vault` CLI commands.
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `id` | string | yes | Unique identifier for this vault. |
+| `path` | string | yes | Path to the vault file. `~` is expanded to `$HOME`. |
+| `collection` | string | no | Stamp a `collection` attribute onto every item from this vault. |
+
+### `[vault.autolock]` — Per-vault autolock overrides
+
+Same fields as `[backend.autolock]`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `on_logout` | bool | _(inherit)_ | Override the global `on_logout` for this vault. |
+| `on_session_lock` | bool | _(inherit)_ | Override the global `on_session_lock` for this vault. |
+| `idle_timeout_minutes` | integer | _(inherit)_ | Override the global idle timeout. `0` explicitly disables. |
+| `max_unlocked_minutes` | integer | _(inherit)_ | Override the global max-unlocked timeout. `0` explicitly disables. |
+
+---
+
 ## Full example
 
 ```toml
@@ -154,12 +217,14 @@ Available when the `bitwarden-sm` feature is compiled in.
 dedup_strategy        = "newest"
 dedup_time_fallback   = "created"
 refresh_interval_secs = 60
+# pam_helper_paths    = ["/usr/lib/rosec/rosec-pam-unlock", "/usr/libexec/rosec-pam-unlock"]
 
+# Global defaults — backends stay unlocked for the session, lock on logout.
 [autolock]
 on_logout             = true
-on_session_lock       = true
-idle_timeout_minutes  = 15
-max_unlocked_minutes  = 240
+on_session_lock       = false
+# idle_timeout_minutes  = 15   # uncomment to enable
+# max_unlocked_minutes  = 240  # uncomment to enable
 
 [prompt]
 backend = "builtin"
@@ -176,7 +241,7 @@ bw   = 2
 font = "monospace"
 size = 14
 
-# Personal vault
+# Personal vault — uses global autolock defaults
 [[backend]]
 id   = "personal"
 type = "bitwarden"
@@ -186,6 +251,7 @@ email    = "user@example.com"
 # base_url = "https://your-vaultwarden.example.com"
 
 # Work Secrets Manager org (bitwarden-sm feature required)
+# Stricter autolock: 5-minute idle, lock on screen lock
 [[backend]]
 id         = "work-sm"
 type       = "bitwarden-sm"
@@ -194,4 +260,13 @@ collection = "work"
 [backend.options]
 access_token    = "0.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.secret:key"
 organization_id = "00000000-0000-0000-0000-000000000000"
+
+[backend.autolock]
+idle_timeout_minutes = 5
+on_session_lock      = true
+
+# Local vault
+[[vault]]
+id   = "local"
+path = "~/.local/share/rosec/vaults/local.vault"
 ```

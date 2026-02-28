@@ -1,0 +1,18 @@
+[package]
+name = "rosec-pam"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "rosec-pam-unlock"
+path = "src/main.rs"
+
+[dependencies]
+zbus = { workspace = true }
+zvariant = { workspace = true }
+zeroize = { workspace = true }
+tokio = { workspace = true }
+libc = { workspace = true }

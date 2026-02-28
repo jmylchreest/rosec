@@ -13,6 +13,7 @@ zbus = { workspace = true }
 zvariant = { workspace = true }
 libc = { workspace = true }
 rosec-core = { path = "../rosec-core" }
+rosec-vault = { path = "../rosec-vault" }
 toml_edit = { workspace = true }
 zeroize = { workspace = true }
 sha2 = { workspace = true }

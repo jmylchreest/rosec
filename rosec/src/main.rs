@@ -9,6 +9,7 @@ use zbus::Connection;
 use zeroize::Zeroizing;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
+use rosec_core::VaultBackend as _;
 use rosec_core::config::Config;
 use rosec_core::config_edit;
 
@@ -25,6 +26,8 @@ async fn main() -> Result<()> {
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
     match cmd {
+        // vault / vaults are full aliases for the same subcommand tree
+        "vault" | "vaults" => cmd_vault(&args[1..]).await,
         // backend / backends are full aliases for the same subcommand tree
         "backend" | "backends" => cmd_backend(&args[1..]).await,
         "config" => cmd_config(&args[1..]),
@@ -56,7 +59,18 @@ USAGE:
     rosec <command> [args...]
 
 COMMANDS:
-    backend <subcommand>                Manage backends (alias: backends)
+    vault <subcommand>                  Manage local encrypted vaults (alias: vaults)
+      list                              List configured vaults and their state
+      create [--id <id>] [--path <p>]   Create a new vault (prompts for password)
+      attach --path <file> [--id <id>]  Attach an existing vault file to the config
+      detach <id>                       Remove a vault from config (file stays on disk)
+      destroy <id>                      Remove a vault from config AND delete the file
+      add-password <id>                 Add a new unlock password to a vault
+      remove-password <id> <entry-id>   Remove a password from a vault
+      list-passwords <id>               List unlock passwords for a vault
+      auth <id>                         Authenticate/unlock a vault
+
+    backend <subcommand>                Manage external backends (alias: backends)
       list                              List configured backends and their lock state
       auth <id>                         Authenticate/unlock a backend
       add <kind> [options]              Add a backend to the config file
@@ -107,6 +121,16 @@ NOTES:
     Pass it directly to 'rosec get'.
 
 EXAMPLES:
+    rosec vault create                                      # create a new vault (auto ID + path)
+    rosec vault create --id work --path ~/vaults/work.vault # custom ID and path
+    rosec vault attach --path /mnt/shared/team.vault        # attach an existing vault file
+    rosec vault list                                        # show all vaults
+    rosec vault auth personal                               # unlock a vault
+    rosec vault add-password personal                       # add a second unlock password
+    rosec vault remove-password personal <entry-id>         # remove a password
+    rosec vault detach work                                 # remove from config (file stays)
+    rosec vault destroy old-vault                           # remove from config AND delete file
+
     rosec backend list
     rosec backend add bitwarden email=you@example.com       # ID auto-generated from email
     rosec backend add bitwarden-sm organization_id=uuid
@@ -114,6 +138,7 @@ EXAMPLES:
     rosec backend auth bitwarden-3f8a1c2d
     rosec backend remove bitwarden-3f8a1c2d
     rosec backends list        # 'backends' is a full alias for 'backend'
+
     rosec search                                            # list all items
     rosec search type=login                                 # only login items
     rosec search username=alice                             # search by username
@@ -122,8 +147,10 @@ EXAMPLES:
     rosec search --format=kv uri=github.com                 # key=value output
     rosec search --show-path type=login                     # table with D-Bus path column
     rosec search -s type=login                             # sync/unlock, then search
+
     rosec get a1b2c3d4e5f60718                              # print secret value only (pipeable)
     rosec get a1b2c3d4e5f60718 | xclip -sel clip            # copy secret to clipboard
+
     rosec inspect a1b2c3d4e5f60718                          # full label + attributes + secret
     rosec inspect -s a1b2c3d4e5f60718                       # sync/unlock then inspect
     rosec inspect -s --all-attrs a1b2c3d4e5f60718           # include sensitive attrs (password, totp…)
@@ -248,6 +275,27 @@ fn cmd_backend_kinds() {
 
 async fn conn() -> Result<Connection> {
     Ok(Connection::session().await?)
+}
+
+/// Generate a default password label: `user@hostname`.
+fn default_password_label() -> String {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+
+    let host = {
+        let mut buf = [0u8; 256];
+        // SAFETY: gethostname writes into a fixed-size buffer we own.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            String::from_utf8_lossy(&buf[..len]).into_owned()
+        } else {
+            "localhost".into()
+        }
+    };
+
+    format!("{user}@{host}")
 }
 
 /// Resolve the config file path from `--config <path>` flag or XDG default.
@@ -880,6 +928,671 @@ async fn cmd_backend_remove(args: &[String]) -> Result<()> {
     println!("Removed backend '{id}' from {}", cfg.display());
     println!("rosecd will hot-reload the config automatically if it is running.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// vault / vaults subcommand tree
+// ---------------------------------------------------------------------------
+
+fn print_vault_help() {
+    println!(
+        "\
+rosec vault - manage local encrypted vaults
+
+USAGE:
+    rosec vault <subcommand> [args...]
+    rosec vaults <subcommand> [args...]   (alias)
+
+SUBCOMMANDS:
+    list                              List configured vaults and their state
+    create [--id <id>] [--path <p>] [--collection <c>]
+                                      Create a new vault (prompts for password)
+    attach --path <file> [--id <id>] [--collection <c>]
+                                      Attach an existing vault file to the config
+    detach <id>                       Remove vault from config (file stays on disk)
+    destroy <id>                      Remove vault from config AND delete the file
+    add-password <id> [--label <l>]   Add a new unlock password to a vault
+    remove-password <id> <entry-id>   Remove a password from a vault
+    list-passwords <id>               List unlock passwords for a vault
+    auth <id>                         Authenticate/unlock a vault
+
+OPTIONS:
+    --id <id>             Vault identifier (default: derived from path)
+    --path <path>         Path to the vault file (default: $XDG_DATA_HOME/rosec/vaults/<id>.vault)
+    --collection <name>   Collection label for grouping items
+    --label <name>        Label for a password entry (default: user@hostname; must be unique)
+    --config <path>       Config file to edit (default: ~/.config/rosec/config.toml)
+
+NOTE:
+    Vaults are rosec's local encrypted stores, distinct from external backends
+    (Bitwarden, etc.).  Each vault is a single encrypted file on disk supporting
+    multiple unlock passwords via key wrapping.
+
+EXAMPLES:
+    rosec vault create
+    rosec vault create --id work --path ~/vaults/work.vault --collection work
+    rosec vault attach --path /mnt/syncthing/shared.vault --id shared
+    rosec vault list
+    rosec vault auth personal
+    rosec vault add-password personal --label pam
+    rosec vault list-passwords personal
+    rosec vault remove-password personal a1b2c3d4
+    rosec vault detach work
+    rosec vault destroy old-vault"
+    );
+}
+
+async fn cmd_vault(args: &[String]) -> Result<()> {
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    match sub {
+        "list" | "ls" => cmd_vault_list().await,
+        "create" => cmd_vault_create(&args[1..]).await,
+        "attach" => cmd_vault_attach(&args[1..]).await,
+        "detach" => cmd_vault_detach(&args[1..]).await,
+        "destroy" => cmd_vault_destroy(&args[1..]).await,
+        "add-password" => cmd_vault_add_password(&args[1..]).await,
+        "remove-password" => cmd_vault_remove_password(&args[1..]).await,
+        "list-passwords" => cmd_vault_list_passwords(&args[1..]).await,
+        "auth" => cmd_vault_auth(&args[1..]).await,
+        "help" | "--help" | "-h" => {
+            print_vault_help();
+            Ok(())
+        }
+        other => {
+            eprintln!("unknown vault subcommand: {other}");
+            print_vault_help();
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `rosec vault list` — show all configured vaults with lock state.
+///
+/// If rosecd is running, fetches live lock state from BackendList (filtered to
+/// vault-kind entries). Otherwise falls back to listing from config.
+async fn cmd_vault_list() -> Result<()> {
+    // Try D-Bus first for live state.
+    if let Ok(conn) = conn().await
+        && let Ok(proxy) = zbus::Proxy::new(
+            &conn,
+            "org.freedesktop.secrets",
+            "/org/rosec/Daemon",
+            "org.rosec.Daemon",
+        )
+        .await
+        && let Ok(entries) = proxy
+            .call::<_, _, Vec<(String, String, String, bool)>>("BackendList", &())
+            .await
+    {
+        let vaults: Vec<_> = entries
+            .iter()
+            .filter(|(_, _, kind, _)| kind == "vault")
+            .collect();
+
+        if vaults.is_empty() {
+            println!("No vaults configured. Run `rosec vault create` to create one.");
+            return Ok(());
+        }
+
+        let id_w = vaults
+            .iter()
+            .map(|(id, ..)| id.len())
+            .max()
+            .unwrap_or(2)
+            .max(2);
+        let name_w = vaults
+            .iter()
+            .map(|(_, n, ..)| n.len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+
+        println!("{:<id_w$}  {:<name_w$}  STATE", "ID", "NAME");
+        println!("{}", "-".repeat(id_w + name_w + 12));
+        for (id, name, _, locked) in &vaults {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {}",
+                id,
+                name,
+                if *locked { "locked" } else { "unlocked" },
+            );
+        }
+        return Ok(());
+    }
+
+    // Fallback: read config directly.
+    let cfg = load_config();
+    if cfg.vault.is_empty() {
+        println!("No vaults configured. Run `rosec vault create` to create one.");
+        return Ok(());
+    }
+
+    let id_w = cfg
+        .vault
+        .iter()
+        .map(|v| v.id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let path_w = cfg
+        .vault
+        .iter()
+        .map(|v| v.path.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    println!("{:<id_w$}  {:<path_w$}  STATE", "ID", "PATH");
+    println!("{}", "-".repeat(id_w + path_w + 12));
+    for entry in &cfg.vault {
+        println!(
+            "{:<id_w$}  {:<path_w$}  (daemon not running)",
+            entry.id, entry.path,
+        );
+    }
+    Ok(())
+}
+
+/// `rosec vault create [--id <id>] [--path <path>] [--collection <c>]`
+///
+/// Creates a new vault file on disk and adds a `[[vault]]` entry to the config.
+/// Prompts for the initial password interactively.
+async fn cmd_vault_create(args: &[String]) -> Result<()> {
+    let mut custom_id: Option<String> = None;
+    let mut custom_path: Option<String> = None;
+    let mut collection: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--id" => {
+                i += 1;
+                custom_id = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--id requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--id=") => {
+                custom_id = Some(a.trim_start_matches("--id=").to_string());
+            }
+            "--path" => {
+                i += 1;
+                custom_path = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--path requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--path=") => {
+                custom_path = Some(a.trim_start_matches("--path=").to_string());
+            }
+            "--collection" => {
+                i += 1;
+                collection = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--collection requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--collection=") => {
+                collection = Some(a.trim_start_matches("--collection=").to_string());
+            }
+            "--help" | "-h" => {
+                print_vault_help();
+                return Ok(());
+            }
+            other => bail!("unexpected argument: {other}"),
+        }
+        i += 1;
+    }
+
+    // Derive ID from path or generate a default.
+    let id = match custom_id {
+        Some(id) => id,
+        None => {
+            let v = prompt_field("Vault ID", "personal", "text").await?;
+            let s = v.as_str().to_string();
+            if s.is_empty() {
+                "personal".to_string()
+            } else {
+                s
+            }
+        }
+    };
+
+    // Derive path from ID or use custom.
+    let vault_path = match custom_path {
+        Some(p) => p,
+        None => default_vault_path(&id),
+    };
+
+    // Prompt for the initial vault password.
+    let pw = prompt_field("Vault password", "", "password").await?;
+    if pw.is_empty() {
+        bail!("password cannot be empty");
+    }
+    let pw_confirm = prompt_field("Confirm password", "", "password").await?;
+    if pw.as_str() != pw_confirm.as_str() {
+        bail!("passwords do not match");
+    }
+
+    // Create the vault file on disk.
+    let local_vault = rosec_vault::LocalVault::new(&id, &vault_path);
+    local_vault
+        .unlock(rosec_core::UnlockInput::Password(Zeroizing::new(
+            pw.as_str().to_string(),
+        )))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create vault: {e}"))?;
+
+    // Add the vault to config.toml.
+    let cfg = config_path();
+    config_edit::add_vault(&cfg, &id, &vault_path, collection.as_deref())?;
+
+    println!("Created vault '{id}' at {vault_path}");
+    println!("Added to {}", cfg.display());
+
+    // If rosecd is running, wait for hot-reload then trigger auth.
+    if let Ok(conn) = conn().await
+        && let Ok(proxy) = zbus::Proxy::new(
+            &conn,
+            "org.freedesktop.secrets",
+            "/org/rosec/Daemon",
+            "org.rosec.Daemon",
+        )
+        .await
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let appeared = loop {
+            if let Ok(entries) = proxy
+                .call::<_, _, Vec<(String, String, String, bool)>>("BackendList", &())
+                .await
+                && entries.iter().any(|(bid, ..)| bid == &id)
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+
+        if appeared {
+            println!("rosecd picked up the new vault — starting authentication.");
+            let tty_fd = open_tty_owned_fd()?;
+            let _: () = proxy
+                .call("AuthBackendWithTty", &(id.as_str(), tty_fd))
+                .await?;
+            println!("Vault '{id}' authenticated.");
+        } else {
+            println!("rosecd will hot-reload the config automatically if it is running.");
+            println!("Run `rosec vault auth {id}` to authenticate.");
+        }
+    }
+
+    Ok(())
+}
+
+/// `rosec vault attach --path <file> [--id <id>] [--collection <c>]`
+///
+/// Adds an existing vault file to the config without creating it.
+async fn cmd_vault_attach(args: &[String]) -> Result<()> {
+    let mut custom_id: Option<String> = None;
+    let mut vault_path: Option<String> = None;
+    let mut collection: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--id" => {
+                i += 1;
+                custom_id = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--id requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--id=") => {
+                custom_id = Some(a.trim_start_matches("--id=").to_string());
+            }
+            "--path" => {
+                i += 1;
+                vault_path = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--path requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--path=") => {
+                vault_path = Some(a.trim_start_matches("--path=").to_string());
+            }
+            "--collection" => {
+                i += 1;
+                collection = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--collection requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--collection=") => {
+                collection = Some(a.trim_start_matches("--collection=").to_string());
+            }
+            "--help" | "-h" => {
+                print_vault_help();
+                return Ok(());
+            }
+            other => bail!("unexpected argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let vault_path = vault_path.ok_or_else(|| {
+        anyhow::anyhow!("--path is required\nusage: rosec vault attach --path <file> [--id <id>]")
+    })?;
+
+    // Derive ID from filename if not specified.
+    let id = match custom_id {
+        Some(id) => id,
+        None => derive_vault_id_from_path(&vault_path),
+    };
+
+    let cfg = config_path();
+    config_edit::add_vault(&cfg, &id, &vault_path, collection.as_deref())?;
+
+    println!("Attached vault '{id}' ({vault_path}) to {}", cfg.display());
+    println!("rosecd will hot-reload the config automatically if it is running.");
+    println!("Run `rosec vault auth {id}` to authenticate.");
+    Ok(())
+}
+
+/// `rosec vault detach <id>`
+///
+/// Removes the vault from the config file but leaves the vault file on disk.
+async fn cmd_vault_detach(args: &[String]) -> Result<()> {
+    let id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec vault detach <id>"))?;
+    let cfg = config_path();
+    config_edit::remove_vault(&cfg, id)?;
+    println!("Detached vault '{id}' from {}", cfg.display());
+    println!("The vault file was NOT deleted. Use `rosec vault destroy` to also delete the file.");
+    println!("rosecd will hot-reload the config automatically if it is running.");
+    Ok(())
+}
+
+/// `rosec vault destroy <id>`
+///
+/// Removes the vault from the config AND deletes the vault file from disk.
+async fn cmd_vault_destroy(args: &[String]) -> Result<()> {
+    let id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec vault destroy <id>"))?;
+
+    // Look up the path from config before removing the entry.
+    let cfg_data = load_config();
+    let vault_entry = cfg_data
+        .vault
+        .iter()
+        .find(|v| v.id == *id)
+        .ok_or_else(|| anyhow::anyhow!("vault '{id}' not found in config"))?;
+    let vault_path = expand_tilde(&vault_entry.path);
+
+    // Confirm destruction.
+    let confirm = prompt_field(
+        &format!("Destroy vault '{id}' and delete {vault_path}? (yes/no)"),
+        "",
+        "text",
+    )
+    .await?;
+    if confirm.as_str() != "yes" {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    // Remove from config.
+    let cfg = config_path();
+    config_edit::remove_vault(&cfg, id)?;
+
+    // Delete the vault file.
+    match std::fs::remove_file(&vault_path) {
+        Ok(()) => println!("Deleted vault file: {vault_path}"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("Vault file already absent: {vault_path}");
+        }
+        Err(e) => {
+            eprintln!("warning: could not delete vault file {vault_path}: {e}");
+        }
+    }
+
+    println!("Removed vault '{id}' from {}", cfg.display());
+    println!("rosecd will hot-reload the config automatically if it is running.");
+    Ok(())
+}
+
+/// `rosec vault add-password <id> [--label <label>]`
+///
+/// Add a new unlock password to a vault. The vault must be unlocked (running in
+/// rosecd).
+async fn cmd_vault_add_password(args: &[String]) -> Result<()> {
+    let mut vault_id: Option<&str> = None;
+    let mut label: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--label" => {
+                i += 1;
+                label = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--label requires a value"))?
+                        .clone(),
+                );
+            }
+            a if a.starts_with("--label=") => {
+                label = Some(a.trim_start_matches("--label=").to_string());
+            }
+            "--help" | "-h" => {
+                print_vault_help();
+                return Ok(());
+            }
+            a if a.starts_with('-') => bail!("unknown flag: {a}"),
+            a => {
+                if vault_id.is_some() {
+                    bail!("unexpected argument: {a}");
+                }
+                vault_id = Some(a);
+            }
+        }
+        i += 1;
+    }
+
+    let vault_id = vault_id
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec vault add-password <id> [--label <label>]"))?;
+
+    // Default label: user@hostname
+    let label = label.unwrap_or_else(default_password_label);
+
+    // Prompt for the new password.
+    let pw = prompt_field("New password", "", "password").await?;
+    if pw.is_empty() {
+        bail!("password cannot be empty");
+    }
+    let pw_confirm = prompt_field("Confirm password", "", "password").await?;
+    if pw.as_str() != pw_confirm.as_str() {
+        bail!("passwords do not match");
+    }
+
+    let conn = conn().await?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+
+    let entry_id: String = proxy
+        .call(
+            "VaultAddPassword",
+            &(vault_id, pw.as_bytes().to_vec(), &label),
+        )
+        .await?;
+
+    println!("Added password entry {entry_id} (label: {label}) to vault '{vault_id}'.");
+    Ok(())
+}
+
+/// `rosec vault list-passwords <vault-id>`
+///
+/// List the wrapping entries (unlock passwords) for a vault. The vault must be
+/// unlocked. Shows the entry ID and label for each password.
+async fn cmd_vault_list_passwords(args: &[String]) -> Result<()> {
+    let vault_id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec vault list-passwords <vault-id>"))?;
+
+    let conn = conn().await?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+
+    let entries: Vec<(String, String)> = proxy
+        .call("VaultListPasswords", &(vault_id.as_str(),))
+        .await?;
+
+    if entries.is_empty() {
+        println!("No password entries found for vault '{vault_id}'.");
+        return Ok(());
+    }
+
+    println!("Password entries for vault '{vault_id}':\n");
+    println!("  {:<40} LABEL", "ENTRY ID");
+    println!("  {:<40} -----", "--------");
+    for (id, label) in &entries {
+        let display_label = if label.is_empty() { "(none)" } else { label };
+        println!("  {:<40} {}", id, display_label);
+    }
+
+    Ok(())
+}
+
+/// `rosec vault remove-password <vault-id> <entry-id>`
+///
+/// Remove an unlock password from a vault. The vault must be unlocked and must
+/// have at least 2 passwords.
+async fn cmd_vault_remove_password(args: &[String]) -> Result<()> {
+    if args.len() < 2 {
+        bail!("usage: rosec vault remove-password <vault-id> <entry-id>");
+    }
+    let vault_id = &args[0];
+    let entry_id = &args[1];
+
+    let conn = conn().await?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+
+    // First list passwords to show the user what they're removing.
+    let entries: Vec<(String, String)> = proxy
+        .call("VaultListPasswords", &(vault_id.as_str(),))
+        .await?;
+
+    let target = entries
+        .iter()
+        .find(|(id, _)| id == entry_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("password entry '{entry_id}' not found in vault '{vault_id}'")
+        })?;
+
+    let label_display = if target.1.is_empty() {
+        "(no label)".to_string()
+    } else {
+        target.1.clone()
+    };
+
+    println!("Removing password entry: {entry_id} {label_display}");
+
+    let _: () = proxy
+        .call(
+            "VaultRemovePassword",
+            &(vault_id.as_str(), entry_id.as_str()),
+        )
+        .await?;
+
+    println!("Removed password entry '{entry_id}' from vault '{vault_id}'.");
+    Ok(())
+}
+
+/// `rosec vault auth <id>` — interactively authenticate a vault.
+///
+/// Opens `/dev/tty` and passes the fd to `rosecd` via D-Bus fd-passing.
+async fn cmd_vault_auth(args: &[String]) -> Result<()> {
+    let vault_id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: rosec vault auth <vault-id>"))?;
+
+    let conn = conn().await?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await?;
+
+    let tty_fd = open_tty_owned_fd()?;
+    let _: () = proxy
+        .call("AuthBackendWithTty", &(vault_id.as_str(), tty_fd))
+        .await?;
+
+    println!("Vault '{vault_id}' authenticated.");
+    Ok(())
+}
+
+/// Default vault file path: `$XDG_DATA_HOME/rosec/vaults/<id>.vault`.
+fn default_vault_path(id: &str) -> String {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("rosec")
+        .join("vaults")
+        .join(format!("{id}.vault"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Derive a vault ID from a file path.
+///
+/// Takes the filename stem (e.g. `/mnt/shared/team.vault` → `team`).
+fn derive_vault_id_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("vault")
+        .to_string()
+}
+
+/// Expand `~` to `$HOME` in a path string.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return format!("{}/{rest}", home.to_string_lossy());
+    }
+    path.to_string()
 }
 
 // ---------------------------------------------------------------------------

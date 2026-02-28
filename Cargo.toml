@@ -7,10 +7,11 @@ members = [
     "rosec-bitwarden-sm",
     "rosec-ssh-agent",
     "rosec-fuse",
-    "rosec-file",
+    "rosec-vault",
     "rosecd",
     "rosec",
     "rosec-prompt",
+    "rosec-pam",
 ]
 
 [workspace.package]

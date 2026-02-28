@@ -22,9 +22,11 @@ makedepends=(
 )
 optdepends=(
     'libnotify: desktop notifications on lock/unlock'
+    'pam: PAM auto-unlock support via rosec-pam-unlock'
 )
 provides=('rosec' 'secret-service')
 conflicts=('rosec' 'gnome-keyring' 'keepassxc')
+install=rosec.install
 
 source=("${pkgname}::git+https://github.com/jmylchreest/rosec.git")
 sha256sums=('SKIP')
@@ -46,8 +48,8 @@ build() {
     cd "${srcdir}/${pkgname}"
 
     export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
-    cargo build --release --locked --bin rosecd --bin rosec 2>/dev/null || \
-    cargo build --release         --bin rosecd --bin rosec
+    cargo build --release --locked --bin rosecd --bin rosec --bin rosec-pam-unlock 2>/dev/null || \
+    cargo build --release         --bin rosecd --bin rosec --bin rosec-pam-unlock
 }
 
 check() {
@@ -62,6 +64,10 @@ package() {
     # Binaries
     install -Dm755 target/release/rosecd "${pkgdir}/usr/bin/rosecd"
     install -Dm755 target/release/rosec  "${pkgdir}/usr/bin/rosec"
+
+    # PAM helper (installed to libexec; must match pam_helper_paths in config)
+    install -Dm755 target/release/rosec-pam-unlock \
+        "${pkgdir}/usr/lib/rosec/rosec-pam-unlock"
 
     # systemd user units
     install -Dm644 contrib/systemd/rosecd.service \

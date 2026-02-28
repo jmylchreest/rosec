@@ -1,0 +1,22 @@
+post_install() {
+    echo ""
+    echo "==> rosec: PAM auto-unlock (optional)"
+    echo ""
+    echo "  To automatically unlock rosec vaults at login, add the following"
+    echo "  line to your PAM login config (e.g. /etc/pam.d/system-login),"
+    echo "  after pam_unix.so:"
+    echo ""
+    echo "    auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock"
+    echo ""
+    echo "  If your login password differs from your vault master password,"
+    echo "  add it as a second wrapping entry:"
+    echo ""
+    echo "    rosec vault add-password <vault-id> --label pam"
+    echo ""
+    echo "  See: https://github.com/jmylchreest/rosec#pam-auto-unlock"
+    echo ""
+}
+
+post_upgrade() {
+    post_install
+}

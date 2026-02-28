@@ -12,7 +12,7 @@ A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-serv
 
 **SSH agent + FUSE:** SSH keys in your vault are exposed via a built-in agent (`$XDG_RUNTIME_DIR/rosec/agent.sock`) and a FUSE filesystem (`$XDG_RUNTIME_DIR/rosec/ssh/`). The FUSE mount includes auto-generated SSH config snippets, so hosts mapped via `custom.ssh_host` fields get working `Host` blocks automatically.
 
-**Write support:** Bitwarden backends are read-only (vault changes must be made via the Bitwarden clients), but a local file backend (`rosec-file`) provides encrypted storage for machine-local secrets like session tokens and application credentials.
+**Write support:** Bitwarden backends are read-only (vault changes must be made via the Bitwarden clients), but local vaults (`rosec-vault`) provide encrypted storage for machine-local secrets like session tokens and application credentials.
 
 ## Install
 
@@ -22,6 +22,9 @@ A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-serv
 cargo build --release --workspace
 sudo install -m755 target/release/rosecd /usr/local/bin/
 sudo install -m755 target/release/rosec  /usr/local/bin/
+
+# Optional: PAM auto-unlock hook
+sudo install -Dm755 target/release/rosec-pam-unlock /usr/lib/rosec/rosec-pam-unlock
 ```
 
 ### systemd + D-Bus activation (recommended)
@@ -58,6 +61,19 @@ rosec search name="GitHub*"
 rosec get name=MY_API_KEY
 ```
 
+### PAM auto-unlock (optional)
+
+Automatically unlock vaults at login by adding one line to your PAM config
+(e.g. `/etc/pam.d/system-login`), after `pam_unix.so`:
+
+```text
+auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
+```
+
+If your login password differs from your vault master password, add it as a
+second wrapping entry first: `rosec vault add-password <vault-id> --label pam`.
+See [PAM Auto-Unlock](#pam-auto-unlock) for the full setup guide.
+
 ### SSH agent usage
 
 ```bash
@@ -83,12 +99,15 @@ Config file: `$XDG_CONFIG_HOME/rosec/config.toml` (default: `~/.config/rosec/con
 ```toml
 [service]
 refresh_interval_secs = 60   # vault re-sync interval (default: 60)
+# pam_helper_paths = ["/usr/lib/rosec/rosec-pam-unlock", "/usr/libexec/rosec-pam-unlock"]
 
+# Global autolock defaults (KWallet/GNOME Keyring-like behaviour).
+# Backends stay unlocked for the session, lock only on logout.
 [autolock]
 on_logout = true
-on_session_lock = true
-idle_timeout_minutes = 15    # lock after idle (0 = disabled)
-max_unlocked_minutes = 240   # hard cap (0 = disabled)
+on_session_lock = false      # true to lock on screen lock
+# idle_timeout_minutes = 15  # uncomment to enable idle lock
+# max_unlocked_minutes = 240 # uncomment to enable hard cap
 
 [prompt]
 backend = "builtin"          # "builtin" or path to external prompter binary
@@ -100,24 +119,69 @@ type = "bitwarden"
 [backend.options]
 email = "user@example.com"
 # base_url = "https://your-vaultwarden.example.com"  # omit for official cloud
+
+# Per-backend autolock overrides (optional — omit to use global defaults):
+# [backend.autolock]
+# idle_timeout_minutes = 5   # stricter timeout for this backend
+# on_session_lock = true     # lock this backend on screen lock
 ```
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
-## Local File Backend
+## Local Vaults
 
-For machine-local secrets (application tokens, session credentials, development API keys), add a `local` file backend:
+For machine-local secrets (application tokens, session credentials, development API keys), create a local vault:
 
-```toml
-[[backend]]
-id = "local"
-type = "file"
-
-[backend.options]
-path = "~/.local/share/rosec/local.vault"  # encrypted vault file
+```bash
+rosec vault create local
 ```
 
-The file backend stores secrets in an encrypted file at the specified path. It's unlocked with a master password (derived via PBKDF2, encrypted with AES-256-CBC) and supports full CRUD operations via the D-Bus Secret Service API.
+Or add a vault section to your config:
+
+```toml
+[[vault]]
+id = "local"
+path = "~/.local/share/rosec/vaults/local.vault"
+```
+
+Local vaults store secrets in an encrypted file at the specified path. They're unlocked with a master password (derived via PBKDF2, encrypted with AES-256-CBC) and support full CRUD operations via the D-Bus Secret Service API. Key wrapping allows multiple passwords to unlock the same vault, enabling PAM auto-unlock with a different password than the master password.
+
+### Vault management
+
+```bash
+# Create a new vault (interactive — prompts for master password)
+rosec vault create
+rosec vault create --id work --path ~/vaults/work.vault
+
+# Attach an existing vault file (e.g. shared via Syncthing)
+rosec vault attach --path /mnt/shared/team.vault --id shared
+
+# List all vaults and their lock state
+rosec vault list
+
+# Detach a vault from config (file is preserved on disk)
+rosec vault detach work
+
+# Destroy a vault — removes from config AND deletes the file
+rosec vault destroy old-vault
+```
+
+### Multiple passwords (key wrapping)
+
+Each vault can have multiple unlock passwords. This is essential for PAM auto-unlock when your login password differs from the vault master password.
+
+```bash
+# Add a second password to the "personal" vault (prompts interactively)
+rosec vault add-password personal --label pam
+
+# List wrapping entries to see entry IDs
+rosec vault list
+
+# Remove a password by entry ID
+rosec vault remove-password personal a1b2c3d4
+```
+
+The vault data key is randomly generated and encrypted ("wrapped") by each password. Adding or removing a password only changes the wrapping entries — vault data is never re-encrypted.
 
 **When to use:**
 - Application session tokens that don't belong in Bitwarden
@@ -129,8 +193,85 @@ The file backend stores secrets in an encrypted file at the specified path. It's
 
 ```toml
 [service]
-write_backend = "local"  # default if a "local" backend exists
+write_backend = "local"  # default if a "local" vault exists
 ```
+
+## PAM Auto-Unlock
+
+`rosec-pam-unlock` is a `pam_exec` hook that automatically unlocks your rosec vaults when you log in. Your login password is read from PAM's stdin and passed to the rosec daemon via a Unix pipe fd — it never appears in any D-Bus message payload, so it is invisible to `dbus-monitor`.
+
+### How it works
+
+1. PAM calls `rosec-pam-unlock` with your login password on stdin (`expose_authtok`)
+2. The binary connects to the D-Bus session bus and lists all locked vault backends
+3. For each locked vault, it creates a Unix pipe, writes the password to the write end, and passes the read-end fd to the daemon via `AuthBackendFromPipe` (D-Bus fd-passing / SCM_RIGHTS)
+4. The daemon reads the password from the pipe, attempts to unwrap the vault key, and unlocks the vault if a matching wrapping entry exists
+5. Vaults without a matching password are silently skipped — this never blocks login
+
+### Setup
+
+**1. Install the binary:**
+
+```bash
+sudo install -m755 target/release/rosec-pam-unlock /usr/lib/rosec/rosec-pam-unlock
+```
+
+**2. Add a PAM-specific password to your vault:**
+
+If your login password differs from your vault master password, add it as a second wrapping entry:
+
+```bash
+# Add your login password as a second unlock password
+rosec vault add-password personal --label pam
+# Enter your login password when prompted
+```
+
+If your login password is already your vault master password, skip this step.
+
+**3. Configure PAM:**
+
+Add to your login PAM config (e.g. `/etc/pam.d/system-login` or `/etc/pam.d/login`):
+
+```text
+auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
+```
+
+Place it after `pam_unix.so` (or your primary auth module) so the password is available.
+
+For display managers (SDDM, GDM, etc.), add to their respective PAM config:
+
+```text
+# /etc/pam.d/sddm (or gdm-password, lightdm, etc.)
+auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
+```
+
+**4. (Optional) Configure allowed helper paths:**
+
+The daemon verifies that `AuthBackendFromPipe` is only called by the PAM helper binary. It checks the caller's `/proc/<pid>/exe` against a list of allowed paths. The default covers standard FHS install locations:
+
+```toml
+[service]
+pam_helper_paths = [
+    "/usr/lib/rosec/rosec-pam-unlock",
+    "/usr/libexec/rosec-pam-unlock",
+]
+```
+
+Override this if you install to a non-standard location or want to test during development:
+
+```toml
+[service]
+pam_helper_paths = ["/home/you/rosec/target/debug/rosec-pam-unlock"]
+```
+
+### Security properties
+
+- **Caller-restricted:** The `AuthBackendFromPipe` D-Bus method only accepts calls from the PAM helper binary. The daemon resolves the caller's PID via `GetConnectionCredentials` and verifies `/proc/<pid>/exe` against `pam_helper_paths`. Arbitrary processes cannot pipe passwords to the daemon.
+- **Password never on D-Bus wire:** The password is sent via Unix pipe fd-passing (SCM_RIGHTS), not as a D-Bus string argument. It cannot be intercepted by `dbus-monitor` or `busctl monitor`.
+- **Zeroized after use:** The password buffer is zeroized in both the PAM binary and the daemon after each unlock attempt.
+- **Never blocks login:** The module is configured as `optional` and exits with `PAM_IGNORE` on any failure.
+- **No logging of secrets:** No sensitive data is ever written to stdout, stderr, or syslog.
+- **Session bus scope:** Communication happens on the per-user session bus, not the system bus.
 
 ## Development
 

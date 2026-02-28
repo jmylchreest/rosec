@@ -172,7 +172,7 @@ async fn run_prompt_task(
 
             match unlock_result {
                 Ok(()) => {
-                    state.mark_unlocked();
+                    state.mark_backend_unlocked(&backend_id);
                     state.touch_activity();
 
                     // Trigger a cache sync immediately so items are visible

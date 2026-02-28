@@ -3408,6 +3408,7 @@ dependencies = [
  "futures-util",
  "libc",
  "rosec-core",
+ "rosec-vault",
  "serde",
  "serde_json",
  "sha2",
@@ -3503,32 +3504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rosec-file"
-version = "0.0.1"
-dependencies = [
- "aes",
- "anyhow",
- "async-trait",
- "base64",
- "cbc",
- "chrono",
- "hkdf",
- "hmac",
- "pbkdf2",
- "rand 0.9.2",
- "rosec-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "rosec-fuse"
 version = "0.0.1"
 dependencies = [
@@ -3542,6 +3517,17 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "rosec-pam"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "tokio",
+ "zbus",
+ "zeroize",
+ "zvariant",
 ]
 
 [[package]]
@@ -3573,6 +3559,7 @@ dependencies = [
  "num-bigint",
  "rand 0.9.2",
  "rosec-core",
+ "rosec-vault",
  "serde",
  "serde_json",
  "sha2",
@@ -3603,6 +3590,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosec-vault"
+version = "0.0.1"
+dependencies = [
+ "aes",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "cbc",
+ "chrono",
+ "hkdf",
+ "hmac",
+ "pbkdf2",
+ "rand 0.9.2",
+ "rosec-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "rosecd"
 version = "0.0.1"
 dependencies = [
@@ -3617,6 +3630,7 @@ dependencies = [
  "rosec-fuse",
  "rosec-secret-service",
  "rosec-ssh-agent",
+ "rosec-vault",
  "serde",
  "serde_json",
  "ssh-key",

@@ -65,14 +65,14 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
         let backend = &locked[0];
         let id = backend.id().to_string();
         let fields = backend_auth_fields(backend.as_ref());
-        auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
+        let _password = auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
         results.push(UnlockResult {
             backend_id: id.clone(),
             success: true,
             message: "unlocked".to_string(),
         });
-        state.mark_unlocked();
-        state.touch_activity();
+        // auth_backend_with_tty_inner -> auth_backend_inner already called
+        // mark_backend_unlocked + touch_activity, so no need to repeat here.
         // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
         if let Err(e) = state.try_sync_backend(&id).await {
             debug!(backend = %id, "post-unlock sync failed: {e}");
@@ -102,11 +102,7 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
     let collected = collect_tty_on_fd(tty_fd, std::slice::from_ref(pw_field)).await?;
 
     // Try the collected credentials against every locked backend.
-    // We build a plain HashMap<String, String> for the unlock call.
-    let string_map: HashMap<String, String> = collected
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-        .collect();
+    // We pass the Zeroizing<String> map directly — no plain String copies.
 
     // Track which backends need a registration flow (password already collected).
     let mut need_registration: Vec<(String, HashMap<String, Zeroizing<String>>)> = Vec::new();
@@ -115,7 +111,12 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
 
     for backend in &locked {
         let id = backend.id().to_string();
-        match state.auth_backend_inner(&id, string_map.clone()).await {
+        // Clone the Zeroizing<String> values — each clone is itself zeroized on drop.
+        let fields_clone: HashMap<String, Zeroizing<String>> = collected
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        match state.auth_backend_inner(&id, fields_clone).await {
             Ok(()) => {
                 results.push(UnlockResult {
                     backend_id: id.clone(),
@@ -150,7 +151,8 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
                 .ok_or_else(|| anyhow!("backend '{id}' not found"))?;
             backend_auth_fields(b.as_ref())
         };
-        auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, Some(prefill)).await?;
+        let _password =
+            auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, Some(prefill)).await?;
         results.push(UnlockResult {
             backend_id: id.clone(),
             success: true,
@@ -169,7 +171,7 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
                 .ok_or_else(|| anyhow!("backend '{id}' not found"))?;
             backend_auth_fields(b.as_ref())
         };
-        auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
+        let _password = auth_backend_with_tty_inner(&state, tty_fd, &id, &fields, None).await?;
         results.push(UnlockResult {
             backend_id: id.clone(),
             success: true,
@@ -180,10 +182,9 @@ pub async fn unlock_with_tty(state: Arc<ServiceState>, tty_fd: RawFd) -> Result<
         }
     }
 
-    if results.iter().any(|r| r.success) {
-        state.mark_unlocked();
-        state.touch_activity();
-    }
+    // mark_backend_unlocked + touch_activity are already called inside
+    // auth_backend_inner for each successful backend unlock, so no need
+    // for a separate mark_unlocked() call here.
 
     Ok(results)
 }
@@ -203,12 +204,23 @@ pub async fn auth_backend_with_tty(
             .ok_or_else(|| anyhow!("backend '{backend_id}' not found"))?;
         backend_auth_fields(b.as_ref())
     };
-    auth_backend_with_tty_inner(&state, tty_fd, backend_id, &fields, None).await?;
-    state.mark_unlocked();
-    state.touch_activity();
+    let password = auth_backend_with_tty_inner(&state, tty_fd, backend_id, &fields, None).await?;
+    // auth_backend_inner (called by auth_backend_with_tty_inner) already
+    // called mark_backend_unlocked + touch_activity.
     // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
     if let Err(e) = state.try_sync_backend(backend_id).await {
         debug!(backend = %backend_id, "post-unlock sync failed: {e}");
+    }
+    // Opportunistically try the same password against other locked backends.
+    // Spawn as a detached task so the caller returns immediately — the sweep
+    // can take seconds when it triggers full Bitwarden syncs.
+    if !password.is_empty() {
+        let sweep_state = Arc::clone(&state);
+        let sweep_id = backend_id.to_string();
+        tokio::spawn(async move {
+            sweep_state.opportunistic_sweep(&password, &sweep_id).await;
+            debug!("opportunistic sweep complete (from auth_backend_with_tty)");
+        });
     }
     Ok(())
 }
@@ -226,13 +238,16 @@ pub async fn auth_backend_with_tty(
 /// If `prefill` is `None` and `AuthBackend` returns `registration_required`,
 /// the user is asked to confirm their password once (to guard against typos on
 /// first-time setup), then registration-specific fields are collected.
+///
+/// On success, returns the password value used for the unlock so the caller
+/// can pass it to `opportunistic_sweep` if desired.
 async fn auth_backend_with_tty_inner(
     state: &Arc<ServiceState>,
     tty_fd: RawFd,
     backend_id: &str,
     fields: &[TtyField],
     prefill: Option<HashMap<String, Zeroizing<String>>>,
-) -> Result<()> {
+) -> Result<Zeroizing<String>> {
     let is_token_auth = {
         let b = state
             .backend_by_id(backend_id)
@@ -267,13 +282,8 @@ async fn auth_backend_with_tty_inner(
         collect_tty_on_fd(tty_fd, fields).await?
     };
 
-    // Build a plain HashMap<String, String> for the D-Bus call.
-    let string_map: HashMap<String, String> = cred_map
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-        .collect();
-
-    let result = state.auth_backend_inner(backend_id, string_map).await;
+    // Pass the Zeroizing<String> map directly — no plain String intermediary.
+    let result = state.auth_backend_inner(backend_id, cred_map.clone()).await;
 
     let needs_registration = matches!(
         &result,
@@ -313,12 +323,12 @@ async fn auth_backend_with_tty_inner(
             {
                 let original = cred_map
                     .get(&field.id)
-                    .map(|v| v.as_str().to_string())
-                    .unwrap_or_default();
+                    .cloned()
+                    .unwrap_or_else(|| Zeroizing::new(String::new()));
                 loop {
                     let confirm_label = format!("Confirm {}", field.label);
                     let entry = prompt_field_on_fd(tty_fd, &confirm_label, "", &field.kind).await?;
-                    if entry.as_str() == original {
+                    if entry.as_str() == original.as_str() {
                         break;
                     }
                     print_on_fd(tty_fd, "Does not match — please try again.\n\n");
@@ -342,24 +352,33 @@ async fn auth_backend_with_tty_inner(
         cred_map.extend(reg_extra);
 
         // Retry with registration fields included.
-        let string_map2: HashMap<String, String> = cred_map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-            .collect();
-
+        // cred_map now contains both the original credentials and registration
+        // fields — all as Zeroizing<String> values that zeroize on drop.
         state
-            .auth_backend_inner(backend_id, string_map2)
+            .auth_backend_inner(backend_id, cred_map.clone())
             .await
             .map_err(|e| anyhow!("registration failed for '{backend_id}': {e}"))?;
     } else {
         result.map_err(|e| anyhow!("auth failed for '{backend_id}': {e}"))?;
     }
 
+    // Extract the password value for the caller before dropping cred_map.
+    let pw_field_id = {
+        let b = state
+            .backend_by_id(backend_id)
+            .ok_or_else(|| anyhow!("backend '{backend_id}' not found"))?;
+        b.password_field().id.to_string()
+    };
+    let password = cred_map
+        .get(&pw_field_id)
+        .cloned()
+        .unwrap_or_else(|| Zeroizing::new(String::new()));
+
     // cred_map is dropped here; all Zeroizing<String> values are scrubbed.
     drop(cred_map);
 
     info!(backend = %backend_id, "backend authenticated via AuthBackendWithTty");
-    Ok(())
+    Ok(password)
 }
 
 // ---------------------------------------------------------------------------

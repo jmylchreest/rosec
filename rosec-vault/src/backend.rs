@@ -15,34 +15,47 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto;
-use crate::types::{KdfParams, VaultData, VaultFile, VaultItemData};
+use crate::types::{VaultData, VaultFile, VaultItemData, WrappingEntry};
 
 struct UnlockedState {
-    kdf: KdfParams,
-    encryption_key: Zeroizing<[u8; 32]>,
+    /// The random vault key used to encrypt/decrypt vault data.
+    vault_key: Zeroizing<[u8; 32]>,
+    /// MAC key derived from the vault key (for HMAC over encrypted data).
     mac_key: Zeroizing<[u8; 32]>,
+    /// The current wrapping entries (preserved for re-saving).
+    wrapping_entries: Vec<WrappingEntry>,
+    /// Decrypted vault data.
     data: VaultData,
+    /// Whether in-memory data has been modified since last save.
     dirty: bool,
 }
 
-pub struct FileBackend {
+pub struct LocalVault {
     id: String,
     path: PathBuf,
     state: RwLock<Option<UnlockedState>>,
-    callbacks: RwLock<BackendCallbacks>,
+    callbacks: std::sync::RwLock<BackendCallbacks>,
 }
 
-impl FileBackend {
+impl LocalVault {
     pub fn new(id: impl Into<String>, path: impl AsRef<Path>) -> Self {
         Self {
             id: id.into(),
             path: path.as_ref().to_path_buf(),
             state: RwLock::new(None),
-            callbacks: RwLock::new(BackendCallbacks::default()),
+            callbacks: std::sync::RwLock::new(BackendCallbacks::default()),
         }
     }
 
-    async fn load_vault(&self, password: &[u8]) -> Result<(VaultData, KdfParams), BackendError> {
+    /// Load and decrypt a vault file using the given password.
+    ///
+    /// Tries each wrapping entry to unwrap the vault key. The first entry whose
+    /// HMAC verifies is used to recover the vault key, which then decrypts the
+    /// vault data.
+    async fn load_vault(
+        &self,
+        password: &[u8],
+    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>), BackendError> {
         let content = fs::read(&self.path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 BackendError::Unavailable("vault file not found".into())
@@ -54,43 +67,61 @@ impl FileBackend {
         let vault_file: VaultFile =
             serde_json::from_slice(&content).map_err(|e| BackendError::Other(e.into()))?;
 
-        if vault_file.version != crate::types::FILE_FORMAT_VERSION {
+        if vault_file.version != crate::types::VAULT_FORMAT_VERSION {
             return Err(BackendError::Other(anyhow::anyhow!(
                 "unsupported vault version: {}",
                 vault_file.version
             )));
         }
 
-        let encryption_key = crypto::derive_key(password, &vault_file.kdf);
-        let mac_key = crypto::derive_mac_key(&*encryption_key);
+        if vault_file.wrapping_entries.is_empty() {
+            return Err(BackendError::Other(anyhow::anyhow!(
+                "vault has no wrapping entries"
+            )));
+        }
+
+        // Try each wrapping entry until one succeeds.
+        let vault_key = vault_file
+            .wrapping_entries
+            .iter()
+            .find_map(|entry| crypto::unwrap_vault_key(entry, password))
+            .ok_or_else(|| BackendError::Other(anyhow::anyhow!("HMAC verification failed")))?;
+
+        let mac_key = crypto::derive_mac_key(&*vault_key);
 
         let encrypted_data = vault_file.encrypted_data_bytes();
         if !crypto::verify_hmac(&*mac_key, &encrypted_data, &vault_file.hmac_bytes()) {
             return Err(BackendError::Other(anyhow::anyhow!(
-                "HMAC verification failed"
+                "vault data HMAC verification failed"
             )));
         }
 
-        let decrypted = crypto::decrypt(&encrypted_data, &*encryption_key)
+        let decrypted = crypto::decrypt(&encrypted_data, &*vault_key)
             .map_err(|e| BackendError::Other(anyhow::anyhow!("decryption failed: {}", e)))?;
 
         let data: VaultData =
             serde_json::from_slice(&decrypted).map_err(|e| BackendError::Other(e.into()))?;
 
-        Ok((data, vault_file.kdf))
+        Ok((data, vault_key, vault_file.wrapping_entries))
     }
 
-    async fn create_vault(&self, password: &[u8]) -> Result<(VaultData, KdfParams), BackendError> {
-        let kdf = KdfParams::default();
-        let encryption_key = crypto::derive_key(password, &kdf);
-        let mac_key = crypto::derive_mac_key(&*encryption_key);
+    /// Create a new vault file with a random vault key wrapped by the password.
+    async fn create_vault(
+        &self,
+        password: &[u8],
+    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>), BackendError> {
+        let vault_key = crypto::generate_vault_key();
+        let mac_key = crypto::derive_mac_key(&*vault_key);
         let data = VaultData::default();
 
+        let entry = crypto::wrap_vault_key(&vault_key, password, Some("master".to_string()));
+        let wrapping_entries = vec![entry];
+
         let plaintext = serde_json::to_vec(&data).map_err(|e| BackendError::Other(e.into()))?;
-        let encrypted = crypto::encrypt(&plaintext, &*encryption_key);
+        let encrypted = crypto::encrypt(&plaintext, &*vault_key);
         let hmac = crypto::compute_hmac(&*mac_key, &encrypted);
 
-        let vault_file = VaultFile::new(kdf.clone(), &encrypted, &hmac);
+        let vault_file = VaultFile::new(wrapping_entries.clone(), &encrypted, &hmac);
         let content =
             serde_json::to_string_pretty(&vault_file).map_err(|e| BackendError::Other(e.into()))?;
 
@@ -106,7 +137,7 @@ impl FileBackend {
 
         info!(path = %self.path.display(), "created new vault");
 
-        Ok((data, kdf))
+        Ok((data, vault_key, wrapping_entries))
     }
 
     async fn save(&self) -> Result<(), BackendError> {
@@ -120,10 +151,10 @@ impl FileBackend {
 
         let plaintext =
             serde_json::to_vec(&state.data).map_err(|e| BackendError::Other(e.into()))?;
-        let encrypted = crypto::encrypt(&plaintext, &*state.encryption_key);
+        let encrypted = crypto::encrypt(&plaintext, &*state.vault_key);
         let hmac = crypto::compute_hmac(&*state.mac_key, &encrypted);
 
-        let vault_file = VaultFile::new(state.kdf.clone(), &encrypted, &hmac);
+        let vault_file = VaultFile::new(state.wrapping_entries.clone(), &encrypted, &hmac);
         let content =
             serde_json::to_string_pretty(&vault_file).map_err(|e| BackendError::Other(e.into()))?;
 
@@ -134,6 +165,98 @@ impl FileBackend {
         state.dirty = false;
         debug!(path = %self.path.display(), "saved vault");
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Key wrapping management (public API for CLI)
+    // -----------------------------------------------------------------------
+
+    /// Add a new password as a wrapping entry for this vault.
+    ///
+    /// The vault must be unlocked. The new password wraps the same vault key
+    /// that the existing entries protect. Labels must be non-empty and unique
+    /// within the vault.
+    pub async fn add_password(
+        &self,
+        password: &[u8],
+        label: String,
+    ) -> Result<String, BackendError> {
+        if label.is_empty() {
+            return Err(BackendError::InvalidInput(
+                "password label cannot be empty".into(),
+            ));
+        }
+
+        let mut guard = self.state.write().await;
+        let state = guard.as_mut().ok_or(BackendError::Locked)?;
+
+        if state
+            .wrapping_entries
+            .iter()
+            .any(|e| e.label.as_deref() == Some(label.as_str()))
+        {
+            return Err(BackendError::InvalidInput(
+                format!("a password with label '{label}' already exists").into(),
+            ));
+        }
+
+        let entry = crypto::wrap_vault_key(&state.vault_key, password, Some(label));
+        let id = entry.id.clone();
+        state.wrapping_entries.push(entry);
+        state.dirty = true;
+
+        drop(guard);
+        self.save().await?;
+
+        info!(entry_id = %id, "added wrapping entry");
+        Ok(id)
+    }
+
+    /// Remove a wrapping entry by ID.
+    ///
+    /// The vault must be unlocked and must have at least 2 wrapping entries
+    /// (cannot remove the last one).
+    pub async fn remove_password(&self, entry_id: &str) -> Result<(), BackendError> {
+        let mut guard = self.state.write().await;
+        let state = guard.as_mut().ok_or(BackendError::Locked)?;
+
+        if state.wrapping_entries.len() <= 1 {
+            return Err(BackendError::InvalidInput(
+                "cannot remove the last wrapping entry".into(),
+            ));
+        }
+
+        let initial_len = state.wrapping_entries.len();
+        state.wrapping_entries.retain(|e| e.id != entry_id);
+
+        if state.wrapping_entries.len() == initial_len {
+            return Err(BackendError::NotFound);
+        }
+
+        state.dirty = true;
+
+        drop(guard);
+        self.save().await?;
+
+        info!(entry_id = %entry_id, "removed wrapping entry");
+        Ok(())
+    }
+
+    /// List all wrapping entries (id + label only, no key material).
+    pub async fn list_passwords(&self) -> Result<Vec<(String, Option<String>)>, BackendError> {
+        let guard = self.state.read().await;
+        let state = guard.as_ref().ok_or(BackendError::Locked)?;
+
+        Ok(state
+            .wrapping_entries
+            .iter()
+            .map(|e| (e.id.clone(), e.label.clone()))
+            .collect())
+    }
+
+    /// Return the on-disk path of this vault file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn item_to_meta(&self, item: &VaultItemData, backend_id: &str) -> VaultItemMeta {
@@ -173,9 +296,9 @@ impl FileBackend {
     }
 }
 
-impl std::fmt::Debug for FileBackend {
+impl std::fmt::Debug for LocalVault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileBackend")
+        f.debug_struct("LocalVault")
             .field("id", &self.id)
             .field("path", &self.path)
             .field("unlocked", &self.state.try_read().map(|g| g.is_some()))
@@ -184,7 +307,7 @@ impl std::fmt::Debug for FileBackend {
 }
 
 #[async_trait]
-impl VaultBackend for FileBackend {
+impl VaultBackend for LocalVault {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -194,11 +317,15 @@ impl VaultBackend for FileBackend {
     }
 
     fn name(&self) -> &str {
-        "Local File"
+        "Local Vault"
     }
 
     fn kind(&self) -> &str {
-        "file"
+        "vault"
+    }
+
+    fn backend_class(&self) -> rosec_core::BackendClass {
+        rosec_core::BackendClass::Vault
     }
 
     fn supports_writes(&self) -> bool {
@@ -235,7 +362,7 @@ impl VaultBackend for FileBackend {
         }
 
         let password_bytes = password.as_bytes();
-        let (data, kdf) = match self.load_vault(password_bytes).await {
+        let (data, vault_key, wrapping_entries) = match self.load_vault(password_bytes).await {
             Ok(result) => result,
             Err(BackendError::Unavailable(_)) => {
                 info!("vault not found, creating new vault");
@@ -244,20 +371,23 @@ impl VaultBackend for FileBackend {
             Err(e) => return Err(e),
         };
 
-        let encryption_key = crypto::derive_key(password_bytes, &kdf);
-        let mac_key = crypto::derive_mac_key(&*encryption_key);
+        let mac_key = crypto::derive_mac_key(&*vault_key);
 
         *guard = Some(UnlockedState {
-            kdf,
-            encryption_key,
+            vault_key,
             mac_key,
+            wrapping_entries,
             data,
             dirty: false,
         });
 
         info!("backend unlocked");
 
-        let callbacks = self.callbacks.read().await.clone();
+        let callbacks = self
+            .callbacks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(cb) = callbacks.on_unlocked {
             cb();
         }
@@ -275,7 +405,11 @@ impl VaultBackend for FileBackend {
         *guard = None;
         info!("backend locked");
 
-        let callbacks = self.callbacks.read().await.clone();
+        let callbacks = self
+            .callbacks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(cb) = callbacks.on_locked {
             cb();
         }
@@ -498,8 +632,21 @@ impl VaultBackend for FileBackend {
         Ok(Vec::new())
     }
 
+    /// Local vaults have no remote source — nothing to sync.
+    async fn sync(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Local vaults have no remote source — never "changed".
+    async fn check_remote_changed(&self) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     fn set_event_callbacks(&self, callbacks: BackendCallbacks) -> Result<(), BackendError> {
-        let mut guard = self.callbacks.blocking_write();
+        let mut guard = self
+            .callbacks
+            .write()
+            .map_err(|_| BackendError::Other(anyhow::anyhow!("callbacks lock poisoned")))?;
         *guard = callbacks;
         Ok(())
     }
@@ -510,11 +657,11 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    fn create_test_backend() -> (FileBackend, NamedTempFile) {
+    fn create_test_backend() -> (LocalVault, NamedTempFile) {
         let temp = NamedTempFile::new().unwrap();
         let path = temp.path().to_path_buf();
         std::fs::remove_file(&path).unwrap();
-        let backend = FileBackend::new("test", path);
+        let backend = LocalVault::new("test", path);
         (backend, temp)
     }
 
@@ -523,7 +670,7 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
         std::fs::remove_file(temp.path()).unwrap();
 
-        let backend = FileBackend::new("test", temp.path());
+        let backend = LocalVault::new("test", temp.path());
         let result = backend
             .unlock(UnlockInput::Password(Zeroizing::new(
                 "password".to_string(),
@@ -849,5 +996,151 @@ mod tests {
 
         let retrieved = backend.get_item(&id).await.unwrap();
         assert_eq!(retrieved.meta.label, "Test");
+    }
+
+    #[tokio::test]
+    async fn add_password_enables_second_unlock() {
+        let (backend, _temp) = create_test_backend();
+
+        // Create vault with master password
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await
+            .unwrap();
+
+        // Add a second password
+        let entry_id = backend
+            .add_password(b"login-password", "login".to_string())
+            .await
+            .unwrap();
+        assert!(!entry_id.is_empty());
+
+        // Verify we have 2 wrapping entries
+        let entries = backend.list_passwords().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1.as_deref(), Some("master"));
+        assert_eq!(entries[1].1.as_deref(), Some("login"));
+
+        // Lock and unlock with the second password
+        backend.lock().await.unwrap();
+        let result = backend
+            .unlock(UnlockInput::Password(Zeroizing::new(
+                "login-password".to_string(),
+            )))
+            .await;
+        assert!(result.is_ok());
+
+        // Lock and unlock with the original password still works
+        backend.lock().await.unwrap();
+        let result = backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_password_prevents_unlock() {
+        let (backend, _temp) = create_test_backend();
+
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await
+            .unwrap();
+
+        // Add second password
+        let entry_id = backend
+            .add_password(b"second", "second".to_string())
+            .await
+            .unwrap();
+
+        // Remove the second password
+        backend.remove_password(&entry_id).await.unwrap();
+
+        let entries = backend.list_passwords().await.unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // Lock and try the removed password — should fail
+        backend.lock().await.unwrap();
+        let result = backend
+            .unlock(UnlockInput::Password(Zeroizing::new("second".to_string())))
+            .await;
+        assert!(result.is_err());
+
+        // Original still works
+        let result = backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cannot_remove_last_password() {
+        let (backend, _temp) = create_test_backend();
+
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await
+            .unwrap();
+
+        let entries = backend.list_passwords().await.unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let result = backend.remove_password(&entries[0].0).await;
+        assert!(matches!(result, Err(BackendError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn add_password_rejects_empty_label() {
+        let (backend, _temp) = create_test_backend();
+
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await
+            .unwrap();
+
+        let result = backend.add_password(b"another", String::new()).await;
+        assert!(matches!(result, Err(BackendError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn add_password_rejects_duplicate_label() {
+        let (backend, _temp) = create_test_backend();
+
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
+            .await
+            .unwrap();
+
+        // Add a password with label "login"
+        backend
+            .add_password(b"login-pw", "login".to_string())
+            .await
+            .unwrap();
+
+        // Try to add another password with the same label — should fail
+        let result = backend.add_password(b"other-pw", "login".to_string()).await;
+        assert!(matches!(result, Err(BackendError::InvalidInput(_))));
+
+        // Verify only 2 entries exist (master + login), not 3
+        let entries = backend.list_passwords().await.unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn wrong_password_fails_to_unlock() {
+        let (backend, _temp) = create_test_backend();
+
+        // Create vault
+        backend
+            .unlock(UnlockInput::Password(Zeroizing::new("correct".to_string())))
+            .await
+            .unwrap();
+        backend.lock().await.unwrap();
+
+        // Try wrong password
+        let result = backend
+            .unlock(UnlockInput::Password(Zeroizing::new("wrong".to_string())))
+            .await;
+        assert!(result.is_err());
     }
 }

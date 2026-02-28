@@ -21,9 +21,11 @@ depends=(
 )
 optdepends=(
     'libnotify: desktop notifications on lock/unlock'
+    'pam: PAM auto-unlock support via rosec-pam-unlock'
 )
 provides=('secret-service')
 conflicts=('gnome-keyring' 'keepassxc')
+install=rosec.install
 
 source_x86_64=(
     "${pkgname}-${pkgver}-x86_64.tar.gz::https://github.com/jmylchreest/${pkgname}/releases/download/v${pkgver}/${pkgname}-${pkgver}-x86_64-unknown-linux-gnu.tar.gz"
@@ -43,6 +45,10 @@ package() {
     # Binaries
     install -Dm755 "${srcdir_inner}/rosecd" "${pkgdir}/usr/bin/rosecd"
     install -Dm755 "${srcdir_inner}/rosec"  "${pkgdir}/usr/bin/rosec"
+
+    # PAM helper (installed to libexec; must match pam_helper_paths in config)
+    install -Dm755 "${srcdir_inner}/rosec-pam-unlock" \
+        "${pkgdir}/usr/lib/rosec/rosec-pam-unlock"
 
     # systemd user units
     install -Dm644 "${srcdir_inner}/contrib/systemd/rosecd.service" \
