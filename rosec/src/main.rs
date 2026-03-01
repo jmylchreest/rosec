@@ -463,7 +463,9 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
                 "org.rosec.Daemon",
             )
             .await?;
-            let _: Result<bool, _> = daemon_proxy.call("CancelPrompt", &(&prompt_path,)).await;
+            let cancel_path = OwnedObjectPath::try_from(prompt_path.clone())
+                .unwrap_or_else(|_| OwnedObjectPath::try_from("/".to_string()).unwrap());
+            let _: Result<bool, _> = daemon_proxy.call("CancelPrompt", &(&cancel_path,)).await;
             bail!("cancelled by user");
         }
     };
@@ -1926,10 +1928,18 @@ async fn search_exact(
     )
     .await?;
 
+    let convert =
+        |(u, l): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)| -> (Vec<String>, Vec<String>) {
+            (
+                u.into_iter().map(|p| p.to_string()).collect(),
+                l.into_iter().map(|p| p.to_string()).collect(),
+            )
+        };
+
     match proxy.call("SearchItems", &(attrs,)).await {
-        Ok(result) => Ok(result),
+        Ok(result) => Ok(convert(result)),
         Err(ref e) if try_lazy_unlock(conn, e).await? => {
-            Ok(proxy.call("SearchItems", &(attrs,)).await?)
+            Ok(convert(proxy.call("SearchItems", &(attrs,)).await?))
         }
         Err(e) => Err(e.into()),
     }
@@ -2004,12 +2014,23 @@ async fn search_with_glob_fallback(
             "org.rosec.Search",
         )
         .await?;
+
+        let convert =
+            |(u, l): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)| -> (Vec<String>, Vec<String>) {
+                (
+                    u.into_iter().map(|p| p.to_string()).collect(),
+                    l.into_iter().map(|p| p.to_string()).collect(),
+                )
+            };
+
         // Mirror the lazy-unlock retry that search_exact uses: if the server
         // returns locked::<id>, prompt the user then retry once.
         match search_proxy.call("SearchItemsGlob", &(attrs,)).await {
-            Ok(result) => return Ok(result),
+            Ok(result) => return Ok(convert(result)),
             Err(ref e) if try_lazy_unlock(conn, e).await? => {
-                return Ok(search_proxy.call("SearchItemsGlob", &(attrs,)).await?);
+                return Ok(convert(
+                    search_proxy.call("SearchItemsGlob", &(attrs,)).await?,
+                ));
             }
             Err(e) => return Err(e.into()),
         }
@@ -2453,9 +2474,11 @@ async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool
         )
         .await?;
         let suffix = format!("_{raw}");
-        let (unlocked, locked): (Vec<String>, Vec<String>) = proxy
+        let (unlocked_paths, locked_paths): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = proxy
             .call("SearchItems", &(&HashMap::<String, String>::new(),))
             .await?;
+        let unlocked: Vec<String> = unlocked_paths.into_iter().map(|p| p.to_string()).collect();
+        let locked: Vec<String> = locked_paths.into_iter().map(|p| p.to_string()).collect();
         // Check unlocked first (preferred).
         for path in &unlocked {
             if path.ends_with(&suffix) {
@@ -2729,12 +2752,14 @@ async fn cmd_get_inner(conn: &Connection, path: &str, attr: Option<&str>) -> Res
     )
     .await?;
 
-    let (_, session_path): (OwnedValue, String) = service_proxy
+    let (_, session_path): (OwnedValue, OwnedObjectPath) = service_proxy
         .call("OpenSession", &("plain", zvariant::Value::from("")))
         .await?;
 
-    let items = vec![path.to_string()];
-    let secrets_result: Result<HashMap<String, OwnedValue>, zbus::Error> = service_proxy
+    let item_path = OwnedObjectPath::try_from(path.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid item path: {e}"))?;
+    let items = vec![&item_path];
+    let secrets_result: Result<HashMap<OwnedObjectPath, OwnedValue>, zbus::Error> = service_proxy
         .call("GetSecrets", &(items, &session_path))
         .await;
 
@@ -2871,7 +2896,7 @@ async fn cmd_inspect_inner(
     )
     .await?;
 
-    let (_, session_path): (OwnedValue, String) = service_proxy
+    let (_, session_path): (OwnedValue, OwnedObjectPath) = service_proxy
         .call("OpenSession", &("plain", zvariant::Value::from("")))
         .await?;
 
@@ -2896,14 +2921,17 @@ async fn cmd_inspect_inner(
         )
         .await?;
 
+        let item_obj_path = OwnedObjectPath::try_from(path.to_string())
+            .map_err(|e| anyhow::anyhow!("invalid item path: {e}"))?;
+
         let names: Vec<String> = secrets_proxy
-            .call("GetSecretAttributeNames", &(path,))
+            .call("GetSecretAttributeNames", &(&item_obj_path,))
             .await?;
 
         let mut pairs: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::with_capacity(names.len());
         for name in names {
             let bytes: Vec<u8> = secrets_proxy
-                .call("GetSecretAttribute", &(path, name.as_str()))
+                .call("GetSecretAttribute", &(&item_obj_path, name.as_str()))
                 .await
                 .unwrap_or_default();
             pairs.push((name, Zeroizing::new(bytes)));
@@ -2915,8 +2943,10 @@ async fn cmd_inspect_inner(
 
     // Fetch the primary secret for human/kv (not needed for json as we include
     // sensitive attrs separately).
-    let items = vec![path.to_string()];
-    let secrets_result: Result<HashMap<String, OwnedValue>, zbus::Error> = service_proxy
+    let inspect_item_path = OwnedObjectPath::try_from(path.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid item path: {e}"))?;
+    let items = vec![&inspect_item_path];
+    let secrets_result: Result<HashMap<OwnedObjectPath, OwnedValue>, zbus::Error> = service_proxy
         .call("GetSecrets", &(items, &session_path))
         .await;
 

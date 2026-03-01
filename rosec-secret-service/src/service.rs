@@ -92,19 +92,21 @@ impl SecretService {
 
     async fn get_secrets(
         &self,
-        items: Vec<String>,
-        session: &str,
+        items: Vec<OwnedObjectPath>,
+        session: zvariant::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, zvariant::Value<'static>>, FdoError> {
         log_caller("GetSecrets", &header);
         self.state.touch_activity();
+        let session = session.as_str();
         self.state.ensure_session(session)?;
         let aes_key = self
             .state
             .sessions
             .get_session_key(session)
             .map_err(map_backend_error)?;
-        let resolved = self.state.resolve_items(None, Some(&items)).await?;
+        let item_paths: Vec<String> = items.iter().map(|p| p.as_str().to_string()).collect();
+        let resolved = self.state.resolve_items(None, Some(&item_paths)).await?;
         let mut secrets = HashMap::new();
         for (path, item) in resolved {
             if item.locked {
@@ -145,13 +147,13 @@ impl SecretService {
 
     fn close_session(
         &self,
-        session: &str,
+        session: zvariant::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_caller("CloseSession", &header);
         self.state
             .sessions
-            .close_session(session)
+            .close_session(session.as_str())
             .map_err(map_backend_error)
     }
 
@@ -173,7 +175,7 @@ impl SecretService {
     fn set_alias(
         &self,
         _name: &str,
-        _collection: &str,
+        _collection: zvariant::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_caller("SetAlias", &header);
@@ -182,7 +184,7 @@ impl SecretService {
 
     async fn lock(
         &self,
-        objects: Vec<String>,
+        objects: Vec<OwnedObjectPath>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_caller("Lock", &header);
@@ -196,10 +198,7 @@ impl SecretService {
         }
         self.state.mark_locked();
         // Return the requested objects as "locked" and no prompt needed
-        Ok((
-            objects.iter().map(|s| to_object_path(s)).collect(),
-            to_object_path("/"),
-        ))
+        Ok((objects, to_object_path("/")))
     }
 
     async fn unlock(

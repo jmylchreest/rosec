@@ -5,7 +5,9 @@ use tracing::debug;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
+use zvariant::OwnedObjectPath;
 
+use crate::service::to_object_path;
 use crate::state::ServiceState;
 
 /// Log the D-Bus caller at debug level for a search method.
@@ -43,8 +45,12 @@ impl RosecSearch {
         &self,
         attrs: HashMap<String, String>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
+    ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), FdoError> {
         log_caller("SearchItemsGlob", &header);
-        self.state.search_metadata_cache_glob(&attrs)
+        let (unlocked, locked) = self.state.search_metadata_cache_glob(&attrs)?;
+        Ok((
+            unlocked.into_iter().map(|s| to_object_path(&s)).collect(),
+            locked.into_iter().map(|s| to_object_path(&s)).collect(),
+        ))
     }
 }

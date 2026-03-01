@@ -6,8 +6,9 @@ use rosec_core::{BackendError, VaultBackend, VaultItemMeta};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
+use zvariant::{ObjectPath, OwnedObjectPath};
 
-use crate::service::build_secret_value;
+use crate::service::{build_secret_value, to_object_path};
 use crate::session::SessionManager;
 use crate::state::map_backend_error;
 
@@ -76,9 +77,13 @@ impl SecretItem {
             .unwrap_or(0)
     }
 
-    async fn get_secret(&self, session: &str) -> Result<zvariant::Value<'static>, FdoError> {
+    async fn get_secret(
+        &self,
+        session: ObjectPath<'_>,
+    ) -> Result<zvariant::Value<'static>, FdoError> {
         use wildmatch::WildMatch;
 
+        let session = session.as_str();
         ensure_session(&self.state.sessions, session)?;
         if self.state.meta.locked {
             return Err(FdoError::Failed("locked".to_string()));
@@ -131,7 +136,7 @@ impl SecretItem {
         ))
     }
 
-    async fn delete(&self) -> Result<(), FdoError> {
+    async fn delete(&self) -> Result<OwnedObjectPath, FdoError> {
         if !self.state.backend.supports_writes() {
             return Err(FdoError::NotSupported(
                 "backend does not support write operations".to_string(),
@@ -158,7 +163,8 @@ impl SecretItem {
             items.remove(&item_path);
         }
 
-        Ok(())
+        // No prompt needed — return "/" per the spec.
+        Ok(to_object_path("/"))
     }
 }
 
@@ -263,14 +269,18 @@ mod tests {
         };
         let item = SecretItem::new(state);
 
-        let invalid = item.get_secret("invalid").await;
+        let invalid = item
+            .get_secret(ObjectPath::try_from("/invalid").unwrap())
+            .await;
         assert!(invalid.is_err());
 
         let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
-        let valid = item.get_secret(&session).await;
+        let valid = item
+            .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
+            .await;
         assert!(valid.is_ok());
     }
 
@@ -294,7 +304,9 @@ mod tests {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
-        let result = item.get_secret(&session).await;
+        let result = item
+            .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
+            .await;
         assert!(result.is_err());
     }
 }

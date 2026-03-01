@@ -36,13 +36,13 @@ impl RosecSecrets {
     /// `org.freedesktop.Secret.Service` interface.
     async fn get_secret_attribute_names(
         &self,
-        item_path: &str,
+        item_path: zvariant::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<String>, FdoError> {
         log_caller("GetSecretAttributeNames", &header);
         self.state.touch_activity();
 
-        let (backend, item_id) = self.state.backend_and_id_for_path(item_path)?;
+        let (backend, item_id) = self.state.backend_and_id_for_path(item_path.as_str())?;
 
         let item_attrs = self
             .state
@@ -65,14 +65,14 @@ impl RosecSecrets {
     /// `org.freedesktop.Secret.Service` interface.
     async fn get_secret_attribute(
         &self,
-        item_path: &str,
+        item_path: zvariant::ObjectPath<'_>,
         attr_name: &str,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<u8>, FdoError> {
         log_caller("GetSecretAttribute", &header);
         self.state.touch_activity();
 
-        let (backend, item_id) = self.state.backend_and_id_for_path(item_path)?;
+        let (backend, item_id) = self.state.backend_and_id_for_path(item_path.as_str())?;
         let attr_name = attr_name.to_string();
         let attr_name_for_err = attr_name.clone();
 

@@ -159,7 +159,7 @@ impl SecretCollection {
         Ok((to_object_path(&item_path), to_object_path("/")))
     }
 
-    fn delete(&self) -> Result<(), FdoError> {
+    fn delete(&self) -> Result<OwnedObjectPath, FdoError> {
         Err(FdoError::NotSupported(
             "cannot delete default collection".to_string(),
         ))

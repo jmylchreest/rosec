@@ -646,12 +646,13 @@ impl RosecManagement {
     /// the path was not in the active-prompt registry (already completed or invalid).
     fn cancel_prompt(
         &self,
-        prompt_path: &str,
+        prompt_path: zvariant::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<bool, FdoError> {
         log_caller("CancelPrompt", &header);
         // cancel_prompt() sends SIGTERM to the child and removes it from the registry.
         // We check whether the path existed before calling it.
+        let prompt_path = prompt_path.as_str();
         let existed = self
             .state
             .active_prompts
