@@ -335,6 +335,14 @@ pub enum BackendError {
     /// `UnlockInput::WithRegistration`.
     #[error("registration required")]
     RegistrationRequired,
+    /// The password (or passphrase) was incorrect.
+    ///
+    /// Unlike `RegistrationRequired`, this means the backend *has* stored
+    /// credentials but the provided password produced a wrong decryption key.
+    /// The auth flow should re-prompt for the password rather than asking the
+    /// user to re-register.
+    #[error("authentication failed")]
+    AuthFailed,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

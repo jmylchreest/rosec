@@ -25,8 +25,8 @@
 //! - A password is **always required** to unlock — there is no auto-unlock path.
 //! - The same password participates in the opportunistic unlock sweep alongside
 //!   Bitwarden PM backends, so users with a shared password only type it once.
-//! - Wrong password → wrong storage key → decryption failure (no stored hash to
-//!   compare against — the ciphertext is the proof).
+//! - Wrong password → wrong storage key → `BackendError::AuthFailed` (re-prompt
+//!   for the correct password, not re-registration).
 //! - Changing the password or rotating the token requires re-running
 //!   `rosec backend auth`.
 //!
@@ -307,8 +307,9 @@ stored locally — you will not need to enter it again.",
     /// - **`Password(pw)`** — normal unlock after initial setup.  Derives the
     ///   storage key from `pw` and the machine secret, loads the encrypted
     ///   access token from disk, decrypts it, and authenticates with Bitwarden.
-    ///   Wrong password → wrong key → decryption failure.  No stored token →
-    ///   `BackendError::RegistrationRequired` (first-time setup required).
+    ///   Wrong password → wrong key → `BackendError::AuthFailed` (re-prompt).
+    ///   No stored token → `BackendError::RegistrationRequired` (first-time
+    ///   setup required).
     ///
     /// - **`WithRegistration { password, registration_fields }`** — first-time
     ///   setup or token rotation.  Derives the storage key from `password`,
@@ -352,20 +353,19 @@ stored locally — you will not need to enter it again.",
             new_token
         } else {
             // Normal unlock: derive key from password and decrypt stored token.
-            // A decryption/MAC failure means the stored credential was encrypted
-            // with a different key (e.g. the old machine-key-only KDF before the
-            // passphrase-in-KDF change).  Treat it the same as "no credential
-            // stored" — the user must re-enter the access token via the
-            // registration flow.  Log the underlying reason at debug level so
-            // it is visible when tracing is enabled, but do not surface it to
-            // the user (it would be confusing and contains no actionable detail).
             match rosec_core::credential::load_and_decrypt(&self.config.id, &storage_key) {
                 Ok(Some(cred)) => cred.client_secret,
                 Ok(None) => return Err(BackendError::RegistrationRequired),
                 Err(e) => {
+                    // Decryption/MAC failure means the password is wrong (it
+                    // derives a different HKDF key).  This is NOT a missing
+                    // credential — the token is stored but we can't decrypt
+                    // it.  Return AuthFailed so the unlock sweep re-prompts
+                    // for the correct password instead of entering the
+                    // registration flow.
                     debug!(backend = %self.config.id,
-                        "credential decryption failed, re-registration required: {e}");
-                    return Err(BackendError::RegistrationRequired);
+                        "credential decryption failed (wrong password): {e}");
+                    return Err(BackendError::AuthFailed);
                 }
             }
         };
@@ -728,6 +728,39 @@ mod tests {
         };
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(matches!(result, Err(BackendError::RegistrationRequired)));
+    }
+
+    #[tokio::test]
+    async fn unlock_with_wrong_password_returns_auth_failed() {
+        // Store a token encrypted with one password, then try to unlock with a
+        // different password.  The MAC check should fail and return AuthFailed
+        // (not RegistrationRequired) so the user gets re-prompted.
+        let tmp =
+            std::env::temp_dir().join(format!("rosec-sm-test-{}-wrongpw", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let result = {
+            let _env = scoped_env("XDG_DATA_HOME", tmp.to_str().unwrap());
+            let b = make_backend();
+
+            // First, store a token with the correct password via registration.
+            let correct_pw = Zeroizing::new("correct-password".to_string());
+            let storage_key = b.derive_storage_key(correct_pw.as_str()).unwrap();
+            rosec_core::credential::encrypt_and_save(
+                &b.config.id,
+                &storage_key,
+                "access_token",
+                "0.fake-uuid.fake-secret:AAAAAAAAAAAAAAAAAAAAAA==",
+            )
+            .unwrap();
+
+            // Now try to unlock with the wrong password.
+            b.unlock(UnlockInput::Password(Zeroizing::new(
+                "wrong-password".to_string(),
+            )))
+            .await
+        };
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(matches!(result, Err(BackendError::AuthFailed)));
     }
 
     #[tokio::test]

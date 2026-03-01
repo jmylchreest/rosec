@@ -1793,6 +1793,10 @@ pub(crate) fn map_backend_error(err: BackendError) -> FdoError {
         BackendError::Unavailable(reason) => FdoError::Failed(reason),
         // Sentinel string detected by the CLI to trigger the registration retry flow.
         BackendError::RegistrationRequired => FdoError::Failed("registration_required".to_string()),
+        // Wrong password/passphrase — the backend has stored credentials but
+        // the provided password produced a wrong decryption key.  The unlock
+        // sweep should re-prompt individually rather than entering registration.
+        BackendError::AuthFailed => FdoError::Failed("auth_failed".to_string()),
         // Item already exists (for create with replace=false).
         BackendError::AlreadyExists => FdoError::Failed("already exists".to_string()),
         // Invalid input (validation failed).
