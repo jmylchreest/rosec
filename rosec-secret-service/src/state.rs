@@ -756,70 +756,99 @@ impl ServiceState {
                 cmd.arg("--tty");
             }
 
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| FdoError::Failed(format!("rosec-prompt failed to launch: {e}")))?;
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    let pid = child.id();
+                    self.set_prompt_pid(&prompt_path, pid);
 
-            let pid = child.id();
-            self.set_prompt_pid(&prompt_path, pid);
+                    // Send JSON on stdin then close it.
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write as _;
+                        stdin.write_all(json.as_bytes()).map_err(|e| {
+                            FdoError::Failed(format!("rosec-prompt stdin write: {e}"))
+                        })?;
+                        // stdin dropped here → EOF sent to child
+                    }
 
-            // Send JSON on stdin then close it.
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write as _;
-                stdin
-                    .write_all(json.as_bytes())
-                    .map_err(|e| FdoError::Failed(format!("rosec-prompt stdin write: {e}")))?;
-                // stdin dropped here → EOF sent to child
+                    // Read one line of JSON from stdout ({"field_id": "value"}).
+                    let response_line = {
+                        let stdout = child.stdout.take().ok_or_else(|| {
+                            FdoError::Failed("rosec-prompt: no stdout pipe".to_string())
+                        })?;
+                        let mut reader = std::io::BufReader::new(stdout);
+                        let mut line = Zeroizing::new(String::new());
+                        reader.read_line(&mut line).map_err(|e| {
+                            FdoError::Failed(format!("rosec-prompt read error: {e}"))
+                        })?;
+                        drop(reader);
+                        line
+                    };
+
+                    let status = child
+                        .wait()
+                        .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
+                    self.finish_prompt(&prompt_path);
+
+                    if !status.success() {
+                        return Err(FdoError::Failed("prompt cancelled".to_string()));
+                    }
+
+                    // Parse the JSON map and extract the password field.
+                    // Use `take` to move the value out of the map so only one
+                    // allocation exists; then zeroize all remaining map values.
+                    let mut map: HashMap<String, String> =
+                        serde_json::from_str(response_line.trim()).map_err(|e| {
+                            FdoError::Failed(format!("rosec-prompt JSON parse: {e}"))
+                        })?;
+
+                    // Find the password field ID for this backend.
+                    let backend = self.backend_by_id(backend_id).ok_or_else(|| {
+                        FdoError::Failed(format!("backend '{backend_id}' not found"))
+                    })?;
+                    let pw_id = backend.password_field().id.to_string();
+
+                    // Move the password out (avoiding a clone) then immediately
+                    // zeroize all remaining map values so no plain-String secrets
+                    // linger.
+                    let raw_pw = map.remove(&pw_id);
+                    for v in map.values_mut() {
+                        zeroize::Zeroize::zeroize(v);
+                    }
+                    let password = raw_pw
+                        .filter(|v| !v.is_empty())
+                        .map(Zeroizing::new)
+                        .ok_or_else(|| {
+                            FdoError::Failed("password field empty or missing".to_string())
+                        })?;
+
+                    return Ok(password);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && has_tty => {
+                    // Binary not found but a TTY is available — fall through
+                    // to the embedded TTY prompt below.
+                    tracing::info!(
+                        program = %program,
+                        "rosec-prompt binary not found; using built-in TTY prompt"
+                    );
+                }
+                Err(e) => {
+                    return Err(FdoError::Failed(format!(
+                        "rosec-prompt failed to launch: {e}"
+                    )));
+                }
             }
+        }
 
-            // Read one line of JSON from stdout ({"field_id": "value"}).
-            let response_line = {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| FdoError::Failed("rosec-prompt: no stdout pipe".to_string()))?;
-                let mut reader = std::io::BufReader::new(stdout);
-                let mut line = Zeroizing::new(String::new());
-                reader
-                    .read_line(&mut line)
-                    .map_err(|e| FdoError::Failed(format!("rosec-prompt read error: {e}")))?;
-                drop(reader);
-                line
-            };
-
-            let status = child
-                .wait()
-                .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
-            self.finish_prompt(&prompt_path);
-
-            if !status.success() {
-                return Err(FdoError::Failed("prompt cancelled".to_string()));
-            }
-
-            // Parse the JSON map and extract the password field.
-            // Use `take` to move the value out of the map so only one
-            // allocation exists; then zeroize all remaining map values.
-            let mut map: HashMap<String, String> = serde_json::from_str(response_line.trim())
-                .map_err(|e| FdoError::Failed(format!("rosec-prompt JSON parse: {e}")))?;
-
-            // Find the password field ID for this backend.
-            let backend = self
-                .backend_by_id(backend_id)
-                .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
-            let pw_id = backend.password_field().id.to_string();
-
-            // Move the password out (avoiding a clone) then immediately zeroize
-            // all remaining map values so no plain-String secrets linger.
-            let raw_pw = map.remove(&pw_id);
-            for v in map.values_mut() {
-                zeroize::Zeroize::zeroize(v);
-            }
-            let password = raw_pw
-                .filter(|v| !v.is_empty())
-                .map(Zeroizing::new)
-                .ok_or_else(|| FdoError::Failed("password field empty or missing".to_string()))?;
-
-            return Ok(password);
+        // ── 3a. Built-in TTY prompt (fallback) ───────────────────────────
+        // Reached when either:
+        // - rosec-prompt binary was not found but /dev/tty is available, or
+        // - there is no display (TTY-only) and the binary is missing.
+        //
+        // Opens /dev/tty directly and prompts using the daemon's built-in
+        // read_hidden() — the same code path used by UnlockWithTty, minus
+        // the D-Bus fd-passing overhead.
+        if has_tty {
+            return self.builtin_tty_prompt(&prompt_path, backend_id, label);
         }
 
         // ── 4. Headless — cannot prompt ────────────────────────────────────
@@ -828,6 +857,61 @@ impl ServiceState {
             "headless: no display, no TTY, and SSH_ASKPASS is not set — \
              run `rosec auth {backend_id}` to unlock manually"
         )))
+    }
+
+    /// Built-in TTY prompt: opens `/dev/tty` directly and collects the
+    /// password using the daemon's own `read_hidden()`.
+    ///
+    /// This is the fallback when the external `rosec-prompt` binary is not
+    /// installed.  It handles the same password field as the external prompt
+    /// but skips the JSON subprocess protocol and GUI path entirely.
+    ///
+    /// # Security
+    /// - The returned `Zeroizing<String>` scrubs the password on drop.
+    /// - The TTY fd is opened read/write and closed immediately after use.
+    /// - `TermiosGuard` inside `read_hidden` restores terminal echo even on
+    ///   error paths.
+    fn builtin_tty_prompt(
+        &self,
+        prompt_path: &str,
+        backend_id: &str,
+        label: &str,
+    ) -> Result<Zeroizing<String>, FdoError> {
+        use std::io::Write as _;
+        use std::os::unix::io::AsRawFd as _;
+
+        let backend = self
+            .backend_by_id(backend_id)
+            .ok_or_else(|| FdoError::Failed(format!("backend '{backend_id}' not found")))?;
+        let pw_field = backend.password_field();
+
+        // Open /dev/tty read-write so we can both write the prompt label and
+        // read the password with echo disabled.
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|e| FdoError::Failed(format!("cannot open /dev/tty: {e}")))?;
+        let fd = tty.as_raw_fd();
+
+        // Print header + prompt label.
+        {
+            let mut w = &tty;
+            let _ = write!(w, "\n{label}\n{}: ", pw_field.label);
+            let _ = w.flush();
+        }
+
+        let password = crate::tty::read_hidden(fd)
+            .map_err(|e| FdoError::Failed(format!("built-in TTY prompt read error: {e}")))?;
+
+        self.finish_prompt(prompt_path);
+
+        if password.is_empty() {
+            return Err(FdoError::Failed(
+                "password field empty or cancelled".to_string(),
+            ));
+        }
+        Ok(password)
     }
 
     /// Lock all backends and clear auto-lock state.
