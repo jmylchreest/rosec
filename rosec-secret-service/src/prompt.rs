@@ -259,14 +259,13 @@ async fn run_prompt_task(
         // the 2FA retry and the opportunistic sweep.
         let password_for_sweep = password.clone();
 
-        // Use auth_provider_inner so 2FA / registration field routing is
-        // handled in one place.  Build a fields map with the provider's
-        // password field ID.
+        // Use auth_provider so we can match on typed ProviderError
+        // variants (especially TwoFactorRequired with its methods list).
         let pw_field_id = provider.password_field().id.to_string();
         let mut fields: HashMap<String, Zeroizing<String>> = HashMap::new();
         fields.insert(pw_field_id.clone(), password);
 
-        let unlock_result = state.auth_provider_inner(&provider_id, fields).await;
+        let unlock_result = state.try_auth_provider(&provider_id, fields).await;
 
         match unlock_result {
             Ok(()) => {
@@ -281,14 +280,12 @@ async fn run_prompt_task(
                 .await;
                 return;
             }
-            Err(zbus::fdo::Error::Failed(ref msg)) if msg == "two_factor_required" => {
+            Err(rosec_core::ProviderError::TwoFactorRequired { methods }) => {
                 // ── 2FA required — launch a second prompt for the token ──
                 tracing::debug!(
                     provider = %provider_id,
                     "two-factor authentication required, prompting for 2FA code"
                 );
-
-                let methods = crate::state::take_two_factor_methods();
                 let text_methods: Vec<_> =
                     methods.iter().filter(|m| m.prompt_kind == "text").collect();
 
@@ -413,7 +410,7 @@ async fn run_prompt_task(
                 }
 
                 // Retry authentication with 2FA.
-                match state.auth_provider_inner(&provider_id, cred_map).await {
+                match state.try_auth_provider(&provider_id, cred_map).await {
                     Ok(()) => {
                         on_unlock_success(
                             &state,

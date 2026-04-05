@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use tracing::{debug, info};
-use zbus::fdo::Error as FdoError;
 use zeroize::Zeroizing;
+
+use rosec_core::ProviderError;
 
 use crate::state::ServiceState;
 use crate::tty::{TtyField, collect_tty_on_fd, prompt_field_on_fd};
@@ -26,6 +27,26 @@ pub struct UnlockResult {
     pub success: bool,
     /// Human-readable status message (e.g. "unlocked", "wrong password", etc.).
     pub message: String,
+}
+
+/// Build the success message for a provider unlock, reflecting whether the
+/// provider is serving from its offline cache or connected online.
+async fn unlock_success_message(state: &ServiceState, provider_id: &str, suffix: &str) -> String {
+    let cached = if let Some(p) = state.provider_by_id(provider_id) {
+        p.status().await.map(|s| s.cached).unwrap_or(false)
+    } else {
+        false
+    };
+    match (cached, suffix.is_empty()) {
+        (true, true) => {
+            "unlocked (cached — server unreachable, check connectivity or tls_mode)".to_string()
+        }
+        (true, false) => format!(
+            "unlocked (cached, {suffix} — server unreachable, check connectivity or tls_mode)"
+        ),
+        (false, true) => "unlocked".to_string(),
+        (false, false) => format!("unlocked ({suffix})"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,17 +97,18 @@ pub async fn unlock_with_tty(
         let _password =
             auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, &id, &fields, None, false)
                 .await?;
-        results.push(UnlockResult {
-            provider_id: id.clone(),
-            success: true,
-            message: "unlocked".to_string(),
-        });
-        // auth_provider_with_tty_inner -> auth_provider_inner already called
-        // mark_provider_unlocked + touch_activity, so no need to repeat here.
         // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
+        let message = unlock_success_message(&state, &id, "").await;
+        results.push(UnlockResult {
+            provider_id: id.clone(),
+            success: true,
+            message,
+        });
+        // auth_provider_with_tty_inner -> auth_provider already called
+        // mark_provider_unlocked + touch_activity, so no need to repeat here.
         return Ok(results);
     }
 
@@ -135,32 +157,47 @@ pub async fn unlock_with_tty(
         let pw_field_id = provider.password_field().id.to_string();
         let mut fields_for_provider = HashMap::new();
         fields_for_provider.insert(pw_field_id, raw_password.clone());
-        match state.auth_provider_inner(&id, fields_for_provider).await {
+        match state.try_auth_provider(&id, fields_for_provider).await {
             Ok(()) => {
-                results.push(UnlockResult {
-                    provider_id: id.clone(),
-                    success: true,
-                    message: "unlocked".to_string(),
-                });
                 // Sync immediately so on_sync_succeeded callbacks fire.
                 if let Err(e) = state.try_sync_provider(&id).await {
                     debug!(provider = %id, "post-unlock sync failed: {e}");
                 }
+                let message = unlock_success_message(&state, &id, "").await;
+                results.push(UnlockResult {
+                    provider_id: id.clone(),
+                    success: true,
+                    message,
+                });
             }
-            Err(FdoError::Failed(ref msg)) if msg == "registration_required" => {
+            Err(ProviderError::RegistrationRequired) => {
                 debug!(provider = %id, "registration required after opportunistic unlock");
                 need_registration.push((id, raw_password.clone()));
             }
-            Err(FdoError::Failed(ref msg)) if msg == "two_factor_required" => {
+            Err(ProviderError::TwoFactorRequired { .. }) => {
                 debug!(provider = %id, "2FA required after opportunistic unlock");
                 need_2fa.push((id, raw_password.clone()));
             }
-            Err(FdoError::Failed(ref msg))
-                if msg.contains("not found") || msg.contains("unavailable") =>
-            {
-                // Provider is unavailable (e.g. local vault file does not exist
-                // yet).  Creating new vaults mid-sweep is not supported — the
-                // user should run `rosec provider auth <id>` to initialise it.
+            Err(ProviderError::AuthFailed) => {
+                print_on_fd(tty_fd, &format!("  {id}: wrong password (skipped)\n"));
+                results.push(UnlockResult {
+                    provider_id: id.clone(),
+                    success: false,
+                    message: "wrong password".to_string(),
+                });
+            }
+            Err(ProviderError::Unavailable(ref reason)) => {
+                // Readiness probe / connectivity failure.  Show the reason
+                // directly — it already contains actionable detail (TLS error,
+                // DNS failure, etc.).
+                print_on_fd(tty_fd, &format!("  {id}: {reason}\n"));
+                results.push(UnlockResult {
+                    provider_id: id.clone(),
+                    success: false,
+                    message: reason.clone(),
+                });
+            }
+            Err(ProviderError::NotFound) => {
                 print_on_fd(
                     tty_fd,
                     &format!(
@@ -173,37 +210,15 @@ pub async fn unlock_with_tty(
                     message: "unavailable".to_string(),
                 });
             }
-            Err(FdoError::Failed(ref msg)) if msg == "auth_failed" => {
-                // Password is wrong for this provider (different master
-                // password, or cache HMAC verification failed with wrong key).
-                // Skip — re-prompting individually won't help since we'd use
-                // the same password.
-                print_on_fd(tty_fd, &format!("  {id}: wrong password (skipped)\n"));
+            Err(ProviderError::Other(ref e)) => {
+                // Internal error (WASM trap, etc.) — extract a user-facing
+                // hint from the error chain.
+                let hint = crate::state::user_facing_hint(e);
+                print_on_fd(tty_fd, &format!("  {id}: {hint}\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
-                    message: "auth_failed".to_string(),
-                });
-            }
-            Err(FdoError::Failed(ref msg)) if msg.contains("offline cache") => {
-                // Provider is offline and has no cached data.  Nothing we can
-                // do — skip it and let the user know.
-                print_on_fd(tty_fd, &format!("  {id}: offline, no cache available\n"));
-                results.push(UnlockResult {
-                    provider_id: id.clone(),
-                    success: false,
-                    message: "offline, no cache".to_string(),
-                });
-            }
-            Err(FdoError::Failed(ref msg)) if msg == "provider error" => {
-                // Internal provider error (WASM trap, infrastructure failure,
-                // etc.).  Re-prompting won't help — the problem is not the
-                // password.  Skip and report.
-                print_on_fd(tty_fd, &format!("  {id}: provider error (skipped)\n"));
-                results.push(UnlockResult {
-                    provider_id: id.clone(),
-                    success: false,
-                    message: "provider error".to_string(),
+                    message: hint,
                 });
             }
             Err(e) => {
@@ -237,14 +252,15 @@ pub async fn unlock_with_tty(
             false,
         )
         .await?;
-        results.push(UnlockResult {
-            provider_id: id.clone(),
-            success: true,
-            message: "unlocked (registered)".to_string(),
-        });
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
+        let message = unlock_success_message(&state, &id, "registered").await;
+        results.push(UnlockResult {
+            provider_id: id.clone(),
+            success: true,
+            message,
+        });
     }
 
     // Handle providers that need 2FA (password already collected — only prompt
@@ -281,14 +297,15 @@ pub async fn unlock_with_tty(
             false,
         )
         .await?;
-        results.push(UnlockResult {
-            provider_id: id.clone(),
-            success: true,
-            message: "unlocked (2FA)".to_string(),
-        });
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
+        let message = unlock_success_message(&state, &id, "2FA").await;
+        results.push(UnlockResult {
+            provider_id: id.clone(),
+            success: true,
+            message,
+        });
     }
 
     // Handle providers that need a fresh individual prompt.
@@ -302,18 +319,19 @@ pub async fn unlock_with_tty(
         let _password =
             auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, &id, &fields, None, false)
                 .await?;
-        results.push(UnlockResult {
-            provider_id: id.clone(),
-            success: true,
-            message: "unlocked".to_string(),
-        });
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
+        let message = unlock_success_message(&state, &id, "").await;
+        results.push(UnlockResult {
+            provider_id: id.clone(),
+            success: true,
+            message,
+        });
     }
 
     // mark_provider_unlocked + touch_activity are already called inside
-    // auth_provider_inner for each successful provider unlock, so no need
+    // auth_provider for each successful provider unlock, so no need
     // for a separate mark_unlocked() call here.
 
     Ok(results)
@@ -348,7 +366,7 @@ pub async fn auth_provider_with_tty(
     let password =
         auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, provider_id, &fields, None, force)
             .await?;
-    // auth_provider_inner (called by auth_provider_with_tty_inner) already
+    // auth_provider (called by auth_provider_with_tty_inner) already
     // called mark_provider_unlocked + touch_activity.
     // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
     if let Err(e) = state.try_sync_provider(provider_id).await {
@@ -382,7 +400,7 @@ pub async fn auth_provider_with_tty(
 /// the user is asked to confirm their password once (to guard against typos on
 /// first-time setup), then registration-specific fields are collected.
 ///
-/// When `force` is `true`, the initial `auth_provider_inner()` call is skipped
+/// When `force` is `true`, the initial `auth_provider()` call is skipped
 /// and the function proceeds directly to the registration flow.  This is used
 /// by `rosec provider auth --force` to re-register even when stored credentials
 /// already exist (e.g. to replace a rotated SM access token).
@@ -481,30 +499,23 @@ async fn auth_provider_with_tty_inner(
     // Try to authenticate.  If the provider requires registration (SM token
     // setup, Bitwarden device registration), collect the extra fields and retry.
     // If the provider requires 2FA, collect the token and retry.
-    let auth_result = if force {
+    let auth_result: Option<Result<(), ProviderError>> = if force {
         None // skip straight to registration
     } else {
-        Some(
-            state
-                .auth_provider_inner(provider_id, cred_map.clone())
-                .await,
-        )
+        Some(state.try_auth_provider(provider_id, cred_map.clone()).await)
     };
 
-    let needs_registration = match &auth_result {
-        None => true,
-        Some(Err(FdoError::Failed(msg))) if msg == "registration_required" => true,
-        _ => false,
+    let needs_registration = matches!(
+        &auth_result,
+        None | Some(Err(ProviderError::RegistrationRequired))
+    );
+
+    let two_fa_methods = match &auth_result {
+        Some(Err(ProviderError::TwoFactorRequired { methods })) => Some(methods.clone()),
+        _ => None,
     };
 
-    let needs_2fa =
-        matches!(&auth_result, Some(Err(FdoError::Failed(msg))) if msg == "two_factor_required");
-
-    if needs_2fa {
-        // Retrieve the available 2FA methods from the thread-local side channel
-        // (set by map_provider_error when TwoFactorRequired was mapped).
-        let methods = crate::state::take_two_factor_methods();
-
+    if let Some(methods) = two_fa_methods {
         // Filter to methods with prompt_kind == "text" (the only kind we
         // currently support).  FIDO2 / browser_redirect are deferred.
         let text_methods: Vec<_> = methods.iter().filter(|m| m.prompt_kind == "text").collect();
@@ -561,7 +572,7 @@ async fn auth_provider_with_tty_inner(
         }
 
         state
-            .auth_provider_inner(provider_id, cred_map.clone())
+            .try_auth_provider(provider_id, cred_map.clone())
             .await
             .map_err(|e| anyhow!("2FA authentication failed for '{provider_id}': {e}"))?;
     } else if needs_registration {
@@ -593,7 +604,7 @@ async fn auth_provider_with_tty_inner(
         cred_map.extend(reg_extra);
 
         state
-            .auth_provider_inner(provider_id, cred_map.clone())
+            .try_auth_provider(provider_id, cred_map.clone())
             .await
             .map_err(|e| anyhow!("registration failed for '{provider_id}': {e}"))?;
     } else if let Some(result) = auth_result {

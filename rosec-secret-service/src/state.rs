@@ -27,20 +27,6 @@ use crate::session::SessionManager;
 // error is `TwoFactorRequired`, consumed in `unlock.rs` when the sentinel
 // `"two_factor_required"` is detected.
 //
-// Uses `std::cell::RefCell` since we are always on the same OS thread within
-// a tokio task (the TTY auth flow is not `Send` across threads due to fd
-// ownership).
-std::thread_local! {
-    pub(crate) static TWO_FACTOR_METHODS: std::cell::RefCell<Vec<rosec_core::TwoFactorMethod>>
-        = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Take the stored 2FA methods (if any) from the thread-local cell,
-/// leaving an empty vec behind.
-pub(crate) fn take_two_factor_methods() -> Vec<rosec_core::TwoFactorMethod> {
-    TWO_FACTOR_METHODS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
-}
-
 /// Default ordered list of attribute name patterns tried when `return_attr` is
 /// not configured for a provider.
 ///
@@ -1165,7 +1151,7 @@ impl ServiceState {
     /// This is used by the GUI prompt 2FA flow: after the initial unlock
     /// returns `TwoFactorRequired`, the caller builds a fields array with
     /// the 2FA method selector and/or token input, launches a second prompt
-    /// via this method, and feeds the response into `auth_provider_inner`.
+    /// via this method, and feeds the response into `auth_provider`.
     ///
     /// # Security
     /// - All map values are wrapped in `Zeroizing<String>`.
@@ -1410,7 +1396,7 @@ impl ServiceState {
         let provider_id = provider_id.to_string();
         self.tokio_handle
             .spawn(async move {
-                // Extract the password before auth_provider_inner consumes `fields`,
+                // Extract the password before auth_provider consumes `fields`,
                 // so we can use it for the opportunistic sweep afterwards.
                 let password_for_sweep = {
                     let provider = this.provider_by_id(&provider_id).ok_or_else(|| {
@@ -1420,7 +1406,9 @@ impl ServiceState {
                     fields.get(pw_field_id).cloned()
                 };
 
-                this.auth_provider_inner(&provider_id, fields).await?;
+                this.try_auth_provider(&provider_id, fields)
+                    .await
+                    .map_err(map_provider_error)?;
                 // Trigger a sync so that on_sync_succeeded callbacks (e.g. SSH
                 // key rebuild) fire immediately after the vault is unlocked,
                 // rather than waiting for the next background-timer tick.
@@ -1447,28 +1435,34 @@ impl ServiceState {
             .map_err(|e| FdoError::Failed(format!("auth task panicked: {e}")))?
     }
 
-    pub(crate) async fn auth_provider_inner(
+    /// Authenticate a provider, returning the typed `ProviderError` on failure.
+    ///
+    /// Callers that need to cross the D-Bus boundary (where only strings are
+    /// available) can map the result with `map_provider_error`.  Internal daemon
+    /// code should match on the typed variants directly.
+    pub(crate) async fn try_auth_provider(
         &self,
         provider_id: &str,
         fields: HashMap<String, Zeroizing<String>>,
-    ) -> Result<(), FdoError> {
-        let provider = self
-            .provider_by_id(provider_id)
-            .ok_or_else(|| FdoError::Failed(format!("provider '{provider_id}' not found")))?;
+    ) -> Result<(), ProviderError> {
+        let provider = self.provider_by_id(provider_id).ok_or_else(|| {
+            ProviderError::Other(anyhow::anyhow!("provider '{provider_id}' not found"))
+        })?;
 
         let pw_field = provider.password_field();
         let pw_field_id = pw_field.id;
 
         let password_value = fields.get(pw_field_id).ok_or_else(|| {
-            FdoError::Failed(format!(
-                "required field '{pw_field_id}' missing for provider '{provider_id}'"
-            ))
+            ProviderError::InvalidInput(
+                format!("required field '{pw_field_id}' missing for provider '{provider_id}'")
+                    .into(),
+            )
         })?;
 
         if pw_field.required && password_value.is_empty() {
-            return Err(FdoError::Failed(format!(
-                "field '{pw_field_id}' must not be empty"
-            )));
+            return Err(ProviderError::InvalidInput(
+                format!("field '{pw_field_id}' must not be empty").into(),
+            ));
         }
 
         let password = password_value.clone();
@@ -1529,7 +1523,7 @@ impl ServiceState {
             }
         };
 
-        provider.unlock(input).await.map_err(map_provider_error)?;
+        provider.unlock(input).await?;
 
         self.mark_provider_unlocked(provider_id);
         self.touch_activity();
@@ -1578,7 +1572,7 @@ impl ServiceState {
             let mut fields = HashMap::new();
             fields.insert(pw_field_id, password.clone());
 
-            match self.auth_provider_inner(id, fields).await {
+            match self.try_auth_provider(id, fields).await {
                 Ok(()) => {
                     info!(provider = %id, "opportunistic sweep: unlocked");
                     if let Err(e) = self.try_sync_provider(id).await {
@@ -2341,14 +2335,10 @@ pub(crate) fn map_provider_error(err: ProviderError) -> FdoError {
         // the provided password produced a wrong decryption key.  The unlock
         // sweep should re-prompt individually rather than entering registration.
         ProviderError::AuthFailed => FdoError::Failed("auth_failed".to_string()),
-        // Two-factor authentication required — sentinel string detected by
-        // the TTY unlock flow to trigger 2FA collection.  The methods list is
-        // serialised as JSON and stored in a thread-local so unlock.rs can
-        // retrieve it (FdoError can only carry a string).
-        ProviderError::TwoFactorRequired { methods } => {
-            TWO_FACTOR_METHODS.with(|cell| {
-                *cell.borrow_mut() = methods;
-            });
+        // Two-factor authentication required.  The D-Bus wire only carries a
+        // sentinel string; callers that need the methods list should use
+        // `try_auth_provider` which returns the typed `ProviderError`.
+        ProviderError::TwoFactorRequired { .. } => {
             FdoError::Failed("two_factor_required".to_string())
         }
         // Item already exists (for create with replace=false).
@@ -2361,19 +2351,59 @@ pub(crate) fn map_provider_error(err: ProviderError) -> FdoError {
         // off the D-Bus wire.
         ProviderError::Other(err) => {
             warn!(error = %err, "internal provider error");
-            let msg = err.to_string();
-            let hint = if msg.contains("invalid peer certificate") || msg.contains("certificate") {
-                "provider error: TLS certificate rejected — see journal for details"
-            } else if msg.contains("dns") || msg.contains("resolve") {
-                "provider error: DNS resolution failed — see journal for details"
-            } else if msg.contains("connection refused") || msg.contains("Connection refused") {
-                "provider error: connection refused — see journal for details"
-            } else {
-                "provider error — see journal for details"
-            };
-            FdoError::Failed(hint.to_string())
+            FdoError::Failed(user_facing_hint(&err))
         }
     }
+}
+
+/// Extract a user-facing hint from an `anyhow::Error` for common failure
+/// classes (TLS, DNS, connection).  Internal details (cipher UUIDs, HTTP
+/// bodies, stack traces) are kept out; the full chain is already logged
+/// server-side.
+pub(crate) fn user_facing_hint(err: &anyhow::Error) -> String {
+    let msg = err.to_string();
+    if msg.contains("invalid peer certificate") || msg.contains("certificate") {
+        let reason = extract_cert_reason(&msg);
+        if let Some(r) = reason {
+            format!(
+                "TLS certificate rejected ({r}). \
+                 Check tls_mode and that your CA is in the system trust store."
+            )
+        } else {
+            "TLS certificate rejected. \
+             Check tls_mode and that your CA is in the system trust store."
+                .to_string()
+        }
+    } else if msg.contains("dns") || msg.contains("resolve") {
+        "DNS resolution failed — is the server hostname correct?".to_string()
+    } else if msg.contains("connection refused") || msg.contains("Connection refused") {
+        "connection refused — is the server running?".to_string()
+    } else {
+        "provider error — see journal for details".to_string()
+    }
+}
+
+/// Extract the specific certificate rejection reason from an error message.
+///
+/// Looks for patterns like `invalid peer certificate: UnknownIssuer` or
+/// `CaUsedAsEndEntity` in the (possibly nested) error chain.
+fn extract_cert_reason(msg: &str) -> Option<&str> {
+    // rustls error patterns: "invalid peer certificate: <Reason>"
+    if let Some(idx) = msg.find("invalid peer certificate: ") {
+        let start = idx + "invalid peer certificate: ".len();
+        // Take until end of line, next whitespace-heavy boundary, or end of string.
+        let rest = &msg[start..];
+        let end = rest.find(['\n', ')', ';']).unwrap_or(rest.len());
+        let reason = rest[..end].trim();
+        if !reason.is_empty() {
+            return Some(reason);
+        }
+    }
+    // rustls_platform_verifier pattern
+    if msg.contains("CaUsedAsEndEntity") {
+        return Some("CaUsedAsEndEntity — a CA certificate cannot be used as a server certificate");
+    }
+    None
 }
 
 /// Map `ProviderError` to `SecretServiceError` with spec-correct `IsLocked`.
