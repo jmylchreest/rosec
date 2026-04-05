@@ -696,6 +696,35 @@ base_url = "https://vaultwarden.example.com"
 Make sure your CA certificate is installed in the system trust store (e.g. via
 `update-ca-certificates` on Debian/Ubuntu or `trust anchor` on Arch/Fedora).
 
+> **Important:** The certificate presented by the server must be a leaf
+> (end-entity) certificate signed by the CA in the trust store. A bare
+> self-signed certificate added directly as a trust anchor will be rejected with
+> a `CaUsedAsEndEntity` error because TLS libraries treat trust-store entries as
+> CA certificates, which are not valid end-entity certificates.
+>
+> To set this up correctly, create a private CA and use it to sign a server
+> certificate:
+>
+> ```bash
+> # 1. Create a CA
+> openssl req -x509 -newkey rsa:2048 -keyout ca-key.pem -out ca-cert.pem \
+>   -days 365 -nodes -subj "/CN=My Private CA" \
+>   -addext "basicConstraints=critical,CA:true" \
+>   -addext "keyUsage=critical,keyCertSign,cRLSign"
+>
+> # 2. Create a server key + CSR
+> openssl req -newkey rsa:2048 -keyout server-key.pem -out server.csr \
+>   -nodes -subj "/CN=vaultwarden.example.com"
+>
+> # 3. Sign the server cert with the CA
+> openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem \
+>   -CAcreateserial -out server-cert.pem -days 365 \
+>   -extfile <(printf 'subjectAltName=DNS:vaultwarden.example.com,IP:127.0.0.1\nbasicConstraints=CA:false\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth')
+> ```
+>
+> Install `ca-cert.pem` in the system trust store and configure your server with
+> `server-cert.pem` and `server-key.pem`.
+
 By default, readiness probes inherit the same TLS mode.  You can override this
 separately with `tls_mode_probe` (accepts `"bundled"`, `"system"`, or
 `"disabled"` to skip TLS verification entirely).

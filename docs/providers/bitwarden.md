@@ -42,9 +42,11 @@ email    = "user@example.com"
 ```
 
 > **Self-hosted with a private CA?** If your Vaultwarden instance uses a
-> certificate signed by a private CA (or a self-signed cert), set
-> `tls_mode = "system"` and make sure the CA is installed in your OS trust
-> store. See the [FAQ](../README.md#faq) for details.
+> certificate signed by a private CA, set `tls_mode = "system"` and make sure
+> the CA is installed in your OS trust store. A bare self-signed certificate
+> will not work — you need a proper CA that signs a leaf server certificate
+> (otherwise TLS verification fails with `CaUsedAsEndEntity`). See the
+> [FAQ](../../README.md#faq) for details and certificate generation instructions.
 
 ## Authenticating
 
