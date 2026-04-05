@@ -1136,41 +1136,36 @@ fn expand_vault_path(raw: &str) -> PathBuf {
 
 /// Compute a stable fingerprint string for a provider config entry.
 ///
-/// The fingerprint covers `kind`, `path` (for local vaults), all `options`
-/// (sorted), `return_attr`, `match_attr`, and `collection`.  Two entries are
-/// considered identical iff their fingerprints are equal, so hot-reload only
-/// removes/re-adds providers that materially changed.
+/// Compute a fingerprint for a provider entry by serializing it to JSON with
+/// sorted map keys.  Two entries are considered identical iff their fingerprints
+/// are equal, so hot-reload only removes/re-adds providers that materially
+/// changed.
+///
+/// Using serde serialization ensures that every field (including newly added
+/// ones) participates in the fingerprint automatically.  Map keys are sorted
+/// to make the output deterministic regardless of `HashMap` iteration order.
 fn provider_fingerprint(entry: &rosec_core::config::ProviderEntry) -> String {
-    let mut opts: Vec<String> = entry
-        .options
-        .iter()
-        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("")))
-        .collect();
-    opts.sort();
+    fn sort_json(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let sorted: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), sort_json(v)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect();
+                serde_json::Value::Object(sorted)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(sort_json).collect())
+            }
+            other => other.clone(),
+        }
+    }
 
-    let path = entry.path.as_deref().unwrap_or("");
-    let return_attr = entry
-        .return_attr
-        .as_deref()
-        .map(|v| v.join(","))
-        .unwrap_or_default();
-    let match_attr = entry
-        .match_attr
-        .as_deref()
-        .map(|v| v.join(","))
-        .unwrap_or_default();
-    let collection = entry.collection.as_deref().unwrap_or_default();
-
-    format!(
-        "{}:enabled={}:path={}:{}:return_attr={}:match_attr={}:collection={}",
-        entry.kind,
-        entry.enabled,
-        path,
-        opts.join(","),
-        return_attr,
-        match_attr,
-        collection,
-    )
+    serde_json::to_value(entry)
+        .map(|v| sort_json(&v).to_string())
+        .unwrap_or_else(|_| format!("{entry:?}"))
 }
 
 /// Watch the config file and hot-reload providers when it changes.
