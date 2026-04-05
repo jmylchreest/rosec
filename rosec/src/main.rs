@@ -3268,13 +3268,10 @@ async fn cmd_unlock() -> Result<()> {
 
     // Report already-unlocked providers.
     let any_locked = providers.iter().any(|(_, _, _, locked, ..)| *locked);
-    for (id, _, _, is_locked, ..) in &providers {
-        if !is_locked {
-            println!("'{id}' is already unlocked.");
-        }
-    }
-
     if !any_locked {
+        for (id, ..) in &providers {
+            println!("  {id}: already unlocked");
+        }
         return Ok(());
     }
 
@@ -3293,7 +3290,7 @@ async fn cmd_unlock() -> Result<()> {
 
     for (id, success, _message) in &results {
         if *success {
-            println!("'{id}' unlocked.");
+            println!("  {id}: unlocked");
         }
         // Failures are already printed inline on the TTY by the daemon
         // as each provider is attempted — no need to repeat them here.

@@ -164,7 +164,7 @@ pub async fn unlock_with_tty(
                 print_on_fd(
                     tty_fd,
                     &format!(
-                        "\n  {id}: not available — run `rosec provider auth {id}` to initialise\n"
+                        "  {id}: not available — run `rosec provider auth {id}` to initialise\n"
                     ),
                 );
                 results.push(UnlockResult {
@@ -178,7 +178,7 @@ pub async fn unlock_with_tty(
                 // password, or cache HMAC verification failed with wrong key).
                 // Skip — re-prompting individually won't help since we'd use
                 // the same password.
-                print_on_fd(tty_fd, &format!("\n  {id}: wrong password (skipped)\n"));
+                print_on_fd(tty_fd, &format!("  {id}: wrong password (skipped)\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -188,7 +188,7 @@ pub async fn unlock_with_tty(
             Err(FdoError::Failed(ref msg)) if msg.contains("offline cache") => {
                 // Provider is offline and has no cached data.  Nothing we can
                 // do — skip it and let the user know.
-                print_on_fd(tty_fd, &format!("\n  {id}: offline, no cache available\n"));
+                print_on_fd(tty_fd, &format!("  {id}: offline, no cache available\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -199,7 +199,7 @@ pub async fn unlock_with_tty(
                 // Internal provider error (WASM trap, infrastructure failure,
                 // etc.).  Re-prompting won't help — the problem is not the
                 // password.  Skip and report.
-                print_on_fd(tty_fd, &format!("\n  {id}: provider error (skipped)\n"));
+                print_on_fd(tty_fd, &format!("  {id}: provider error (skipped)\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
