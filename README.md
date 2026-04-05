@@ -674,6 +674,36 @@ If two items appear from different providers with the same label but different
 > gnome-keyring was still present but had a different value.  Depending on which
 > copy won deduplication, Chromium could see the wrong key on its next startup.
 
+**I host my Vaultwarden behind a self-signed certificate (with its CA in the system trust store). How do I make this work?**
+
+By default, rosec uses Mozilla's bundled root certificates for TLS verification.
+Self-signed certs or certs signed by a private CA are not in this bundle, so
+connections will fail even if your OS trusts the CA.
+
+Set `tls_mode = "system"` on your provider to use the OS trust store instead:
+
+```toml
+[[provider]]
+id   = "bitwarden"
+kind = "bitwarden"
+tls_mode = "system"
+
+[provider.options]
+email    = "user@example.com"
+base_url = "https://vaultwarden.example.com"
+```
+
+Make sure your CA certificate is installed in the system trust store (e.g. via
+`update-ca-certificates` on Debian/Ubuntu or `trust anchor` on Arch/Fedora).
+
+You can also control TLS for readiness probes separately with `tls_mode_probe`:
+
+| Value | `tls_mode` | `tls_mode_probe` |
+|-------|:----------:|:----------------:|
+| `"bundled"` (default for `tls_mode`) | Mozilla root certs only | Mozilla root certs only |
+| `"system"` | OS trust store | OS trust store |
+| `"disabled"` (default for `tls_mode_probe`) | - | Skip TLS verification |
+
 ---
 
 ## Shell integration

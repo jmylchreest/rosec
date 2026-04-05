@@ -1546,6 +1546,8 @@ async fn build_single_provider(
                 allowed_paths,
                 options: guest_options,
                 offline_cache: entry.offline_cache,
+                tls_mode: entry.tls_mode.clone(),
+                tls_mode_probe: entry.tls_mode_probe.clone(),
             };
 
             Ok(Arc::new(

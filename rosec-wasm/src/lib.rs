@@ -33,6 +33,7 @@
 
 pub mod cache;
 pub mod discovery;
+pub(crate) mod host_http;
 pub mod keys;
 pub mod notifications;
 pub mod protocol;

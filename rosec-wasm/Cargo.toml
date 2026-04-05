@@ -29,7 +29,8 @@ cbc = { workspace = true }
 hmac = { workspace = true }
 block-padding = { workspace = true }
 rand = { workspace = true }
-ureq = "3"
+ureq = { version = "3", features = ["platform-verifier"] }
+extism-manifest = "1.13.0"
 url = "2"
 glob = "0.3"
 tokio-websockets = { workspace = true }

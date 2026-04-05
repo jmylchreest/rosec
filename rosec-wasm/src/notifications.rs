@@ -54,6 +54,8 @@ pub struct NotificationsConfig {
     pub readiness_probes: Vec<crate::protocol::ReadinessProbe>,
     /// Allowed hosts for probe evaluation.
     pub allowed_hosts: Vec<String>,
+    /// TLS mode for readiness probes.
+    pub tls_mode_probe: rosec_core::config::TlsMode,
     /// Invoked when the guest classifies a frame as `Sync`.
     pub on_sync_nudge: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     /// Invoked when the guest classifies a frame as `Lock`.
@@ -112,8 +114,13 @@ async fn notifications_loop(config: NotificationsConfig, mut cancel_rx: watch::R
         // Check readiness probes before attempting to connect.
         if !config.readiness_probes.is_empty() {
             let probes_ok = config.readiness_probes.iter().all(|probe| {
-                crate::provider::evaluate_probe(probe, &config.allowed_hosts, Some(PROBE_TIMEOUT))
-                    .is_ok()
+                crate::provider::evaluate_probe(
+                    probe,
+                    &config.allowed_hosts,
+                    Some(PROBE_TIMEOUT),
+                    &config.tls_mode_probe,
+                )
+                .is_ok()
             });
             if !probes_ok {
                 debug!(

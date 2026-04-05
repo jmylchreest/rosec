@@ -34,11 +34,17 @@ rosec provider add bitwarden --id work
 [[provider]]
 id   = "bitwarden"
 kind = "bitwarden"
+# tls_mode = "system"   # use OS trust store (for self-signed / private CA certs)
 
 [provider.options]
 email    = "user@example.com"
 # base_url = "https://vaultwarden.example.com"   # omit for bitwarden.com
 ```
+
+> **Self-hosted with a private CA?** If your Vaultwarden instance uses a
+> certificate signed by a private CA (or a self-signed cert), set
+> `tls_mode = "system"` and make sure the CA is installed in your OS trust
+> store. See the [FAQ](../README.md#faq) for details.
 
 ## Authenticating
 

@@ -270,10 +270,90 @@ pub struct ProviderEntry {
     /// ```
     #[serde(default = "default_true")]
     pub offline_cache: bool,
+
+    /// TLS certificate verification mode for guest HTTP requests.
+    ///
+    /// - `"bundled"` (default) — use Mozilla's bundled root certificates.
+    /// - `"system"` — use the OS trust store, allowing self-signed certs
+    ///   or private CAs that are installed on the host.
+    ///
+    /// `"disabled"` is **not** valid here — use `tls_mode_probe` for that.
+    ///
+    /// ```toml
+    /// [[provider]]
+    /// id       = "bw1"
+    /// kind     = "bitwarden-pm"
+    /// tls_mode = "system"
+    /// ```
+    #[serde(
+        default = "default_tls_mode_bundled",
+        deserialize_with = "deserialize_tls_mode_no_disabled"
+    )]
+    pub tls_mode: TlsMode,
+
+    /// TLS certificate verification mode for readiness probes.
+    ///
+    /// - `"disabled"` (default) — skip TLS verification entirely.
+    ///   Probes are connectivity checks, not trust boundaries.
+    /// - `"system"` — use the OS trust store.
+    /// - `"bundled"` — use Mozilla's bundled root certificates.
+    ///
+    /// ```toml
+    /// [[provider]]
+    /// id              = "bw1"
+    /// kind            = "bitwarden-pm"
+    /// tls_mode_probe  = "system"
+    /// ```
+    #[serde(default = "default_tls_mode_disabled")]
+    pub tls_mode_probe: TlsMode,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tls_mode_bundled() -> TlsMode {
+    TlsMode::Bundled
+}
+
+fn default_tls_mode_disabled() -> TlsMode {
+    TlsMode::Disabled
+}
+
+/// TLS certificate verification mode for provider HTTP connections.
+///
+/// Controls which root certificates are trusted when making HTTPS requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// Use Mozilla's bundled root certificates (webpki-roots).
+    /// This is the default for `tls_mode` — only publicly-trusted CAs are
+    /// accepted, matching the behaviour of most Rust HTTP clients.
+    Bundled,
+    /// Use the operating system's certificate trust store.
+    /// Allows connections to servers using self-signed certificates or
+    /// certificates signed by a private CA, provided the CA is installed
+    /// in the system trust store (e.g. via `update-ca-certificates`).
+    System,
+    /// Disable TLS verification entirely.
+    /// **Only valid for readiness probes** (`tls_mode_probe`).  This is the
+    /// default for probes because they are connectivity checks, not trust
+    /// boundaries.
+    Disabled,
+}
+
+fn deserialize_tls_mode_no_disabled<'de, D>(deserializer: D) -> Result<TlsMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mode = TlsMode::deserialize(deserializer)?;
+    if mode == TlsMode::Disabled {
+        return Err(serde::de::Error::custom(
+            "tls_mode = \"disabled\" is only valid for tls_mode_probe; \
+             use \"bundled\" or \"system\" for tls_mode",
+        ));
+    }
+    Ok(mode)
 }
 
 /// Option keys whose values must never appear in logs or debug output.
@@ -314,6 +394,8 @@ impl std::fmt::Debug for ProviderEntry {
             .field("return_attr", &self.return_attr)
             .field("match_attr", &self.match_attr)
             .field("offline_cache", &self.offline_cache)
+            .field("tls_mode", &self.tls_mode)
+            .field("tls_mode_probe", &self.tls_mode_probe)
             .finish()
     }
 }

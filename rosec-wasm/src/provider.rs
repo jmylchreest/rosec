@@ -64,6 +64,10 @@ pub struct WasmProviderConfig {
     /// offline unlock are suppressed even if the guest declares
     /// `Capability::OfflineCache`.  Defaults to `true`.
     pub offline_cache: bool,
+    /// TLS certificate verification mode for guest HTTP requests.
+    pub tls_mode: rosec_core::config::TlsMode,
+    /// TLS certificate verification mode for readiness probes.
+    pub tls_mode_probe: rosec_core::config::TlsMode,
 }
 
 // ── WasmProvider ─────────────────────────────────────────────────
@@ -182,7 +186,8 @@ impl WasmProvider {
         // Clone the manifest before consuming it so we can recreate the
         // plugin after a WASM trap (which corrupts the instance).
         let manifest = manifest;
-        let mut plugin = Plugin::new(&manifest, [], true).map_err(|e| {
+        let host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        let mut plugin = Plugin::new(&manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to load WASM plugin '{}': {e}",
                 config.wasm_path,
@@ -243,7 +248,8 @@ impl WasmProvider {
         manifest: &Manifest,
         config: &WasmProviderConfig,
     ) -> Result<Plugin, ProviderError> {
-        let mut plugin = Plugin::new(manifest, [], true).map_err(|e| {
+        let host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        let mut plugin = Plugin::new(manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to recreate WASM plugin '{}': {e}",
                 config.wasm_path,
@@ -424,10 +430,11 @@ impl WasmProvider {
             for probe in &self.readiness_probes {
                 let probe = probe.clone();
                 let hosts = allowed_hosts.clone();
+                let tls_mode = self.config.tls_mode_probe.clone();
                 let result = tokio::time::timeout(
                     hard_timeout,
                     tokio::task::spawn_blocking(move || {
-                        evaluate_probe(&probe, &hosts, probe_timeout_override)
+                        evaluate_probe(&probe, &hosts, probe_timeout_override, &tls_mode)
                     }),
                 )
                 .await;
@@ -694,6 +701,7 @@ impl WasmProvider {
             plugin: Arc::clone(&self.plugin),
             readiness_probes: self.readiness_probes.clone(),
             allowed_hosts: self.config.allowed_hosts.clone(),
+            tls_mode_probe: self.config.tls_mode_probe.clone(),
             on_sync_nudge,
             on_lock_nudge,
         };
@@ -1478,6 +1486,7 @@ pub(crate) fn evaluate_probe(
     probe: &crate::protocol::ReadinessProbe,
     allowed_hosts: &[String],
     timeout_override: Option<Duration>,
+    tls_mode: &rosec_core::config::TlsMode,
 ) -> Result<(), String> {
     match probe {
         crate::protocol::ReadinessProbe::Http {
@@ -1507,18 +1516,8 @@ pub(crate) fn evaluate_probe(
 
             // Build agent with redirects disabled to prevent SSRF via
             // an allowed host that 302-redirects to internal endpoints.
-            // TLS verification is disabled because this is a connectivity
-            // check, not a trust boundary — self-hosted servers often use
-            // self-signed certs or internal CAs.
-            let agent = ureq::Agent::config_builder()
-                .max_redirects(0)
-                .tls_config(
-                    ureq::tls::TlsConfig::builder()
-                        .disable_verification(true)
-                        .build(),
-                )
-                .build()
-                .new_agent();
+            // TLS mode is configurable per-provider via `tls_mode_probe`.
+            let agent = crate::host_http::build_probe_agent(tls_mode);
             let req = ureq::http::request::Builder::new()
                 .method(method.to_uppercase().as_str())
                 .uri(url.as_str());
