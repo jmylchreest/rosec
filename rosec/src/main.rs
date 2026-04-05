@@ -3362,7 +3362,13 @@ fn cmd_config_show(show_defaults: bool) -> Result<()> {
 
     if show_defaults {
         // Parse with serde defaults applied, then re-serialize to show all fields.
-        let cfg = load_config();
+        let mut cfg = load_config();
+        // Resolve Option fields so they appear in the output.
+        for entry in &mut cfg.provider {
+            if entry.tls_mode_probe.is_none() {
+                entry.tls_mode_probe = Some(entry.tls_mode.clone());
+            }
+        }
         let effective_toml =
             toml::to_string_pretty(&cfg).unwrap_or_else(|_| "# (serialization error)".to_string());
         print!("{effective_toml}");

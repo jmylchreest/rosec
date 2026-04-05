@@ -696,13 +696,9 @@ base_url = "https://vaultwarden.example.com"
 Make sure your CA certificate is installed in the system trust store (e.g. via
 `update-ca-certificates` on Debian/Ubuntu or `trust anchor` on Arch/Fedora).
 
-You can also control TLS for readiness probes separately with `tls_mode_probe`:
-
-| Value | `tls_mode` | `tls_mode_probe` |
-|-------|:----------:|:----------------:|
-| `"bundled"` (default for `tls_mode`) | Mozilla root certs only | Mozilla root certs only |
-| `"system"` | OS trust store | OS trust store |
-| `"disabled"` (default for `tls_mode_probe`) | - | Skip TLS verification |
+By default, readiness probes inherit the same TLS mode.  You can override this
+separately with `tls_mode_probe` (accepts `"bundled"`, `"system"`, or
+`"disabled"` to skip TLS verification entirely).
 
 ---
 

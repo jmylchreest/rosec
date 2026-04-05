@@ -293,19 +293,20 @@ pub struct ProviderEntry {
 
     /// TLS certificate verification mode for readiness probes.
     ///
-    /// - `"disabled"` (default) — skip TLS verification entirely.
-    ///   Probes are connectivity checks, not trust boundaries.
-    /// - `"system"` — use the OS trust store.
+    /// When not set, inherits from `tls_mode`.  Accepts all three modes:
+    ///
     /// - `"bundled"` — use Mozilla's bundled root certificates.
+    /// - `"system"` — use the OS trust store.
+    /// - `"disabled"` — skip TLS verification entirely.
     ///
     /// ```toml
     /// [[provider]]
     /// id              = "bw1"
     /// kind            = "bitwarden-pm"
-    /// tls_mode_probe  = "system"
+    /// tls_mode_probe  = "disabled"
     /// ```
-    #[serde(default = "default_tls_mode_disabled")]
-    pub tls_mode_probe: TlsMode,
+    #[serde(default)]
+    pub tls_mode_probe: Option<TlsMode>,
 }
 
 fn default_true() -> bool {
@@ -314,10 +315,6 @@ fn default_true() -> bool {
 
 fn default_tls_mode_bundled() -> TlsMode {
     TlsMode::Bundled
-}
-
-fn default_tls_mode_disabled() -> TlsMode {
-    TlsMode::Disabled
 }
 
 /// TLS certificate verification mode for provider HTTP connections.

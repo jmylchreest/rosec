@@ -1547,7 +1547,10 @@ async fn build_single_provider(
                 options: guest_options,
                 offline_cache: entry.offline_cache,
                 tls_mode: entry.tls_mode.clone(),
-                tls_mode_probe: entry.tls_mode_probe.clone(),
+                tls_mode_probe: entry
+                    .tls_mode_probe
+                    .clone()
+                    .unwrap_or_else(|| entry.tls_mode.clone()),
             };
 
             Ok(Arc::new(

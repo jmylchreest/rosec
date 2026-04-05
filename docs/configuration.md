@@ -136,7 +136,7 @@ be listed; items are deduplicated across them (see [Deduplication](#deduplicatio
 | `return_attr` | array of strings | no | Ordered list of glob patterns selecting which sensitive attribute to return via `GetSecret`. First match wins. Default: `["password", "number", "private_key", "notes"]`. |
 | `match_attr` | array of strings | no | Glob patterns controlling which attributes participate in `SearchItems` filtering. Reserved for future use. |
 | `tls_mode` | string | no | TLS certificate verification for plugin HTTP requests. `"bundled"` (default): Mozilla root certs only. `"system"`: use the OS trust store (for self-signed / private CA certs). |
-| `tls_mode_probe` | string | no | TLS certificate verification for readiness probes. `"disabled"` (default): skip TLS verification. `"system"`: OS trust store. `"bundled"`: Mozilla root certs. |
+| `tls_mode_probe` | string | no | TLS certificate verification for readiness probes. Inherits from `tls_mode` if not set. `"disabled"`: skip TLS verification. `"system"`: OS trust store. `"bundled"`: Mozilla root certs. |
 
 ### `[backend.autolock]` — Per-backend autolock overrides
 
