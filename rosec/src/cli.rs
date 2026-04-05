@@ -467,7 +467,11 @@ pub struct ProviderRemovePasswordArgs {
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Print the current effective configuration as TOML
-    Show,
+    Show {
+        /// Include fields set to their default values
+        #[arg(long, alias = "show-default")]
+        show_defaults: bool,
+    },
 
     /// Print the value of one setting
     #[command(after_long_help = "\

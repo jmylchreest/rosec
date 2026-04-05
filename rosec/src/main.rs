@@ -3345,13 +3345,14 @@ static CONFIG_KEYS: &[(&str, &str)] = &[
 
 fn cmd_config(action: Option<ConfigCommands>) -> Result<()> {
     match action {
-        None | Some(ConfigCommands::Show) => cmd_config_show(),
+        None => cmd_config_show(false),
+        Some(ConfigCommands::Show { show_defaults }) => cmd_config_show(show_defaults),
         Some(ConfigCommands::Get { key }) => cmd_config_get(&key),
         Some(ConfigCommands::Set { key, value }) => cmd_config_set(&key, &value),
     }
 }
 
-fn cmd_config_show() -> Result<()> {
+fn cmd_config_show(show_defaults: bool) -> Result<()> {
     let path = config_path();
     if !path.exists() {
         println!("# No config file found at {}", path.display());
@@ -3361,9 +3362,18 @@ fn cmd_config_show() -> Result<()> {
         println!("{default_toml}");
         return Ok(());
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-    print!("{raw}");
+
+    if show_defaults {
+        // Parse with serde defaults applied, then re-serialize to show all fields.
+        let cfg = load_config();
+        let effective_toml =
+            toml::to_string_pretty(&cfg).unwrap_or_else(|_| "# (serialization error)".to_string());
+        print!("{effective_toml}");
+    } else {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+        print!("{raw}");
+    }
     Ok(())
 }
 
