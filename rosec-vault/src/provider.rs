@@ -127,8 +127,7 @@ impl LocalVault {
                 Err(e) => return Err(ProviderError::Other(e.into())),
             }
         }
-        let vault_key = vault_key
-            .ok_or_else(|| ProviderError::Other(anyhow::anyhow!("HMAC verification failed")))?;
+        let vault_key = vault_key.ok_or(ProviderError::AuthFailed)?;
 
         let mac_key =
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
@@ -137,9 +136,7 @@ impl LocalVault {
         let hmac_valid = crypto::verify_hmac(&*mac_key, &encrypted_data, &vault_file.hmac_bytes())
             .map_err(|e| ProviderError::Other(e.into()))?;
         if !hmac_valid {
-            return Err(ProviderError::Other(anyhow::anyhow!(
-                "vault data HMAC verification failed"
-            )));
+            return Err(ProviderError::AuthFailed);
         }
 
         let decrypted = crypto::decrypt(&encrypted_data, &*vault_key)

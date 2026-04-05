@@ -423,9 +423,9 @@ impl WasmProvider {
             .unwrap_or_default()
             .to_vec();
 
+        let mut last_failure = String::new();
         for attempt in 1..=max_attempts {
             let mut all_ready = true;
-            let mut last_failure = String::new();
 
             for probe in &self.readiness_probes {
                 let probe = probe.clone();
@@ -487,7 +487,7 @@ impl WasmProvider {
         }
 
         Err(ProviderError::Unavailable(format!(
-            "readiness probes not satisfied after {max_attempts} attempt{}",
+            "readiness probes not satisfied after {max_attempts} attempt{}: {last_failure}",
             if max_attempts == 1 { "" } else { "s" },
         )))
     }
