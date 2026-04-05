@@ -12,10 +12,12 @@
 #   zstyle ':rosec:env' autoload-file "$HOME/.config/rosec-env/autoload"
 #
 # Usage:
-#   get-key KAGI_API_KEY          # prints the secret value
+#   get-key KAGI_API_KEY          # prints the secret value (cached, fast)
 #   get-key kagi                  # resolves alias from aliases file, prints value
+#   get-key --sync kagi           # sync providers first, then fetch (slower)
 #   rosec-env KAGI_API_KEY        # exports KAGI_API_KEY=<secret> into current shell
 #   rosec-env kagi                # resolves alias, then exports
+#   rosec-env --sync kagi         # sync providers first, then export
 #   rosec-env kagi CUSTOM_VAR    # resolves alias, exports as CUSTOM_VAR instead
 #
 # Aliases file format (~/.config/rosec-env/aliases):
@@ -92,10 +94,16 @@ __rosec_env_ensure_unlocked() {
 
 # Fetch a secret value from rosec and print it to stdout.
 #
-# Usage: get-key <name|alias>
+# Usage: get-key [--sync] <name|alias>
 get-key() {
+  local do_sync=0
+  if [[ "$1" == --sync ]]; then
+    do_sync=1
+    shift
+  fi
+
   if [[ -z "$1" ]]; then
-    echo "Usage: get-key <name|alias>" >&2
+    echo "Usage: get-key [--sync] <name|alias>" >&2
     return 1
   fi
 
@@ -105,7 +113,11 @@ get-key() {
   item_name=$(__rosec_env_resolve "$1")
 
   local value
-  value=$(rosec get --sync "name=${item_name}" 2>&1)
+  if (( do_sync )); then
+    value=$(rosec get --sync "name=${item_name}" 2>&1)
+  else
+    value=$(rosec get "name=${item_name}" 2>&1)
+  fi
   local rc=$?
   if [[ $rc -ne 0 || -z "$value" ]]; then
     echo "Error: could not fetch '${item_name}' from rosec" >&2
@@ -118,10 +130,16 @@ get-key() {
 
 # Fetch a secret and export it as an environment variable.
 #
-# Usage: rosec-env <name|alias> [VAR_NAME]
+# Usage: rosec-env [--sync] <name|alias> [VAR_NAME]
 rosec-env() {
+  local sync_flag=()
+  if [[ "$1" == --sync ]]; then
+    sync_flag=(--sync)
+    shift
+  fi
+
   if [[ -z "$1" ]]; then
-    echo "Usage: rosec-env <name|alias> [VAR_NAME]" >&2
+    echo "Usage: rosec-env [--sync] <name|alias> [VAR_NAME]" >&2
     echo "  Fetches a secret from rosec and exports it as an environment variable." >&2
     return 1
   fi
@@ -130,7 +148,7 @@ rosec-env() {
   item_name=$(__rosec_env_resolve "$1")
   var_name="${2:-$item_name}"
 
-  value=$(get-key "$item_name")
+  value=$(get-key $sync_flag "$item_name")
   if [[ $? -ne 0 ]]; then
     return 1
   fi
