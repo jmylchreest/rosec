@@ -241,7 +241,7 @@ jobs:
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rosec-${{ matrix.target }}
           retention-days: 1
@@ -348,7 +348,7 @@ jobs:
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rosec-wasm-providers
           retention-days: 1
@@ -391,7 +391,7 @@ jobs:
           mv rosec/rosec.cdx.json "rosec-${VERSION}.sbom.cdx.json"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rosec-sbom
           retention-days: 1
