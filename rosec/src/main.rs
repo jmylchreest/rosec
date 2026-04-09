@@ -3023,11 +3023,20 @@ fn resolve_prompt_binary_cli() -> String {
 async fn cmd_totp_add(args: TotpAddArgs) -> Result<()> {
     let conn = conn().await?;
 
-    let (path, is_locked) = resolve_item_path(&conn, args.item.as_str()).await?;
-
-    if is_locked {
-        trigger_unlock(&conn).await?;
-    }
+    // Try to find the item. If it doesn't exist, we'll create it.
+    let resolved = resolve_item_path(&conn, args.item.as_str()).await;
+    let (path, is_new) = match resolved {
+        Ok((path, is_locked)) => {
+            if is_locked {
+                trigger_unlock(&conn).await?;
+            }
+            (path, false)
+        }
+        Err(_) => {
+            // Item not found — we'll create it later using the identifier as a label.
+            (String::new(), true)
+        }
+    };
 
     // Collect the TOTP seed — either via QR scanner or hidden prompt.
     let seed = if args.qr {
@@ -3044,14 +3053,45 @@ async fn cmd_totp_add(args: TotpAddArgs) -> Result<()> {
     let params = rosec_core::totp::parse_totp_input(seed.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid TOTP seed: {e}"))?;
 
-    // Generate a test code for confirmation.
+    // Show the test code and ask for confirmation via the prompter.
     let test_code = rosec_core::totp::generate_code_now(&params);
-    eprintln!("Current code: {test_code}");
-    eprintln!("Does this match your authenticator? (press Enter to confirm, Ctrl+C to cancel)");
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf)?;
+    let remaining = rosec_core::totp::time_remaining(&params);
+    if has_display() {
+        let prompt_bin = resolve_prompt_binary_cli();
+        let json = serde_json::json!({
+            "title": "Confirm TOTP",
+            "totp_display": {
+                "code": test_code,
+                "remaining": remaining,
+                "period": params.period,
+                "confirm": "Save",
+            },
+        });
+        let mut cmd = std::process::Command::new(&prompt_bin);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to launch rosec-prompt: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(json.to_string().as_bytes());
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("cancelled");
+        }
+    } else {
+        eprintln!("Current code: {test_code}");
+        eprint!("Does this match? [y/N] ");
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        if !buf.trim().eq_ignore_ascii_case("y") {
+            bail!("cancelled");
+        }
+    }
 
-    // Store the seed via UpdateItem.
     let items_proxy = zbus::Proxy::new(
         &conn,
         "org.freedesktop.secrets",
@@ -3060,20 +3100,35 @@ async fn cmd_totp_add(args: TotpAddArgs) -> Result<()> {
     )
     .await?;
 
-    let empty_attrs: HashMap<String, String> = HashMap::new();
     let mut secrets: HashMap<String, Vec<u8>> = HashMap::new();
     secrets.insert("totp".to_string(), seed.as_bytes().to_vec());
 
-    let _: () = items_proxy
-        .call(
-            "UpdateItem",
-            &(path.as_str(), "", "", &empty_attrs, &secrets),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("UpdateItem failed: {e}"))?;
-
-    let display_id = path.rsplit('/').next().unwrap_or(&path);
-    eprintln!("TOTP seed saved for item {display_id}");
+    if is_new {
+        // Create a new login item with the TOTP seed.
+        let label = args.item.as_str();
+        let empty_attrs: HashMap<String, String> = HashMap::new();
+        let item_path: String = items_proxy
+            .call(
+                "CreateItemExtended",
+                &(label, "login", &empty_attrs, &secrets, false),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("CreateItemExtended failed: {e}"))?;
+        let display_id = item_path.rsplit('/').next().unwrap_or(&item_path);
+        eprintln!("Created item \"{label}\" with TOTP seed ({display_id})");
+    } else {
+        // Update existing item with the TOTP seed.
+        let empty_attrs: HashMap<String, String> = HashMap::new();
+        let _: () = items_proxy
+            .call(
+                "UpdateItem",
+                &(path.as_str(), "", "", &empty_attrs, &secrets),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("UpdateItem failed: {e}"))?;
+        let display_id = path.rsplit('/').next().unwrap_or(&path);
+        eprintln!("TOTP seed saved for item {display_id}");
+    }
     Ok(())
 }
 

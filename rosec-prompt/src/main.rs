@@ -91,6 +91,11 @@ struct TotpDisplayRequest {
     remaining: u32,
     /// TOTP period in seconds (for the countdown).
     period: u32,
+    /// When set, show a confirm/cancel dialog instead of copy/close.
+    /// The value is used as the confirm button label (e.g. "Save").
+    /// Disables auto-copy and auto-dismiss.
+    #[serde(default)]
+    confirm: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -881,16 +886,20 @@ struct TotpApp {
     code: String,
     remaining: u32,
     _period: u32,
+    /// When Some, this is a confirmation dialog (Save/Cancel) instead of
+    /// copy/close. The String is the confirm button label.
+    confirm_label: Option<String>,
     theme: ThemeConfig,
     fg: iced::Color,
     bg: iced::Color,
     border: iced::Color,
     label_color: iced::Color,
     accent: iced::Color,
+    input_bg: iced::Color,
     confirm_bg: iced::Color,
-    confirm_text: iced::Color,
+    confirm_text_color: iced::Color,
     cancel_bg: iced::Color,
-    cancel_text: iced::Color,
+    cancel_text_color: iced::Color,
     font: iced::Font,
 }
 
@@ -919,8 +928,11 @@ fn run_gui_totp(request: PromptRequest) -> Result<()> {
         })
         .run_with(move || {
             let state = TotpApp::from_request(&request);
-            // Auto-copy the TOTP code to clipboard on open.
-            let task = iced::clipboard::write(code);
+            let task = if state.confirm_label.is_some() {
+                iced::Task::none()
+            } else {
+                iced::clipboard::write(code)
+            };
             (state, task)
         })?;
     Ok(())
@@ -960,22 +972,25 @@ impl TotpApp {
         } else {
             parse_color(&req.theme.cancel_text, label_color)
         };
+        let input_bg = parse_color(&req.theme.input_background, bg);
         let font = font_from_string(&req.theme.font_family);
         Self {
             title: req.title.clone(),
             code: totp.code.clone(),
             remaining: totp.remaining,
             _period: totp.period,
+            confirm_label: totp.confirm.clone(),
             theme: req.theme.clone(),
             fg,
             bg,
             border,
             label_color,
             accent,
+            input_bg,
             confirm_bg,
-            confirm_text,
+            confirm_text_color: confirm_text,
             cancel_bg,
-            cancel_text,
+            cancel_text_color: cancel_text,
             font,
         }
     }
@@ -991,6 +1006,9 @@ fn totp_emit_and_exit() {
 fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMessage> {
     match message {
         TotpMessage::Tick => {
+            if state.confirm_label.is_some() {
+                return iced::Task::none(); // no countdown in confirm mode
+            }
             if state.remaining > 0 {
                 state.remaining -= 1;
             }
@@ -1112,58 +1130,77 @@ fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
         .font(bold_font)
         .into();
 
-    let code_font = iced::Font::MONOSPACE;
-    let code_widget: Element<'_, TotpMessage> = text(&state.code)
-        .size(font_size * 2)
-        .color(state.accent)
-        .font(code_font)
-        .width(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Center)
-        .into();
+    let code_widget: Element<'_, TotpMessage> = container(pin_box_row::<TotpMessage>(
+        &state.code,
+        font_size,
+        state.accent,
+        state.input_bg,
+        state.border,
+    ))
+    .width(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Center)
+    .into();
 
-    let countdown_text = format!("Expires in {}s", state.remaining);
-    let countdown_widget: Element<'_, TotpMessage> = text(countdown_text)
-        .size(font_size)
-        .color(state.label_color)
-        .font(state.font)
-        .width(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Center)
-        .into();
+    let is_confirm = state.confirm_label.is_some();
 
-    let copy_btn = button(
-        text("Copy")
+    let subtitle: Element<'_, TotpMessage> = if is_confirm {
+        text("Does this match your authenticator?")
+            .size(font_size)
+            .color(state.label_color)
+            .font(state.font)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .into()
+    } else {
+        text(format!("Expires in {}s", state.remaining))
+            .size(font_size)
+            .color(state.label_color)
+            .font(state.font)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .into()
+    };
+
+    let primary_label = state.confirm_label.as_deref().unwrap_or("Copy");
+    let primary_btn = button(
+        text(primary_label)
             .size(font_size)
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Center)
-            .color(state.confirm_text)
+            .color(state.confirm_text_color)
             .font(state.font),
     )
     .width(Length::Fill)
     .padding(8)
-    .style(move |_, s| button_style(state.confirm_bg, state.confirm_text, s))
-    .on_press(TotpMessage::CopyToClipboard);
+    .style(move |_, s| button_style(state.confirm_bg, state.confirm_text_color, s))
+    .on_press(if is_confirm {
+        TotpMessage::AutoDismiss
+    } else {
+        TotpMessage::CopyToClipboard
+    });
 
-    let close_btn = button(
-        text("Close")
+    let cancel_label = if is_confirm { "Cancel" } else { "Close" };
+    let cancel_btn = button(
+        text(cancel_label)
             .size(font_size)
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Center)
-            .color(state.cancel_text)
+            .color(state.cancel_text_color)
             .font(state.font),
     )
     .width(Length::Fill)
     .padding(8)
-    .style(move |_, s| button_style(state.cancel_bg, state.cancel_text, s))
+    .style(move |_, s| button_style(state.cancel_bg, state.cancel_text_color, s))
     .on_press(TotpMessage::KeyPressed(iced::keyboard::Key::Named(
         iced::keyboard::key::Named::Escape,
     )));
 
-    let actions: Element<'_, TotpMessage> = row![copy_btn, close_btn]
+    let actions: Element<'_, TotpMessage> = row![primary_btn, cancel_btn]
         .spacing(10)
         .align_y(Alignment::Center)
         .into();
 
-    let content = column![title_widget, code_widget, countdown_widget, actions]
+    let content = column![title_widget, code_widget, subtitle, actions]
         .spacing(10)
         .padding(14)
         .align_x(Alignment::Center);
@@ -1587,6 +1624,56 @@ fn darken(c: iced::Color, f: f32) -> iced::Color {
         b: c.b * f,
         a: c.a,
     }
+}
+
+/// Render a TOTP code as individual digit boxes (pin-entry style).
+fn pin_box_row<'a, M: 'a>(
+    code: &str,
+    font_size: u16,
+    digit_color: iced::Color,
+    box_bg: iced::Color,
+    box_border: iced::Color,
+) -> iced::Element<'a, M> {
+    use iced::widget::{container, text};
+    use iced::{Alignment, Background, Length};
+
+    let digit_size = font_size + 8;
+    let box_width = (digit_size as f32 * 1.6).ceil();
+
+    let digit_boxes: Vec<iced::Element<'_, M>> = code
+        .chars()
+        .map(|ch| {
+            let digit = text(ch.to_string())
+                .size(digit_size)
+                .color(digit_color)
+                .font(iced::Font::MONOSPACE)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center);
+
+            container(digit)
+                .width(box_width)
+                .height(box_width)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(box_bg)),
+                    border: iced::Border {
+                        color: box_border,
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    text_color: None,
+                    shadow: iced::Shadow::default(),
+                })
+                .into()
+        })
+        .collect();
+
+    iced::widget::Row::with_children(digit_boxes)
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Length::Shrink)
+        .into()
 }
 
 fn button_style(
