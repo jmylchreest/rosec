@@ -23,4 +23,4 @@ zeroize = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rqrr = "0.8"
 ashpd = "0.10"
-async-io = "2"
+tokio = { workspace = true }

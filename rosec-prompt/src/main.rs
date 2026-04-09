@@ -1302,12 +1302,19 @@ fn qr_emit_and_exit(uri: &str) {
 /// Capture a full-screen screenshot via the XDG Desktop Portal.
 ///
 /// Uses `ashpd` to call `org.freedesktop.portal.Screenshot.Screenshot`.
-/// Runs in a dedicated thread with a fresh `async_io::block_on` executor
-/// so it doesn't conflict with iced's own async-io runtime.
+/// Runs in a dedicated thread with its own Tokio runtime (required by
+/// zbus/ashpd) to avoid conflicts with iced's async-io executor.
 fn capture_screenshot(path: &std::path::Path) -> bool {
     let dest = path.to_path_buf();
     std::thread::spawn(move || {
-        async_io::block_on(async {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return false,
+        };
+        rt.block_on(async {
             let portal = ashpd::desktop::screenshot::Screenshot::request()
                 .interactive(false)
                 .modal(false)
@@ -1361,8 +1368,7 @@ fn qr_update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
                 let path = std::path::PathBuf::from("/tmp/rosec-qr-capture.png");
                 if !capture_screenshot(&path) {
                     return Err(
-                        "Screenshot failed. Install grim (Wayland) or ImageMagick (X11)."
-                            .to_string(),
+                        "Screenshot failed. Ensure xdg-desktop-portal is running.".to_string()
                     );
                 }
                 let result = decode_qr_from_file(&path);
