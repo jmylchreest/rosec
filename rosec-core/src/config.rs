@@ -49,6 +49,22 @@ pub struct ServiceConfig {
     /// - `"disabled"` — skip all verification (local development only)
     #[serde(default)]
     pub wasm_verify: WasmVerify,
+
+    /// Enable the SSH FUSE virtual filesystem at `$XDG_RUNTIME_DIR/rosec/ssh/`.
+    ///
+    /// When `true` (the default), rosecd mounts a read-only FUSE filesystem
+    /// that exposes SSH public keys and config snippets.  Set to `false` to
+    /// disable the mount entirely.
+    #[serde(default = "default_true")]
+    pub ssh_fuse: bool,
+
+    /// Enable the TOTP FUSE virtual filesystem at `$XDG_RUNTIME_DIR/rosec/totp/`.
+    ///
+    /// When `true` (the default), rosecd mounts a read-only FUSE filesystem
+    /// that exposes generated TOTP codes as virtual files.  Set to `false` to
+    /// disable the mount entirely.
+    #[serde(default = "default_true")]
+    pub totp_fuse: bool,
 }
 
 impl Default for ServiceConfig {
@@ -61,6 +77,8 @@ impl Default for ServiceConfig {
 
             wasm_prefer: WasmPreference::default(),
             wasm_verify: WasmVerify::default(),
+            ssh_fuse: true,
+            totp_fuse: true,
         }
     }
 }

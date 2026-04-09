@@ -147,13 +147,16 @@ async fn run() -> Result<()> {
         tracing::warn!("could not claim portal bus name: {e}");
     }
 
-    // Start the SSH agent and FUSE filesystem.  Returns None if XDG_RUNTIME_DIR
-    // is unset or FUSE is unavailable — the daemon continues without SSH
-    // agent support.
-    let ssh_manager: Option<Arc<ssh::SshManager>> = {
+    // Start the SSH agent and FUSE filesystem.  Returns None if disabled by
+    // config, XDG_RUNTIME_DIR is unset, or FUSE is unavailable — the daemon
+    // continues without SSH agent support.
+    let ssh_manager: Option<Arc<ssh::SshManager>> = if config.service.ssh_fuse {
         let state_for_ssh = Arc::clone(&state);
         let confirm_cb = ssh::build_confirm_callback(move || state_for_ssh.prompt_config());
         ssh::SshManager::start(confirm_cb).await.map(Arc::new)
+    } else {
+        tracing::info!("SSH FUSE disabled by config (ssh_fuse = false)");
+        None
     };
 
     if let Some(ref sm) = ssh_manager {
