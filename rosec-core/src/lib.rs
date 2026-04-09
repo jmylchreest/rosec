@@ -13,6 +13,7 @@ pub mod machine_key;
 pub mod oauth;
 pub mod prompt;
 pub mod router;
+pub mod totp;
 
 /// Crate-wide mutex used by tests that mutate `XDG_DATA_HOME`.
 ///
