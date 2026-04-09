@@ -11,6 +11,28 @@ When `rosecd` starts, it:
 
 The FUSE filesystem is read-only and entirely in-memory.  Its contents update automatically when the vault is re-synced or a provider is locked/unlocked.  No private keys are ever written to disk.
 
+Both FUSE mounts can be disabled independently via the `[service]` section of `config.toml`:
+
+```toml
+[service]
+ssh_fuse  = false   # disable the SSH FUSE mount at $XDG_RUNTIME_DIR/rosec/ssh/
+totp_fuse = false   # disable the TOTP FUSE mount at $XDG_RUNTIME_DIR/rosec/totp/
+```
+
+Both default to `true`. Disabling `ssh_fuse` also disables the generated `config.d/` SSH snippets, since they reference paths inside the mount.
+
+### TOTP FUSE filesystem
+
+Alongside the SSH FUSE mount, `rosecd` mounts a TOTP FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/totp/` (gated by `totp_fuse = true`):
+
+```
+totp/
+├── by-name/<item-label>.code    # current TOTP code + newline
+└── by-id/<hex-id>.code          # same, addressed by item hex ID
+```
+
+Each `.code` file generates the current code dynamically on every `read()`. Files disappear when the provider is locked. See [cli.md](cli.md#totp) for `rosec totp` command usage.
+
 ## FUSE Filesystem Layout
 
 ```
@@ -238,3 +260,10 @@ Ensure `fusermount3` is installed and that your user is in the `fuse` group (or 
 sudo apt install fuse3
 sudo usermod -aG fuse "$USER"
 ```
+
+### TOTP `.code` files not appearing
+
+1. Check that `totp_fuse = true` (the default) is set in `[service]`.
+2. Verify the provider is unlocked: `rosec provider list`.
+3. Confirm the item has a TOTP seed: `rosec search rosec:totp=true`.
+4. Check the mount is active: `ls "$XDG_RUNTIME_DIR/rosec/totp/by-name/"`.
