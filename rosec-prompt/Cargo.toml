@@ -18,3 +18,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
+
+# QR code scanning
+image = { version = "0.25", default-features = false, features = ["png"] }
+rqrr = "0.8"

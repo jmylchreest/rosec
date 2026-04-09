@@ -27,3 +27,4 @@ wildmatch = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }
+rpassword = { workspace = true }
