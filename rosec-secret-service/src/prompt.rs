@@ -159,13 +159,14 @@ async fn run_prompt_task(
     /// Maximum number of unlock attempts before giving up.
     const MAX_ATTEMPTS: u32 = 3;
 
-    // Inline helper: emit Completed(dismissed=true).
-    // Per the Secret Service spec the result variant for a dismissed prompt
-    // is an empty string "s" — not an object path.
-    async fn emit_dismissed(ctxt: &SignalEmitter<'_>) {
+    // Inline helper: emit Completed(dismissed=true) and then clean up the
+    // prompt object.  The signal MUST be emitted before the object is
+    // deregistered so that D-Bus clients receive it.
+    async fn dismiss_and_finish(state: &ServiceState, prompt_path: &str, ctxt: &SignalEmitter<'_>) {
         if let Err(e) = SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
+        state.finish_prompt(prompt_path);
     }
 
     // ── Prompt serialization (gnome-keyring unlock_prompt_queue pattern) ──
@@ -230,8 +231,7 @@ async fn run_prompt_task(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "prompt task panicked");
-                    state.finish_prompt(&prompt_path);
-                    emit_dismissed(&ctxt).await;
+                    dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                     return;
                 }
             };
@@ -240,8 +240,7 @@ async fn run_prompt_task(
             Err(e) => {
                 // User cancelled or prompt failed — stop immediately, no retry.
                 tracing::debug!(provider = %provider_id, error = %e, "prompt dismissed or failed");
-                state.finish_prompt(&prompt_path);
-                emit_dismissed(&ctxt).await;
+                dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                 return;
             }
             Ok(pw) => pw,
@@ -250,8 +249,7 @@ async fn run_prompt_task(
         // Perform the actual provider unlock — password never leaves this process.
         let Some(provider) = state.provider_by_id(&provider_id) else {
             tracing::warn!(provider = %provider_id, "provider not found after prompt");
-            state.finish_prompt(&prompt_path);
-            emit_dismissed(&ctxt).await;
+            dismiss_and_finish(&state, &prompt_path, &ctxt).await;
             return;
         };
 
@@ -294,8 +292,7 @@ async fn run_prompt_task(
                         provider = %provider_id,
                         "2FA required but no supported text methods available"
                     );
-                    state.finish_prompt(&prompt_path);
-                    emit_dismissed(&ctxt).await;
+                    dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                     return;
                 }
 
@@ -362,8 +359,7 @@ async fn run_prompt_task(
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!(error = %e, "2FA prompt task panicked");
-                            state.finish_prompt(&prompt_path);
-                            emit_dismissed(&ctxt).await;
+                            dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                             return;
                         }
                     };
@@ -375,8 +371,7 @@ async fn run_prompt_task(
                             error = %e,
                             "2FA prompt dismissed or failed"
                         );
-                        state.finish_prompt(&prompt_path);
-                        emit_dismissed(&ctxt).await;
+                        dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                         return;
                     }
                     Ok(m) => m,
@@ -428,8 +423,7 @@ async fn run_prompt_task(
                             error = %e,
                             "2FA authentication failed"
                         );
-                        state.finish_prompt(&prompt_path);
-                        emit_dismissed(&ctxt).await;
+                        dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                         return;
                     }
                 }
@@ -448,8 +442,7 @@ async fn run_prompt_task(
                         provider = %provider_id,
                         "max unlock attempts reached, giving up"
                     );
-                    state.finish_prompt(&prompt_path);
-                    emit_dismissed(&ctxt).await;
+                    dismiss_and_finish(&state, &prompt_path, &ctxt).await;
                     return;
                 }
 
@@ -460,6 +453,10 @@ async fn run_prompt_task(
 }
 
 /// Handle post-unlock success: sync, sweep, execute deferred operations, emit signal.
+///
+/// The `Completed` signal MUST be emitted while the prompt object is still
+/// registered on the D-Bus object server.  `finish_prompt` (which deregisters
+/// the object) is therefore called only *after* the signal has been sent.
 async fn on_unlock_success(
     state: &Arc<ServiceState>,
     prompt_path: &str,
@@ -467,7 +464,6 @@ async fn on_unlock_success(
     password_for_sweep: Zeroizing<String>,
     ctxt: &SignalEmitter<'_>,
 ) {
-    state.finish_prompt(prompt_path);
     state.mark_provider_unlocked(provider_id);
     state.touch_activity();
 
@@ -518,6 +514,7 @@ async fn on_unlock_success(
         }
     };
 
+    // Emit the Completed signal while the prompt object is still registered.
     match result_value {
         Some(val) => {
             if let Err(e) = SecretPrompt::completed(ctxt, false, &val).await {
@@ -531,6 +528,10 @@ async fn on_unlock_success(
             }
         }
     }
+
+    // Now that the signal has been sent, clean up the prompt object from the
+    // D-Bus object server and internal registry.
+    state.finish_prompt(prompt_path);
 }
 
 // ---------------------------------------------------------------------------
