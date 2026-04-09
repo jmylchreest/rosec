@@ -2,6 +2,7 @@ mod bootstrap;
 #[cfg(feature = "private-socket")]
 mod bus;
 mod ssh;
+mod totp;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -163,6 +164,15 @@ async fn run() -> Result<()> {
         tracing::info!(sock = %sm.agent_sock().display(), "SSH agent ready");
     }
 
+    // Start the TOTP FUSE filesystem.  Returns None if disabled by config,
+    // XDG_RUNTIME_DIR is unset, or FUSE is unavailable.
+    let totp_manager: Option<Arc<totp::TotpManager>> = if config.service.totp_fuse {
+        totp::TotpManager::start().map(Arc::new)
+    } else {
+        tracing::info!("TOTP FUSE disabled by config (totp_fuse = false)");
+        None
+    };
+
     // Start logind watcher unconditionally — it always subscribes to all
     // signals and checks the live config flags on each arrival.  This means
     // enabling on_session_lock or on_logout in the config takes effect
@@ -170,14 +180,15 @@ async fn run() -> Result<()> {
     {
         let logind_state = Arc::clone(&state);
         let logind_ssh = ssh_manager.clone();
+        let logind_totp = totp_manager.clone();
         tokio::spawn(async move {
-            if let Err(e) = logind_watcher(logind_state, logind_ssh).await {
+            if let Err(e) = logind_watcher(logind_state, logind_ssh, logind_totp).await {
                 tracing::warn!("logind watcher exited: {e}");
             }
         });
     }
 
-    wire_provider_callbacks(&state, &ssh_manager);
+    wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
 
     // When running on a private bus, spawn a watcher that polls for the
     // session bus and migrates to it when available.
@@ -213,6 +224,7 @@ async fn run() -> Result<()> {
         let watch_path = config_path.clone();
         let initial_config = config.clone();
         let watch_ssh = ssh_manager.clone();
+        let watch_totp = totp_manager.clone();
         let watch_registry = plugin_registry;
         tokio::spawn(async move {
             if let Err(e) = config_watcher(
@@ -220,6 +232,7 @@ async fn run() -> Result<()> {
                 watch_path,
                 initial_config,
                 watch_ssh,
+                watch_totp,
                 watch_registry,
             )
             .await
@@ -239,14 +252,17 @@ async fn run() -> Result<()> {
     // any per-provider/per-vault overrides).
     let autolock_state = Arc::clone(&state);
     let autolock_ssh = ssh_manager.clone();
-    tokio::spawn(autolock_loop(autolock_state, autolock_ssh));
+    let autolock_totp = totp_manager.clone();
+    tokio::spawn(autolock_loop(autolock_state, autolock_ssh, autolock_totp));
 
     // Wait for SIGTERM or SIGINT for graceful shutdown.
     shutdown_signal().await;
     tracing::info!("received shutdown signal, locking all providers before exit");
-    // Clear SSH keys first so no sign requests can be served during shutdown.
     if let Some(ref sm) = ssh_manager {
         sm.clear();
+    }
+    if let Some(ref tm) = totp_manager {
+        tm.clear();
     }
     // Explicitly lock all providers so decrypted state is zeroed before the
     // process exits.  Errors are logged but not fatal — the process is exiting
@@ -496,6 +512,7 @@ async fn handle_sync_auth_failure(
 async fn autolock_loop(
     state: Arc<rosec_secret_service::ServiceState>,
     ssh_manager: Option<Arc<ssh::SshManager>>,
+    totp_manager: Option<Arc<totp::TotpManager>>,
 ) {
     let check_interval = tokio::time::Duration::from_secs(30);
     loop {
@@ -546,6 +563,9 @@ async fn autolock_loop(
         if any_locked && state.all_providers_locked() {
             if let Some(ref sm) = ssh_manager {
                 sm.clear();
+            }
+            if let Some(ref tm) = totp_manager {
+                tm.clear();
             }
             state.mark_locked();
         }
@@ -727,6 +747,7 @@ fn decode_dbus_path_component(s: &str) -> String {
 async fn logind_watcher(
     state: Arc<rosec_secret_service::ServiceState>,
     ssh_manager: Option<Arc<ssh::SshManager>>,
+    totp_manager: Option<Arc<totp::TotpManager>>,
 ) -> anyhow::Result<()> {
     use futures_util::TryStreamExt;
     use zbus::Connection;
@@ -823,6 +844,9 @@ async fn logind_watcher(
                             if let Some(ref sm) = ssh_manager {
                                 sm.clear();
                             }
+                            if let Some(ref tm) = totp_manager {
+                                tm.clear();
+                            }
                             if let Err(e) = state.auto_lock().await {
                                 tracing::warn!("auto-lock on sleep failed: {e}");
                             }
@@ -866,6 +890,9 @@ async fn logind_watcher(
                                     if let Some(ref sm) = ssh_manager {
                                         sm.clear();
                                     }
+                                    if let Some(ref tm) = totp_manager {
+                                        tm.clear();
+                                    }
                                     state.mark_locked();
                                 }
                             }
@@ -902,6 +929,9 @@ async fn logind_watcher(
                         if any_locked && state.all_providers_locked() {
                             if let Some(ref sm) = ssh_manager {
                                 sm.clear();
+                            }
+                            if let Some(ref tm) = totp_manager {
+                                tm.clear();
                             }
                             state.mark_locked();
                         }
@@ -943,19 +973,23 @@ async fn poll_lock_stream(
 fn wire_provider_callbacks(
     state: &Arc<rosec_secret_service::ServiceState>,
     ssh_manager: &Option<Arc<ssh::SshManager>>,
+    totp_manager: &Option<Arc<totp::TotpManager>>,
 ) {
     use rosec_core::ProviderCallbacks;
 
     for provider in state.providers_ordered() {
         let provider_id = provider.id().to_string();
 
-        // --- Lifecycle event callbacks (all providers via trait) ---
-
         let ssh_unlocked = ssh_manager.clone();
         let ssh_synced = ssh_manager.clone();
         let ssh_locked = ssh_manager.clone();
+        let totp_unlocked = totp_manager.clone();
+        let totp_synced = totp_manager.clone();
+        let totp_locked = totp_manager.clone();
         let providers_for_unlock = Arc::clone(state);
         let providers_for_sync = Arc::clone(state);
+        let totp_providers_for_unlock = Arc::clone(state);
+        let totp_providers_for_sync = Arc::clone(state);
         let locked_id = provider_id.clone();
         let synced_id = provider_id.clone();
         let failed_id = provider_id.clone();
@@ -968,36 +1002,47 @@ fn wire_provider_callbacks(
 
         let callbacks = ProviderCallbacks {
             on_unlocked: Some(Arc::new(move || {
-                // Trigger an immediate SSH key rebuild so keys appear as soon
-                // as the provider is unlocked — no need to wait for the next
-                // background timer tick.
                 let sm = ssh_unlocked.clone();
                 let s = Arc::clone(&providers_for_unlock);
+                let tm = totp_unlocked.clone();
+                let ts = Arc::clone(&totp_providers_for_unlock);
                 tokio::spawn(async move {
                     if let Some(ref sm) = sm {
                         let providers = s.providers_ordered();
                         sm.rebuild(&providers).await;
                     }
+                    if let Some(ref tm) = tm {
+                        let providers = ts.providers_ordered();
+                        tm.rebuild(&providers).await;
+                    }
                 });
             })),
             on_locked: Some(Arc::new(move || {
-                // Evict only this provider's keys; other providers stay available.
                 if let Some(ref sm) = ssh_locked {
                     sm.remove_provider(&locked_id);
+                }
+                if let Some(ref tm) = totp_locked {
+                    tm.clear();
                 }
             })),
             on_sync_succeeded: Some(Arc::new(move |changed| {
                 if !changed {
-                    return; // Nothing new — skip the rebuild.
+                    return;
                 }
                 let sm = ssh_synced.clone();
                 let s = Arc::clone(&providers_for_sync);
+                let tm = totp_synced.clone();
+                let ts = Arc::clone(&totp_providers_for_sync);
                 let id = synced_id.clone();
                 tokio::spawn(async move {
                     if let Some(ref sm) = sm {
                         let providers = s.providers_ordered();
                         tracing::debug!(provider = %id, "sync changed vault — rebuilding SSH keys");
                         sm.rebuild(&providers).await;
+                    }
+                    if let Some(ref tm) = tm {
+                        let providers = ts.providers_ordered();
+                        tm.rebuild(&providers).await;
                     }
                 });
             })),
@@ -1189,6 +1234,7 @@ async fn config_watcher(
     config_path: PathBuf,
     initial_config: Config,
     ssh_manager: Option<Arc<ssh::SshManager>>,
+    totp_manager: Option<Arc<totp::TotpManager>>,
     mut plugin_registry: rosec_wasm::PluginRegistry,
 ) -> anyhow::Result<()> {
     use tokio::sync::mpsc;
@@ -1370,7 +1416,7 @@ async fn config_watcher(
         // Re-wire callbacks after hot-reload so new providers get their event
         // callbacks and nudge callbacks registered immediately.
         if added_any {
-            wire_provider_callbacks(&state, &ssh_manager);
+            wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
         }
 
         // ── Hot-reload non-provider config sections ────────────────────────
