@@ -117,6 +117,8 @@ struct CachedSession {
 
 /// Attribute key for item type — mirrors `rosec_core::ATTR_TYPE`.
 const ATTR_TYPE: &str = "rosec:type";
+/// Attribute key for TOTP presence — mirrors `rosec_core::ATTR_TOTP`.
+const ATTR_TOTP: &str = "rosec:totp";
 
 /// PEM headers that indicate an SSH private key in a text field.
 const PEM_HEADERS: &[&str] = &[
@@ -262,6 +264,10 @@ fn populate_public_attrs(attrs: &mut HashMap<String, String>, dc: &DecryptedCiph
                 format!("uri.{i}")
             };
             attrs.insert(key, uri.clone());
+        }
+        // Stamp TOTP presence for searchability.
+        if login.totp.is_some() {
+            attrs.insert(ATTR_TOTP.to_string(), "true".to_string());
         }
     }
 
@@ -1583,7 +1589,7 @@ pub fn get_ssh_private_key(
 
 /// Return the provider's capabilities.
 ///
-/// Bitwarden PM supports: Sync, Ssh, OfflineCache, Notifications
+/// Bitwarden PM supports: Sync, Ssh, OfflineCache, Notifications, Totp, TotpGenerate
 /// (NOT Write, NOT PasswordChange).
 #[plugin_fn]
 pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
@@ -1593,6 +1599,8 @@ pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
             "ssh".to_string(),
             "offline_cache".to_string(),
             "notifications".to_string(),
+            "totp".to_string(),
+            "totp_generate".to_string(),
         ],
     }))
 }

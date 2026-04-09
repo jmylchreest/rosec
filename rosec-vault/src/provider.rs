@@ -222,11 +222,15 @@ impl LocalVault {
     }
 
     fn item_to_meta(&self, item: &VaultItemData, provider_id: &str) -> ItemMeta {
+        let mut attributes = item.attributes.clone();
+        if item.secrets.contains_key("totp") {
+            attributes.insert(rosec_core::ATTR_TOTP.to_string(), "true".to_string());
+        }
         ItemMeta {
             id: item.id.clone(),
             provider_id: provider_id.to_string(),
             label: item.label.clone(),
-            attributes: item.attributes.clone(),
+            attributes,
             created: Some(
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(item.created as u64),
             ),
@@ -370,6 +374,8 @@ impl Provider for LocalVault {
             Capability::Ssh,
             Capability::KeyWrapping,
             Capability::PasswordChange,
+            Capability::Totp,
+            Capability::TotpGenerate,
         ]
     }
 

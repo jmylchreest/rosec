@@ -63,6 +63,11 @@ pub const ATTR_PROVIDER: &str = "rosec:provider";
 /// attribute name.
 pub const ATTR_TYPE: &str = "rosec:type";
 
+/// Boolean flag indicating the item has a TOTP seed.  Stamped by providers
+/// during item creation/sync when a `"totp"` secret attribute is present.
+/// Searchable via `SearchItems({"rosec:totp": "true"})`.
+pub const ATTR_TOTP: &str = "rosec:totp";
+
 /// Attribute names that cannot be set by users.
 ///
 /// Built from the named constants above so the list stays in sync.
@@ -73,6 +78,7 @@ pub const RESERVED_ATTRIBUTES: &[&str] = &[
     ATTR_MODIFIED,
     ATTR_PROVIDER,
     ATTR_TYPE,
+    ATTR_TOTP,
 ];
 
 // ---------------------------------------------------------------------------
@@ -110,6 +116,12 @@ pub enum Capability {
     /// optional handshake) and `parse_notification` (classifies received frames
     /// as sync, lock, or ignore).  The host manages the connection lifecycle.
     Notifications,
+    /// Provider stores TOTP seeds (items may expose `"totp"` as a secret attribute).
+    Totp,
+    /// Provider can generate TOTP codes server-side (seed never leaves the daemon).
+    ///
+    /// Implies [`Totp`](Self::Totp).
+    TotpGenerate,
 }
 
 /// Check that `provider` declares `cap`; return `ProviderError::NotSupported` if not.

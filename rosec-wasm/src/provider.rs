@@ -1840,6 +1840,8 @@ fn parse_capability(s: &str) -> Option<Capability> {
         "password_change" | "PasswordChange" => Some(Capability::PasswordChange),
         "offline_cache" | "OfflineCache" => Some(Capability::OfflineCache),
         "notifications" | "Notifications" => Some(Capability::Notifications),
+        "totp" | "Totp" => Some(Capability::Totp),
+        "totp_generate" | "TotpGenerate" => Some(Capability::TotpGenerate),
         _ => None,
     }
 }
