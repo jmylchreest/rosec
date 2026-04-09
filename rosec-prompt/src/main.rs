@@ -1223,7 +1223,7 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
     application("rosec prompt", qr_update, qr_view)
         .subscription(qr_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(420.0, 220.0),
+            size: iced::Size::new(420.0, 160.0),
             resizable: false,
             decorations: false,
             transparent: true,
@@ -1299,41 +1299,36 @@ fn qr_emit_and_exit(uri: &str) {
     std::process::exit(0);
 }
 
-/// Capture a screenshot using the XDG Desktop Portal.
+/// Capture a full-screen screenshot via the XDG Desktop Portal.
 ///
-/// Uses `ashpd` (native Rust XDG portal client) to call
-/// `org.freedesktop.portal.Screenshot.Screenshot`.  Works on any desktop
-/// with a portal implementation (GNOME, KDE, wlroots, etc.) without
-/// external tools.
-///
-/// Returns `true` if the screenshot was saved to `path`.
+/// Uses `ashpd` to call `org.freedesktop.portal.Screenshot.Screenshot`.
+/// Runs in a dedicated thread with a fresh `async_io::block_on` executor
+/// so it doesn't conflict with iced's own async-io runtime.
 fn capture_screenshot(path: &std::path::Path) -> bool {
-    // ashpd uses async-io internally (same executor as iced/zbus).
-    // `async_io::block_on` drives the reactor and runs the future to completion.
-    async_io::block_on(async {
-        let portal = match ashpd::desktop::screenshot::Screenshot::request()
-            .interactive(false)
-            .modal(false)
-            .send()
-            .await
-        {
-            Ok(req) => req,
-            Err(_) => return false,
-        };
-        let response = match portal.response() {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        let uri = response.uri().to_string();
-        let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
-        if std::path::Path::new(file_path).exists() {
-            let ok = std::fs::copy(file_path, path).is_ok();
-            let _ = std::fs::remove_file(file_path);
-            ok
-        } else {
-            false
-        }
+    let dest = path.to_path_buf();
+    std::thread::spawn(move || {
+        async_io::block_on(async {
+            let portal = ashpd::desktop::screenshot::Screenshot::request()
+                .interactive(false)
+                .modal(false)
+                .send()
+                .await
+                .ok()?;
+            let response = portal.response().ok()?;
+            let uri = response.uri().to_string();
+            let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
+            if std::path::Path::new(file_path).exists() {
+                std::fs::copy(file_path, &dest).ok()?;
+                let _ = std::fs::remove_file(file_path);
+                Some(true)
+            } else {
+                None
+            }
+        })
+        .is_some()
     })
+    .join()
+    .unwrap_or(false)
 }
 
 fn decode_qr_from_file(path: &std::path::Path) -> Option<String> {
