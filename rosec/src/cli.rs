@@ -142,6 +142,20 @@ EXAMPLES:
     )]
     Get(GetArgs),
 
+    /// Get a TOTP code for an item
+    #[command(
+        long_about = "Get a TOTP code for an item\n\n\
+            By default, displays the code in a GUI popup with clipboard support.\n\
+            Use --stdout to print the code to stdout instead.",
+        after_long_help = "\
+EXAMPLES:
+    rosec totp name=GitHub                  show code in GUI popup
+    rosec totp --stdout name=GitHub         print code to stdout
+    rosec totp --sync a1b2c3d4e5f60718      sync first, then show code
+    rosec totp --stdout name=GitHub | cat   pipe to another tool"
+    )]
+    Totp(TotpArgs),
+
     /// Show full item detail: label, attributes, secret
     #[command(after_long_help = "\
 EXAMPLES:
@@ -268,6 +282,28 @@ pub struct GetArgs {
     /// Print a named public attribute instead of the primary secret
     #[arg(long)]
     pub attr: Option<String>,
+
+    /// Item identifier: 16-char hex ID, key=value filter, or D-Bus object path
+    pub item: String,
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// totp
+// ───────────────────────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+pub struct TotpArgs {
+    /// Sync providers before fetching
+    #[arg(short = 's', long = "sync")]
+    pub sync: bool,
+
+    /// Never prompt for credentials — only use cached/unlocked items
+    #[arg(long)]
+    pub no_unlock: bool,
+
+    /// Print code to stdout instead of showing in GUI popup
+    #[arg(long)]
+    pub stdout: bool,
 
     /// Item identifier: 16-char hex ID, key=value filter, or D-Bus object path
     pub item: String,

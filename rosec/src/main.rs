@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
         Commands::Search(args) => cmd_search(args).await,
         Commands::Item { action } => cmd_item(action).await,
         Commands::Get(args) => cmd_get(args).await,
+        Commands::Totp(args) => cmd_totp(args).await,
         Commands::Inspect(args) => cmd_inspect(args).await,
         Commands::Lock => cmd_lock().await,
         Commands::Unlock => cmd_unlock().await,
@@ -2840,6 +2841,148 @@ async fn cmd_get(args: GetArgs) -> Result<()> {
             }
         }
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// rosec totp
+// ───────────────────────────────────────────────────────────────────────────
+
+async fn cmd_totp(args: TotpArgs) -> Result<()> {
+    if args.sync && args.no_unlock {
+        bail!("--sync and --no-unlock are mutually exclusive");
+    }
+
+    let conn = conn().await?;
+
+    if args.sync {
+        preemptive_sync(&conn).await?;
+    }
+
+    let resolve_result = resolve_item_path(&conn, args.item.as_str()).await;
+
+    let (path, is_locked) = match resolve_result {
+        Ok(result) => result,
+        Err(e) if args.sync && !args.no_unlock => {
+            trigger_unlock(&conn).await?;
+            preemptive_sync(&conn).await?;
+            resolve_item_path(&conn, args.item.as_str())
+                .await
+                .map_err(|_| e)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    if is_locked {
+        if args.no_unlock {
+            bail!("item is locked — use --sync to unlock the provider first");
+        }
+        trigger_unlock(&conn).await?;
+        if args.sync {
+            preemptive_sync(&conn).await?;
+        }
+    }
+
+    match cmd_totp_inner(&conn, &path, args.stdout).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let zbus_err = e.downcast_ref::<zbus::Error>();
+            if !args.no_unlock
+                && let Some(ze) = zbus_err
+                && try_lazy_unlock(&conn, ze).await?
+            {
+                cmd_totp_inner(&conn, &path, args.stdout).await
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn cmd_totp_inner(conn: &Connection, path: &str, use_stdout: bool) -> Result<()> {
+    let secrets_proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Secrets",
+        "org.rosec.Secrets",
+    )
+    .await?;
+
+    let (code, remaining): (String, u32) = secrets_proxy
+        .call("GetTotpCode", &(path,))
+        .await
+        .map_err(|e| anyhow::anyhow!("GetTotpCode failed: {e}"))?;
+
+    if use_stdout || !has_display() {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        out.write_all(code.as_bytes())?;
+        if std::io::IsTerminal::is_terminal(&out) && !code.ends_with('\n') {
+            out.write_all(b"\n")?;
+        }
+        out.flush()?;
+        return Ok(());
+    }
+
+    // Launch rosec-prompt in TOTP display mode.
+    let prompt_bin = resolve_prompt_binary_cli();
+
+    // Fetch the item label for the window title.
+    let item_proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        path,
+        "org.freedesktop.Secret.Item",
+    )
+    .await?;
+    let label: String = item_proxy
+        .get_property("Label")
+        .await
+        .unwrap_or_else(|_| "TOTP".to_string());
+
+    let json = serde_json::json!({
+        "title": format!("TOTP — {label}"),
+        "totp_display": {
+            "code": code,
+            "remaining": remaining,
+            "period": 30
+        }
+    });
+
+    let mut cmd = std::process::Command::new(&prompt_bin);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to launch rosec-prompt: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(json.to_string().as_bytes());
+    }
+
+    let _ = child.wait();
+
+    Ok(())
+}
+
+fn has_display() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
+/// Resolve the `rosec-prompt` binary: sibling of this executable, or PATH.
+fn resolve_prompt_binary_cli() -> String {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("rosec-prompt");
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "rosec-prompt".to_string()
 }
 
 /// Normalise an `--attr` value that may use dot-index syntax.

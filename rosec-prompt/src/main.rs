@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use anyhow::Result;
 use iced::widget::text_input;
@@ -77,6 +78,22 @@ struct FieldSpec {
 }
 
 // ---------------------------------------------------------------------------
+// TOTP display request
+// ---------------------------------------------------------------------------
+
+/// When present in a `PromptRequest`, the prompt shows a TOTP code display
+/// instead of the normal input fields.
+#[derive(Debug, Clone, Deserialize)]
+struct TotpDisplayRequest {
+    /// The current TOTP code to display.
+    code: String,
+    /// Seconds remaining before the code expires.
+    remaining: u32,
+    /// TOTP period in seconds (for the countdown).
+    period: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Request / theme types
 // ---------------------------------------------------------------------------
 
@@ -105,6 +122,9 @@ struct PromptRequest {
     /// Exit code 0 = confirmed, 1 = cancelled.  Stdout is `{}`.
     #[serde(default)]
     confirm_mode: bool,
+    /// When set, display a TOTP code instead of input fields.
+    #[serde(default)]
+    totp_display: Option<TotpDisplayRequest>,
     #[serde(default)]
     theme: ThemeConfig,
 }
@@ -250,6 +270,7 @@ fn main() -> Result<()> {
             cancel_label: String::new(),
             fields: Vec::new(),
             confirm_mode: false,
+            totp_display: None,
             theme: ThemeConfig::default(),
         }
     } else {
@@ -281,7 +302,20 @@ fn main() -> Result<()> {
 ///
 /// In confirm mode (zero fields), prints the title/message and asks for y/N
 /// confirmation.  Exit 0 = confirmed, exit 1 = cancelled.
+///
+/// In TOTP display mode, prints the code and expiry to stderr, emits `{}`
+/// to stdout, and exits immediately (no clipboard in TTY mode).
 fn run_tty(request: PromptRequest) -> Result<()> {
+    if let Some(totp) = &request.totp_display {
+        if !request.title.is_empty() {
+            eprintln!("{}", request.title);
+        }
+        eprintln!("{}", totp.code);
+        eprintln!("Expires in {}s", totp.remaining);
+        println!("{{}}");
+        return Ok(());
+    }
+
     let fields = request.effective_fields();
 
     if !request.title.is_empty() {
@@ -362,8 +396,13 @@ fn run_tty(request: PromptRequest) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_gui(request: PromptRequest) -> Result<()> {
-    use iced::application;
     use iced::window::settings::PlatformSpecific;
+
+    if request.totp_display.is_some() {
+        return run_gui_totp(request);
+    }
+
+    use iced::application;
 
     let fields = request.effective_fields();
     let font_size = request.theme.font_size;
@@ -482,6 +521,15 @@ enum Message {
     FieldChanged(usize, String),
     Confirm,
     Cancel,
+    KeyPressed(iced::keyboard::Key),
+}
+
+#[derive(Debug, Clone)]
+enum TotpMessage {
+    Tick,
+    CopyToClipboard,
+    ClipboardRead(Option<String>),
+    AutoDismiss,
     KeyPressed(iced::keyboard::Key),
 }
 
@@ -791,6 +839,320 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
     // The styled container fills the entire window so that any sub-pixel
     // rounding between the calculated height and iced's actual layout is
     // hidden — the background colour covers the full window area.
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(4)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(state.bg)),
+            border: iced::Border {
+                color: state.border,
+                width: state.theme.border_width,
+                radius: 8.0.into(),
+            },
+            text_color: None,
+            shadow: iced::Shadow::default(),
+        })
+        .into()
+}
+
+// ---------------------------------------------------------------------------
+// TOTP display GUI
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct TotpApp {
+    title: String,
+    code: String,
+    remaining: u32,
+    _period: u32,
+    theme: ThemeConfig,
+    fg: iced::Color,
+    bg: iced::Color,
+    border: iced::Color,
+    label_color: iced::Color,
+    accent: iced::Color,
+    confirm_bg: iced::Color,
+    confirm_text: iced::Color,
+    cancel_bg: iced::Color,
+    cancel_text: iced::Color,
+    font: iced::Font,
+}
+
+fn run_gui_totp(request: PromptRequest) -> Result<()> {
+    use iced::application;
+    use iced::window::settings::PlatformSpecific;
+
+    let totp = request
+        .totp_display
+        .as_ref()
+        .expect("totp_display must be Some");
+    let code = totp.code.clone();
+
+    application("rosec prompt", totp_update, totp_view)
+        .subscription(totp_subscription)
+        .window(iced::window::Settings {
+            size: iced::Size::new(300.0, 200.0),
+            resizable: false,
+            decorations: false,
+            transparent: true,
+            platform_specific: PlatformSpecific {
+                application_id: "rosec.prompt".to_string(),
+                override_redirect: false,
+            },
+            ..Default::default()
+        })
+        .run_with(move || {
+            let state = TotpApp::from_request(&request);
+            // Auto-copy the TOTP code to clipboard on open.
+            let task = iced::clipboard::write(code);
+            (state, task)
+        })?;
+    Ok(())
+}
+
+impl TotpApp {
+    fn from_request(req: &PromptRequest) -> Self {
+        let totp = req
+            .totp_display
+            .as_ref()
+            .expect("totp_display must be Some");
+        let fg = parse_color(&req.theme.foreground, iced::Color::WHITE);
+        let bg = parse_color(&req.theme.background, iced::Color::BLACK);
+        let border = parse_color(&req.theme.border_color, iced::Color::WHITE);
+        let label_color = parse_color(&req.theme.label_color, fg);
+        let accent = parse_color(&req.theme.accent_color, fg);
+        let confirm_bg = if req.theme.confirm_background.trim().is_empty() {
+            accent
+        } else {
+            parse_color(&req.theme.confirm_background, accent)
+        };
+        let confirm_text = if req.theme.confirm_text.trim().is_empty() {
+            fg
+        } else {
+            parse_color(&req.theme.confirm_text, fg)
+        };
+        let cancel_bg = if req.theme.cancel_background.trim().is_empty() {
+            iced::Color::from_rgb(0.25, 0.25, 0.28)
+        } else {
+            parse_color(
+                &req.theme.cancel_background,
+                iced::Color::from_rgb(0.25, 0.25, 0.28),
+            )
+        };
+        let cancel_text = if req.theme.cancel_text.trim().is_empty() {
+            fg
+        } else {
+            parse_color(&req.theme.cancel_text, label_color)
+        };
+        let font = font_from_string(&req.theme.font_family);
+        Self {
+            title: req.title.clone(),
+            code: totp.code.clone(),
+            remaining: totp.remaining,
+            _period: totp.period,
+            theme: req.theme.clone(),
+            fg,
+            bg,
+            border,
+            label_color,
+            accent,
+            confirm_bg,
+            confirm_text,
+            cancel_bg,
+            cancel_text,
+            font,
+        }
+    }
+}
+
+fn totp_emit_and_exit() {
+    use std::io::Write as _;
+    let _ = std::io::stdout().write_all(b"{}\n");
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
+
+fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMessage> {
+    match message {
+        TotpMessage::Tick => {
+            if state.remaining > 0 {
+                state.remaining -= 1;
+            }
+            if state.remaining == 0 {
+                return iced::clipboard::read().map(TotpMessage::ClipboardRead);
+            }
+            iced::Task::none()
+        }
+        TotpMessage::CopyToClipboard => iced::clipboard::write(state.code.clone()),
+        TotpMessage::ClipboardRead(contents) => {
+            if contents.as_deref() == Some(state.code.as_str()) {
+                // Clear the clipboard since it still contains our code.
+                let task = iced::clipboard::write(String::new());
+                return task.chain(iced::Task::done(TotpMessage::AutoDismiss));
+            }
+            totp_emit_and_exit();
+            iced::Task::none()
+        }
+        TotpMessage::AutoDismiss => {
+            totp_emit_and_exit();
+            iced::Task::none()
+        }
+        TotpMessage::KeyPressed(key) => {
+            use iced::keyboard::Key;
+            use iced::keyboard::key::Named;
+            match key {
+                Key::Named(Named::Escape) => {
+                    iced::clipboard::read().map(TotpMessage::ClipboardRead)
+                }
+                _ => iced::Task::none(),
+            }
+        }
+    }
+}
+
+/// A `Future` that completes after a background thread sleeps for the given
+/// duration.  Unlike `poll_fn` over a `mpsc::Receiver`, this type is `Send`
+/// because it owns the receiver behind an `Option` (no cross-await borrow).
+struct ThreadSleep {
+    rx: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+impl ThreadSleep {
+    fn new(dur: Duration) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::spawn(move || {
+            std::thread::sleep(dur);
+            let _ = tx.send(());
+        });
+        Self { rx: Some(rx) }
+    }
+}
+
+impl std::future::Future for ThreadSleep {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let Some(rx) = self.rx.as_ref() else {
+            return std::task::Poll::Ready(());
+        };
+        match rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.rx = None;
+                std::task::Poll::Ready(())
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
+    }
+}
+
+fn totp_subscription(state: &TotpApp) -> iced::Subscription<TotpMessage> {
+    let tick = if state.remaining > 0 {
+        iced::Subscription::run_with_id(
+            "totp-tick",
+            iced::stream::channel(1, |mut sender| async move {
+                use futures_util::SinkExt as _;
+                loop {
+                    ThreadSleep::new(Duration::from_secs(1)).await;
+                    if sender.send(TotpMessage::Tick).await.is_err() {
+                        break;
+                    }
+                }
+            }),
+        )
+    } else {
+        iced::Subscription::none()
+    };
+
+    let keys = iced::event::listen_with(|event, _status, _id| {
+        if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
+            Some(TotpMessage::KeyPressed(key))
+        } else {
+            None
+        }
+    });
+
+    iced::Subscription::batch([tick, keys])
+}
+
+fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
+    use iced::widget::{button, column, container, row, text};
+    use iced::{Alignment, Background, Element, Length};
+
+    let font_size = state.theme.font_size as u16;
+
+    let bold_font = iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..state.font
+    };
+
+    let title_widget: Element<'_, TotpMessage> = text(&state.title)
+        .size(font_size + 1)
+        .color(state.fg)
+        .font(bold_font)
+        .into();
+
+    let code_font = iced::Font::MONOSPACE;
+    let code_widget: Element<'_, TotpMessage> = text(&state.code)
+        .size(font_size * 2)
+        .color(state.accent)
+        .font(code_font)
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .into();
+
+    let countdown_text = format!("Expires in {}s", state.remaining);
+    let countdown_widget: Element<'_, TotpMessage> = text(countdown_text)
+        .size(font_size)
+        .color(state.label_color)
+        .font(state.font)
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .into();
+
+    let copy_btn = button(
+        text("Copy")
+            .size(font_size)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .color(state.confirm_text)
+            .font(state.font),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(move |_, s| button_style(state.confirm_bg, state.confirm_text, s))
+    .on_press(TotpMessage::CopyToClipboard);
+
+    let close_btn = button(
+        text("Close")
+            .size(font_size)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .color(state.cancel_text)
+            .font(state.font),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(move |_, s| button_style(state.cancel_bg, state.cancel_text, s))
+    .on_press(TotpMessage::KeyPressed(iced::keyboard::Key::Named(
+        iced::keyboard::key::Named::Escape,
+    )));
+
+    let actions: Element<'_, TotpMessage> = row![copy_btn, close_btn]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into();
+
+    let content = column![title_widget, code_widget, countdown_widget, actions]
+        .spacing(10)
+        .padding(14)
+        .align_x(Alignment::Center);
+
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
