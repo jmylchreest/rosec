@@ -1194,7 +1194,7 @@ enum QrMessage {
     Scan,
     Cancel,
     WindowHidden,
-    ScanResult(Option<String>),
+    ScanResult(Result<String, String>),
     KeyPressed(iced::keyboard::Key),
 }
 
@@ -1223,7 +1223,7 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
     application("rosec prompt", qr_update, qr_view)
         .subscription(qr_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(350.0, 200.0),
+            size: iced::Size::new(420.0, 220.0),
             resizable: false,
             decorations: false,
             transparent: true,
@@ -1299,23 +1299,41 @@ fn qr_emit_and_exit(uri: &str) {
     std::process::exit(0);
 }
 
+/// Capture a screenshot using the XDG Desktop Portal.
+///
+/// Uses `ashpd` (native Rust XDG portal client) to call
+/// `org.freedesktop.portal.Screenshot.Screenshot`.  Works on any desktop
+/// with a portal implementation (GNOME, KDE, wlroots, etc.) without
+/// external tools.
+///
+/// Returns `true` if the screenshot was saved to `path`.
 fn capture_screenshot(path: &std::path::Path) -> bool {
-    // Try grim first (Wayland)
-    if std::process::Command::new("grim")
-        .arg(path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    // Fall back to ImageMagick import (X11)
-    std::process::Command::new("import")
-        .args(["-window", "root"])
-        .arg(path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // ashpd uses async-io internally (same executor as iced/zbus).
+    // `async_io::block_on` drives the reactor and runs the future to completion.
+    async_io::block_on(async {
+        let portal = match ashpd::desktop::screenshot::Screenshot::request()
+            .interactive(false)
+            .modal(false)
+            .send()
+            .await
+        {
+            Ok(req) => req,
+            Err(_) => return false,
+        };
+        let response = match portal.response() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let uri = response.uri().to_string();
+        let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
+        if std::path::Path::new(file_path).exists() {
+            let ok = std::fs::copy(file_path, path).is_ok();
+            let _ = std::fs::remove_file(file_path);
+            ok
+        } else {
+            false
+        }
+    })
 }
 
 fn decode_qr_from_file(path: &std::path::Path) -> Option<String> {
@@ -1347,21 +1365,27 @@ fn qr_update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
                 ThreadSleep::new(Duration::from_millis(200)).await;
                 let path = std::path::PathBuf::from("/tmp/rosec-qr-capture.png");
                 if !capture_screenshot(&path) {
-                    return None;
+                    return Err(
+                        "Screenshot failed. Install grim (Wayland) or ImageMagick (X11)."
+                            .to_string(),
+                    );
                 }
                 let result = decode_qr_from_file(&path);
                 let _ = std::fs::remove_file(&path);
-                result
+                match result {
+                    Some(uri) => Ok(uri),
+                    None => Err("No otpauth:// QR code found on screen. Try again.".to_string()),
+                }
             },
             QrMessage::ScanResult,
         ),
-        QrMessage::ScanResult(Some(uri)) => {
+        QrMessage::ScanResult(Ok(uri)) => {
             qr_emit_and_exit(&uri);
             iced::Task::none()
         }
-        QrMessage::ScanResult(None) => {
+        QrMessage::ScanResult(Err(msg)) => {
             state.scanning = false;
-            state.status = "No QR code detected. Try again.".to_string();
+            state.status = msg;
             iced::window::get_oldest().and_then(|id| iced::window::minimize(id, false))
         }
         QrMessage::Cancel => std::process::exit(1),
@@ -1409,6 +1433,7 @@ fn qr_view(state: &QrApp) -> iced::Element<'_, QrMessage> {
         .font(state.font)
         .width(Length::Fill)
         .align_x(iced::alignment::Horizontal::Center)
+        .wrapping(iced::widget::text::Wrapping::Word)
         .into();
 
     let scan_btn = button(

@@ -87,22 +87,18 @@ impl TotpManager {
             };
 
             for item in &items {
-                // Fast path: skip items explicitly marked as not having TOTP.
-                // If the attribute is absent (e.g. older WASM plugin that hasn't
-                // been rebuilt), we still attempt to fetch the seed and silently
-                // skip on NotFound.
                 if item
                     .attributes
                     .get(rosec_core::ATTR_TOTP)
                     .map(|v| v.as_str())
-                    == Some("false")
+                    != Some("true")
                 {
                     continue;
                 }
 
                 let seed = match provider.get_secret_attr(&item.id, "totp").await {
                     Ok(s) => s,
-                    Err(_) => continue, // no TOTP seed on this item
+                    Err(_) => continue,
                 };
 
                 let params = match rosec_core::totp::parse_totp_input(seed.as_slice()) {
