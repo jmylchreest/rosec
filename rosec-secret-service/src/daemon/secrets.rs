@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rosec_core::ProviderError;
+use rosec_core::{Capability, ProviderError};
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
@@ -82,5 +82,48 @@ impl RosecSecrets {
             })?;
 
         Ok(secret.as_slice().to_vec())
+    }
+
+    /// Generate a TOTP code for an item that has a TOTP seed.
+    ///
+    /// Returns `(code, seconds_remaining)` where `code` is the current
+    /// time-based one-time password and `seconds_remaining` is the number
+    /// of seconds until it expires.
+    ///
+    /// Errors if the item has no TOTP seed, the provider is locked, or the
+    /// provider does not declare the `TotpGenerate` capability.
+    async fn get_totp_code(
+        &self,
+        item_path: zvariant::ObjectPath<'_>,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(String, u32), FdoError> {
+        log_dbus_caller("secrets", "GetTotpCode", &header);
+        self.state.touch_activity();
+
+        let (provider, item_id) = self.state.provider_and_id_for_path(item_path.as_str())?;
+
+        if !provider.capabilities().contains(&Capability::TotpGenerate) {
+            return Err(FdoError::NotSupported(
+                "provider does not support TOTP code generation".to_string(),
+            ));
+        }
+
+        let attr_name = "totp".to_string();
+        let secret = self
+            .state
+            .run_on_tokio(async move { provider.get_secret_attr(&item_id, &attr_name).await })
+            .await?
+            .map_err(|e| match e {
+                ProviderError::NotFound => FdoError::Failed("item has no TOTP seed".to_string()),
+                other => map_provider_error(other),
+            })?;
+
+        let params = rosec_core::totp::parse_totp_input(secret.as_slice())
+            .map_err(|e| FdoError::Failed(format!("failed to parse TOTP seed: {e}")))?;
+
+        let code = rosec_core::totp::generate_code_now(&params);
+        let remaining = rosec_core::totp::time_remaining(&params) as u32;
+
+        Ok((code, remaining))
     }
 }
