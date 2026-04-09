@@ -6,6 +6,8 @@ A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-serv
 
 **SSH agent:** SSH keys stored in any provider are exposed via a built-in SSH agent and optional FUSE mount with auto-generated `~/.ssh/config` snippets. Per-key confirmation prompts supported.
 
+**TOTP:** Retrieve time-based one-time passwords from vault items via `rosec totp`, the TOTP FUSE filesystem (`$XDG_RUNTIME_DIR/rosec/totp/`), or the `GetTotpCode` D-Bus method. Add seeds interactively or by scanning a QR code.
+
 **XDG Desktop Portal:** Sandboxed apps (Flatpak, Snap) get per-application secrets via the `org.freedesktop.impl.portal.Secret` backend.
 
 **PAM unlock:** Log in once; your vaults unlock automatically.

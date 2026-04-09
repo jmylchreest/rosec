@@ -7,6 +7,8 @@
 dedup_strategy = "newest"       # "newest" (default) or "priority"
 dedup_time_fallback = "created" # "created" (default) or "none"
 refresh_interval_secs = 60      # background sync interval (default: 60)
+ssh_fuse = true                 # mount SSH FUSE at $XDG_RUNTIME_DIR/rosec/ssh/ (default: true)
+totp_fuse = true                # mount TOTP FUSE at $XDG_RUNTIME_DIR/rosec/totp/ (default: true)
 
 [autolock]
 on_logout = true

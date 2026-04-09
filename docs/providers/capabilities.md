@@ -13,6 +13,10 @@ Each provider declares a set of capabilities that describe what optional functio
 | `P` | PasswordChange | Provider supports changing the unlock password via `rosec provider change-password`. |
 | `C` | OfflineCache | Provider supports offline cache export/restore. Previously synced data is available after reboot without network access. Requires both the provider capability and host-side `offline_cache = true` in config. |
 | `N` | Notifications | Provider supports real-time push notifications via a WebSocket connection managed by the host. Enables immediate sync on remote vault changes. |
+| _(none)_ | Totp | Provider stores TOTP seeds. Items expose `rosec:totp=true` and can be read via `rosec totp get` or the TOTP FUSE filesystem. |
+| _(none)_ | TotpGenerate | Provider can generate TOTP codes server-side (the seed never leaves the daemon). Implies `Totp`. |
+
+> **Note:** `Totp` and `TotpGenerate` are not currently assigned a single-letter display code and do not appear in the **CAPS** column of `rosec provider list`.
 
 ## Capabilities by Provider
 
@@ -29,8 +33,10 @@ Each provider declares a set of capabilities that describe what optional functio
 | PasswordChange | yes |
 | OfflineCache | -- |
 | Notifications | -- |
+| Totp | yes |
+| TotpGenerate | yes |
 
-The local vault is a fully writable, offline-only provider. It supports multiple unlock passwords via key wrapping (used for PAM auto-unlock when the login password differs from the master password). No sync because all data is local.
+The local vault is a fully writable, offline-only provider. It supports multiple unlock passwords via key wrapping (used for PAM auto-unlock when the login password differs from the master password). No sync because all data is local. TOTP seeds stored in vault items are available via `rosec totp` and the TOTP FUSE filesystem.
 
 ### Bitwarden Password Manager (`bitwarden`)
 
@@ -45,8 +51,10 @@ The local vault is a fully writable, offline-only provider. It supports multiple
 | PasswordChange | -- |
 | OfflineCache | yes |
 | Notifications | yes |
+| Totp | yes |
+| TotpGenerate | yes |
 
-Read-only access to a Bitwarden (or Vaultwarden) account. Syncs from the Bitwarden API on a configurable interval and supports push notifications for immediate updates. SSH keys stored in Bitwarden are loaded into the agent. Offline cache allows access to previously synced data after reboot without network.
+Read-only access to a Bitwarden (or Vaultwarden) account. Syncs from the Bitwarden API on a configurable interval and supports push notifications for immediate updates. SSH keys stored in Bitwarden are loaded into the agent. Offline cache allows access to previously synced data after reboot without network. TOTP seeds stored in Bitwarden login items are surfaced via `rosec totp` and the TOTP FUSE filesystem.
 
 ### Bitwarden Secrets Manager (`bitwarden-sm`)
 
@@ -61,6 +69,8 @@ Read-only access to a Bitwarden (or Vaultwarden) account. Syncs from the Bitward
 | PasswordChange | -- |
 | OfflineCache | -- |
 | Notifications | -- |
+| Totp | -- |
+| TotpGenerate | -- |
 
 Machine-to-machine provider for CI/CD and server use cases. Syncs secrets from a Bitwarden SM project using an access token. Password change for the key encryption password is handled host-side by the WASM runtime, not as a provider capability.
 
@@ -77,5 +87,7 @@ Machine-to-machine provider for CI/CD and server use cases. Syncs secrets from a
 | PasswordChange | -- |
 | OfflineCache | -- |
 | Notifications | -- |
+| Totp | -- |
+| TotpGenerate | -- |
 
 Read-only access to existing `~/.local/share/keyrings/*.keyring` files. No optional capabilities — items are loaded once at unlock time. Intended as a migration bridge: access old GNOME Keyring items while running rosec as the Secret Service daemon.

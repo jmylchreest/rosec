@@ -13,6 +13,8 @@ Controls vault caching and deduplication behaviour.
 | `dedup_strategy` | string | `"newest"` | How to resolve duplicate items across backends. See [Deduplication](#deduplication). |
 | `dedup_time_fallback` | string | `"created"` | Timestamp field used when `dedup_strategy = "newest"`. `"created"` or `"none"`. |
 | `refresh_interval_secs` | integer | `60` | How often (seconds) to re-sync each backend. Set to `0` to disable periodic refresh. |
+| `ssh_fuse` | bool | `true` | Mount the SSH FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/ssh/`. Set to `false` to disable. See [ssh-agent.md](ssh-agent.md). |
+| `totp_fuse` | bool | `true` | Mount the TOTP FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/totp/`. Set to `false` to disable. |
 
 ### Deduplication
 
@@ -218,6 +220,8 @@ Same fields as `[backend.autolock]`:
 dedup_strategy        = "newest"
 dedup_time_fallback   = "created"
 refresh_interval_secs = 60
+ssh_fuse              = true
+totp_fuse             = true
 
 
 # Global defaults — backends stay unlocked for the session, lock on logout.
