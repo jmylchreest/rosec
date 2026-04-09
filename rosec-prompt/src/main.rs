@@ -125,6 +125,11 @@ struct PromptRequest {
     /// When set, display a TOTP code instead of input fields.
     #[serde(default)]
     totp_display: Option<TotpDisplayRequest>,
+    /// When `true`, enter QR scan mode: show a compact window with a "Scan"
+    /// button that captures the screen and decodes a QR code containing an
+    /// `otpauth://` URI.
+    #[serde(default)]
+    qr_scan: bool,
     #[serde(default)]
     theme: ThemeConfig,
 }
@@ -271,6 +276,7 @@ fn main() -> Result<()> {
             fields: Vec::new(),
             confirm_mode: false,
             totp_display: None,
+            qr_scan: false,
             theme: ThemeConfig::default(),
         }
     } else {
@@ -306,6 +312,11 @@ fn main() -> Result<()> {
 /// In TOTP display mode, prints the code and expiry to stderr, emits `{}`
 /// to stdout, and exits immediately (no clipboard in TTY mode).
 fn run_tty(request: PromptRequest) -> Result<()> {
+    if request.qr_scan {
+        eprintln!("QR scanning requires a display server");
+        std::process::exit(1);
+    }
+
     if let Some(totp) = &request.totp_display {
         if !request.title.is_empty() {
             eprintln!("{}", request.title);
@@ -397,6 +408,10 @@ fn run_tty(request: PromptRequest) -> Result<()> {
 
 fn run_gui(request: PromptRequest) -> Result<()> {
     use iced::window::settings::PlatformSpecific;
+
+    if request.qr_scan {
+        return run_gui_qr(request);
+    }
 
     if request.totp_display.is_some() {
         return run_gui_totp(request);
@@ -1149,6 +1164,289 @@ fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
         .into();
 
     let content = column![title_widget, code_widget, countdown_widget, actions]
+        .spacing(10)
+        .padding(14)
+        .align_x(Alignment::Center);
+
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(4)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(state.bg)),
+            border: iced::Border {
+                color: state.border,
+                width: state.theme.border_width,
+                radius: 8.0.into(),
+            },
+            text_color: None,
+            shadow: iced::Shadow::default(),
+        })
+        .into()
+}
+
+// ---------------------------------------------------------------------------
+// QR scan GUI
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum QrMessage {
+    Scan,
+    Cancel,
+    WindowHidden,
+    ScanResult(Option<String>),
+    KeyPressed(iced::keyboard::Key),
+}
+
+#[derive(Debug)]
+struct QrApp {
+    title: String,
+    status: String,
+    scanning: bool,
+    theme: ThemeConfig,
+    fg: iced::Color,
+    bg: iced::Color,
+    border: iced::Color,
+    label_color: iced::Color,
+    _accent: iced::Color,
+    confirm_bg: iced::Color,
+    confirm_text: iced::Color,
+    cancel_bg: iced::Color,
+    cancel_text: iced::Color,
+    font: iced::Font,
+}
+
+fn run_gui_qr(request: PromptRequest) -> Result<()> {
+    use iced::application;
+    use iced::window::settings::PlatformSpecific;
+
+    application("rosec prompt", qr_update, qr_view)
+        .subscription(qr_subscription)
+        .window(iced::window::Settings {
+            size: iced::Size::new(350.0, 200.0),
+            resizable: false,
+            decorations: false,
+            transparent: true,
+            platform_specific: PlatformSpecific {
+                application_id: "rosec.prompt".to_string(),
+                override_redirect: false,
+            },
+            ..Default::default()
+        })
+        .run_with(move || {
+            let state = QrApp::from_request(&request);
+            (state, iced::Task::none())
+        })?;
+    Ok(())
+}
+
+impl QrApp {
+    fn from_request(req: &PromptRequest) -> Self {
+        let fg = parse_color(&req.theme.foreground, iced::Color::WHITE);
+        let bg = parse_color(&req.theme.background, iced::Color::BLACK);
+        let border = parse_color(&req.theme.border_color, iced::Color::WHITE);
+        let label_color = parse_color(&req.theme.label_color, fg);
+        let accent = parse_color(&req.theme.accent_color, fg);
+        let confirm_bg = if req.theme.confirm_background.trim().is_empty() {
+            accent
+        } else {
+            parse_color(&req.theme.confirm_background, accent)
+        };
+        let confirm_text = if req.theme.confirm_text.trim().is_empty() {
+            fg
+        } else {
+            parse_color(&req.theme.confirm_text, fg)
+        };
+        let cancel_bg = if req.theme.cancel_background.trim().is_empty() {
+            iced::Color::from_rgb(0.25, 0.25, 0.28)
+        } else {
+            parse_color(
+                &req.theme.cancel_background,
+                iced::Color::from_rgb(0.25, 0.25, 0.28),
+            )
+        };
+        let cancel_text = if req.theme.cancel_text.trim().is_empty() {
+            fg
+        } else {
+            parse_color(&req.theme.cancel_text, label_color)
+        };
+        let font = font_from_string(&req.theme.font_family);
+        Self {
+            title: req.title.clone(),
+            status: "Position the QR code on your screen, then click Scan".to_string(),
+            scanning: false,
+            theme: req.theme.clone(),
+            fg,
+            bg,
+            border,
+            label_color,
+            _accent: accent,
+            confirm_bg,
+            confirm_text,
+            cancel_bg,
+            cancel_text,
+            font,
+        }
+    }
+}
+
+fn qr_emit_and_exit(uri: &str) {
+    use std::io::Write as _;
+    let json = format!("{{\"otpauth_uri\":{}}}", serde_json::json!(uri));
+    let _ = std::io::stdout().write_all(json.as_bytes());
+    let _ = std::io::stdout().write_all(b"\n");
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
+
+fn capture_screenshot(path: &std::path::Path) -> bool {
+    // Try grim first (Wayland)
+    if std::process::Command::new("grim")
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Fall back to ImageMagick import (X11)
+    std::process::Command::new("import")
+        .args(["-window", "root"])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn decode_qr_from_file(path: &std::path::Path) -> Option<String> {
+    let img = image::open(path).ok()?;
+    let gray = img.to_luma8();
+    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let grids = prepared.detect_grids();
+    for grid in grids {
+        if let Ok((_, content)) = grid.decode()
+            && content.starts_with("otpauth://")
+        {
+            return Some(content);
+        }
+    }
+    None
+}
+
+fn qr_update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
+    match message {
+        QrMessage::Scan => {
+            state.scanning = true;
+            state.status = "Scanning...".to_string();
+            iced::window::get_oldest().and_then(|id| {
+                iced::window::minimize(id, true).chain(iced::Task::done(QrMessage::WindowHidden))
+            })
+        }
+        QrMessage::WindowHidden => iced::Task::perform(
+            async {
+                ThreadSleep::new(Duration::from_millis(200)).await;
+                let path = std::path::PathBuf::from("/tmp/rosec-qr-capture.png");
+                if !capture_screenshot(&path) {
+                    return None;
+                }
+                let result = decode_qr_from_file(&path);
+                let _ = std::fs::remove_file(&path);
+                result
+            },
+            QrMessage::ScanResult,
+        ),
+        QrMessage::ScanResult(Some(uri)) => {
+            qr_emit_and_exit(&uri);
+            iced::Task::none()
+        }
+        QrMessage::ScanResult(None) => {
+            state.scanning = false;
+            state.status = "No QR code detected. Try again.".to_string();
+            iced::window::get_oldest().and_then(|id| iced::window::minimize(id, false))
+        }
+        QrMessage::Cancel => std::process::exit(1),
+        QrMessage::KeyPressed(key) => {
+            use iced::keyboard::Key;
+            use iced::keyboard::key::Named;
+            match key {
+                Key::Named(Named::Escape) => std::process::exit(1),
+                _ => iced::Task::none(),
+            }
+        }
+    }
+}
+
+fn qr_subscription(_state: &QrApp) -> iced::Subscription<QrMessage> {
+    iced::event::listen_with(|event, _status, _id| {
+        if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
+            Some(QrMessage::KeyPressed(key))
+        } else {
+            None
+        }
+    })
+}
+
+fn qr_view(state: &QrApp) -> iced::Element<'_, QrMessage> {
+    use iced::widget::{button, column, container, row, text};
+    use iced::{Alignment, Background, Element, Length};
+
+    let font_size = state.theme.font_size as u16;
+
+    let bold_font = iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..state.font
+    };
+
+    let title_widget: Element<'_, QrMessage> = text(&state.title)
+        .size(font_size + 1)
+        .color(state.fg)
+        .font(bold_font)
+        .into();
+
+    let status_widget: Element<'_, QrMessage> = text(&state.status)
+        .size(font_size)
+        .color(state.label_color)
+        .font(state.font)
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .into();
+
+    let scan_btn = button(
+        text("Scan")
+            .size(font_size)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .color(state.confirm_text)
+            .font(state.font),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(move |_, s| button_style(state.confirm_bg, state.confirm_text, s))
+    .on_press_maybe(if state.scanning {
+        None
+    } else {
+        Some(QrMessage::Scan)
+    });
+
+    let cancel_btn = button(
+        text("Cancel")
+            .size(font_size)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .color(state.cancel_text)
+            .font(state.font),
+    )
+    .width(Length::Fill)
+    .padding(8)
+    .style(move |_, s| button_style(state.cancel_bg, state.cancel_text, s))
+    .on_press(QrMessage::Cancel);
+
+    let actions: Element<'_, QrMessage> = row![scan_btn, cancel_btn]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into();
+
+    let content = column![title_widget, status_widget, actions]
         .spacing(10)
         .padding(14)
         .align_x(Alignment::Center);
