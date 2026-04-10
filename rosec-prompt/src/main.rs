@@ -89,13 +89,18 @@ struct TotpDisplayRequest {
     code: String,
     /// Seconds remaining before the code expires.
     remaining: u32,
-    /// TOTP period in seconds (for the countdown).
+    /// TOTP period in seconds (kept for protocol compat, not used internally).
+    #[allow(dead_code)]
     period: u32,
     /// When set, show a confirm/cancel dialog instead of copy/close.
     /// The value is used as the confirm button label (e.g. "Save").
     /// Disables auto-copy and auto-dismiss.
     #[serde(default)]
     confirm: Option<String>,
+    /// Raw TOTP seed (otpauth URI or base32). When present, the prompter
+    /// regenerates codes locally when the period expires.
+    #[serde(default)]
+    seed: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -884,10 +889,11 @@ struct TotpApp {
     title: String,
     code: String,
     remaining: u32,
-    _period: u32,
     /// When Some, this is a confirmation dialog (Save/Cancel) instead of
     /// copy/close. The String is the confirm button label.
     confirm_label: Option<String>,
+    /// Parsed TOTP params for code regeneration on period expiry.
+    totp_params: Option<rosec_core::totp::TotpParams>,
     theme: ThemeConfig,
     fg: iced::Color,
     bg: iced::Color,
@@ -971,12 +977,16 @@ impl TotpApp {
         };
         let input_bg = parse_color(&req.theme.input_background, bg);
         let font = font_from_string(&req.theme.font_family);
+        let totp_params = totp
+            .seed
+            .as_deref()
+            .and_then(|s| rosec_core::totp::parse_totp_input(s.as_bytes()).ok());
         Self {
             title: req.title.clone(),
             code: totp.code.clone(),
             remaining: totp.remaining,
-            _period: totp.period,
             confirm_label: totp.confirm.clone(),
+            totp_params,
             theme: req.theme.clone(),
             fg,
             bg,
@@ -1046,7 +1056,12 @@ fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMess
                 state.remaining -= 1;
             }
             if state.remaining == 0 {
-                std::process::exit(0);
+                if let Some(ref params) = state.totp_params {
+                    state.code = rosec_core::totp::generate_code_now(params);
+                    state.remaining = rosec_core::totp::time_remaining(params) as u32;
+                } else {
+                    std::process::exit(0);
+                }
             }
             iced::Task::none()
         }
@@ -1114,7 +1129,7 @@ impl std::future::Future for ThreadSleep {
 }
 
 fn totp_subscription(state: &TotpApp) -> iced::Subscription<TotpMessage> {
-    let tick = if state.remaining > 0 {
+    let tick = if state.confirm_label.is_none() {
         iced::Subscription::run_with_id(
             "totp-tick",
             iced::stream::channel(1, |mut sender| async move {
@@ -1159,10 +1174,17 @@ fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
         .font(bold_font)
         .into();
 
+    let expiring = state.remaining <= 8 && state.confirm_label.is_none();
+    let digit_color = if expiring {
+        iced::Color::from_rgb(0.9, 0.25, 0.25)
+    } else {
+        state.accent
+    };
+
     let code_widget: Element<'_, TotpMessage> = container(pin_box_row::<TotpMessage>(
         &state.code,
         font_size,
-        state.accent,
+        digit_color,
         state.input_bg,
         state.border,
     ))
