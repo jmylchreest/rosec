@@ -3023,19 +3023,24 @@ fn resolve_prompt_binary_cli() -> String {
 async fn cmd_totp_add(args: TotpAddArgs) -> Result<()> {
     let conn = conn().await?;
 
-    // Try to find the item. If it doesn't exist, we'll create it.
-    let resolved = resolve_item_path(&conn, args.item.as_str()).await;
-    let (path, is_new) = match resolved {
-        Ok((path, is_locked)) => {
-            if is_locked {
-                trigger_unlock(&conn).await?;
+    // Try to find the item. Use key=value search or hex ID to locate an
+    // existing item. Plain names (no '=', not hex ID, not a path) are treated
+    // as labels for a new item.
+    let is_search = args.item.contains('=')
+        || args.item.starts_with('/')
+        || (args.item.len() == 16 && args.item.chars().all(|c| c.is_ascii_hexdigit()));
+    let (path, is_new) = if is_search {
+        match resolve_item_path(&conn, args.item.as_str()).await {
+            Ok((path, is_locked)) => {
+                if is_locked {
+                    trigger_unlock(&conn).await?;
+                }
+                (path, false)
             }
-            (path, false)
+            Err(e) => return Err(e),
         }
-        Err(_) => {
-            // Item not found — we'll create it later using the identifier as a label.
-            (String::new(), true)
-        }
+    } else {
+        (String::new(), true)
     };
 
     // Collect the TOTP seed — either via QR scanner or hidden prompt.
