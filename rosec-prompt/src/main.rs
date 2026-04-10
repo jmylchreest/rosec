@@ -915,7 +915,7 @@ fn run_gui_totp(request: PromptRequest) -> Result<()> {
     application("rosec prompt", totp_update, totp_view)
         .subscription(totp_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(380.0, 175.0),
+            size: iced::Size::new(380.0, 190.0),
             resizable: false,
             decorations: false,
             transparent: true,
@@ -927,12 +927,10 @@ fn run_gui_totp(request: PromptRequest) -> Result<()> {
         })
         .run_with(move || {
             let state = TotpApp::from_request(&request);
-            let task = if state.confirm_label.is_some() {
-                iced::Task::none()
-            } else {
-                iced::clipboard::write(code)
-            };
-            (state, task)
+            if state.confirm_label.is_none() {
+                clipboard_write(&code);
+            }
+            (state, iced::Task::none())
         })?;
     Ok(())
 }
@@ -995,6 +993,43 @@ impl TotpApp {
     }
 }
 
+/// Write text to the system clipboard via `wl-copy` (Wayland) or `xclip` (X11).
+///
+/// `wl-copy` forks a background daemon that owns the clipboard content and
+/// serves paste requests until another app copies something.  This is the
+/// standard mechanism for short-lived processes on Wayland.
+fn clipboard_write(text: &str) {
+    use std::process::{Command, Stdio};
+
+    if let Ok(mut child) = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        return;
+    }
+
+    if let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
 fn totp_emit_stdout() {
     use std::io::Write as _;
     let _ = std::io::stdout().write_all(b"{}\n");
@@ -1016,14 +1051,13 @@ fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMess
             iced::Task::none()
         }
         TotpMessage::CopyToClipboard => {
-            // Write to clipboard, hide window, emit stdout — but keep the
-            // process alive so the Wayland compositor can serve paste requests
-            // from our surface.  The process exits when the countdown expires.
-            let write_task = iced::clipboard::write(state.code.clone());
+            // iced's clipboard::write requires the window surface to stay
+            // alive on Wayland, which is impractical for a short-lived prompt.
+            // Use wl-copy (standard on all Wayland desktops) or xclip as a
+            // reliable cross-desktop clipboard mechanism.
+            clipboard_write(&state.code);
             totp_emit_stdout();
-            let hide_task =
-                iced::window::get_oldest().and_then(|id| iced::window::minimize(id, true));
-            write_task.chain(hide_task)
+            std::process::exit(0);
         }
         TotpMessage::AutoDismiss => {
             std::process::exit(0);
