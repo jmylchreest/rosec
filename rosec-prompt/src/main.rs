@@ -185,6 +185,8 @@ struct ThemeConfig {
     label_color: String,
     #[serde(default = "default_accent_color", alias = "ac")]
     accent_color: String,
+    #[serde(default = "default_danger_color", alias = "dc")]
+    danger_color: String,
     #[serde(default, alias = "ybg")]
     confirm_background: String,
     #[serde(default, alias = "yt")]
@@ -211,6 +213,7 @@ impl Default for ThemeConfig {
             font_family: default_font(),
             label_color: default_label_color(),
             accent_color: default_accent_color(),
+            danger_color: default_danger_color(),
             confirm_background: String::new(),
             confirm_text: String::new(),
             cancel_background: String::new(),
@@ -244,6 +247,9 @@ fn default_label_color() -> String {
 }
 fn default_accent_color() -> String {
     PromptTheme::default().accent_color
+}
+fn default_danger_color() -> String {
+    PromptTheme::default().danger_color
 }
 fn default_input_bg() -> String {
     PromptTheme::default().input_background
@@ -900,6 +906,7 @@ struct TotpApp {
     border: iced::Color,
     label_color: iced::Color,
     accent: iced::Color,
+    danger: iced::Color,
     input_bg: iced::Color,
     confirm_bg: iced::Color,
     confirm_text_color: iced::Color,
@@ -952,6 +959,10 @@ impl TotpApp {
         let border = parse_color(&req.theme.border_color, iced::Color::WHITE);
         let label_color = parse_color(&req.theme.label_color, fg);
         let accent = parse_color(&req.theme.accent_color, fg);
+        let danger = parse_color(
+            &req.theme.danger_color,
+            iced::Color::from_rgb(0.95, 0.55, 0.66),
+        );
         let confirm_bg = if req.theme.confirm_background.trim().is_empty() {
             accent
         } else {
@@ -993,6 +1004,7 @@ impl TotpApp {
             border,
             label_color,
             accent,
+            danger,
             input_bg,
             confirm_bg,
             confirm_text_color: confirm_text,
@@ -1175,11 +1187,7 @@ fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
         .into();
 
     let expiring = state.remaining <= 8 && state.confirm_label.is_none();
-    let digit_color = if expiring {
-        iced::Color::from_rgb(0.9, 0.25, 0.25)
-    } else {
-        state.accent
-    };
+    let digit_color = if expiring { state.danger } else { state.accent };
 
     let code_widget: Element<'_, TotpMessage> = container(pin_box_row::<TotpMessage>(
         &state.code,
