@@ -187,6 +187,8 @@ pub struct PromptTheme {
     pub label_color: String,
     #[serde(default = "default_accent_color", alias = "ac")]
     pub accent_color: String,
+    #[serde(default = "default_danger_color", alias = "dc")]
+    pub danger_color: String,
     #[serde(default = "default_confirm_bg", alias = "ybg")]
     pub confirm_background: String,
     #[serde(default = "default_confirm_text", alias = "yt")]
@@ -213,6 +215,7 @@ impl Default for PromptTheme {
             font_family: default_font_family(),
             label_color: default_label_color(),
             accent_color: default_accent_color(),
+            danger_color: default_danger_color(),
             confirm_background: default_confirm_bg(),
             confirm_text: default_confirm_text(),
             cancel_background: default_cancel_bg(),
@@ -552,6 +555,10 @@ fn default_label_color() -> String {
 
 fn default_accent_color() -> String {
     "#7aa2f7ff".to_string()
+}
+
+fn default_danger_color() -> String {
+    "#f38ba8ff".to_string() // Catppuccin red
 }
 
 fn default_confirm_bg() -> String {
