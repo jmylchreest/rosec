@@ -548,7 +548,6 @@ enum Message {
 enum TotpMessage {
     Tick,
     CopyToClipboard,
-    ClipboardRead(Option<String>),
     AutoDismiss,
     KeyPressed(iced::keyboard::Key),
 }
@@ -996,56 +995,44 @@ impl TotpApp {
     }
 }
 
-fn totp_emit_and_exit() {
+fn totp_emit_stdout() {
     use std::io::Write as _;
     let _ = std::io::stdout().write_all(b"{}\n");
     let _ = std::io::stdout().flush();
-    std::process::exit(0);
 }
 
 fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMessage> {
     match message {
         TotpMessage::Tick => {
             if state.confirm_label.is_some() {
-                return iced::Task::none(); // no countdown in confirm mode
+                return iced::Task::none();
             }
             if state.remaining > 0 {
                 state.remaining -= 1;
             }
             if state.remaining == 0 {
-                return iced::clipboard::read().map(TotpMessage::ClipboardRead);
+                std::process::exit(0);
             }
             iced::Task::none()
         }
         TotpMessage::CopyToClipboard => {
-            let task = iced::clipboard::write(state.code.clone());
-            // Delay exit briefly so iced's clipboard write reaches the
-            // compositor before the window surface is destroyed.
-            task.chain(iced::Task::perform(
-                async { ThreadSleep::new(Duration::from_millis(100)).await },
-                |_| TotpMessage::AutoDismiss,
-            ))
-        }
-        TotpMessage::ClipboardRead(contents) => {
-            if contents.as_deref() == Some(state.code.as_str()) {
-                // Clear the clipboard since it still contains our code.
-                let task = iced::clipboard::write(String::new());
-                return task.chain(iced::Task::done(TotpMessage::AutoDismiss));
-            }
-            totp_emit_and_exit();
-            iced::Task::none()
+            // Write to clipboard, hide window, emit stdout — but keep the
+            // process alive so the Wayland compositor can serve paste requests
+            // from our surface.  The process exits when the countdown expires.
+            let write_task = iced::clipboard::write(state.code.clone());
+            totp_emit_stdout();
+            let hide_task =
+                iced::window::get_oldest().and_then(|id| iced::window::minimize(id, true));
+            write_task.chain(hide_task)
         }
         TotpMessage::AutoDismiss => {
-            totp_emit_and_exit();
-            iced::Task::none()
+            std::process::exit(0);
         }
         TotpMessage::KeyPressed(key) => {
             use iced::keyboard::Key;
             use iced::keyboard::key::Named;
             match key {
-                Key::Named(Named::Escape) => {
-                    iced::clipboard::read().map(TotpMessage::ClipboardRead)
-                }
+                Key::Named(Named::Escape) => std::process::exit(1),
                 _ => iced::Task::none(),
             }
         }
