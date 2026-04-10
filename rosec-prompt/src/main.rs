@@ -1019,7 +1019,12 @@ fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMess
         }
         TotpMessage::CopyToClipboard => {
             let task = iced::clipboard::write(state.code.clone());
-            task.chain(iced::Task::done(TotpMessage::AutoDismiss))
+            // Delay exit briefly so iced's clipboard write reaches the
+            // compositor before the window surface is destroyed.
+            task.chain(iced::Task::perform(
+                async { ThreadSleep::new(Duration::from_millis(100)).await },
+                |_| TotpMessage::AutoDismiss,
+            ))
         }
         TotpMessage::ClipboardRead(contents) => {
             if contents.as_deref() == Some(state.code.as_str()) {
