@@ -2942,8 +2942,10 @@ async fn cmd_totp_inner(conn: &Connection, path: &str, use_stdout: bool) -> Resu
     )
     .await?;
 
+    let item_obj_path = zvariant::ObjectPath::try_from(path)
+        .map_err(|e| anyhow::anyhow!("invalid item path: {e}"))?;
     let (code, remaining): (String, u32) = secrets_proxy
-        .call("GetTotpCode", &(path,))
+        .call("GetTotpCode", &(&item_obj_path,))
         .await
         .map_err(|e| anyhow::anyhow!("GetTotpCode failed: {e}"))?;
 
