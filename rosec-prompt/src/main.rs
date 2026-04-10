@@ -916,7 +916,7 @@ fn run_gui_totp(request: PromptRequest) -> Result<()> {
     application("rosec prompt", totp_update, totp_view)
         .subscription(totp_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(300.0, 200.0),
+            size: iced::Size::new(380.0, 175.0),
             resizable: false,
             decorations: false,
             transparent: true,
@@ -1017,7 +1017,10 @@ fn totp_update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMess
             }
             iced::Task::none()
         }
-        TotpMessage::CopyToClipboard => iced::clipboard::write(state.code.clone()),
+        TotpMessage::CopyToClipboard => {
+            let task = iced::clipboard::write(state.code.clone());
+            task.chain(iced::Task::done(TotpMessage::AutoDismiss))
+        }
         TotpMessage::ClipboardRead(contents) => {
             if contents.as_deref() == Some(state.code.as_str()) {
                 // Clear the clipboard since it still contains our code.
@@ -1260,7 +1263,7 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
     application("rosec prompt", qr_update, qr_view)
         .subscription(qr_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(420.0, 160.0),
+            size: iced::Size::new(380.0, 145.0),
             resizable: false,
             decorations: false,
             transparent: true,
