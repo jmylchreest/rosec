@@ -1634,11 +1634,16 @@ fn pin_box_row<'a, M: 'a>(
     box_bg: iced::Color,
     box_border: iced::Color,
 ) -> iced::Element<'a, M> {
-    use iced::widget::{container, text};
+    use iced::widget::{center, container, text};
     use iced::{Alignment, Background, Length};
 
+    let mono = iced::Font {
+        family: iced::font::Family::Name("monospace"),
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::default()
+    };
     let digit_size = font_size + 8;
-    let box_width = (digit_size as f32 * 1.6).ceil();
+    let box_size = (digit_size as f32 * 1.8).ceil();
 
     let digit_boxes: Vec<iced::Element<'_, M>> = code
         .chars()
@@ -1646,15 +1651,13 @@ fn pin_box_row<'a, M: 'a>(
             let digit = text(ch.to_string())
                 .size(digit_size)
                 .color(digit_color)
-                .font(iced::Font::MONOSPACE)
+                .font(mono)
                 .align_x(iced::alignment::Horizontal::Center)
                 .align_y(iced::alignment::Vertical::Center);
 
-            container(digit)
-                .width(box_width)
-                .height(box_width)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center)
+            container(center(digit).width(box_size).height(box_size))
+                .width(box_size)
+                .height(box_size)
                 .style(move |_| container::Style {
                     background: Some(Background::Color(box_bg)),
                     border: iced::Border {
