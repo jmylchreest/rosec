@@ -2977,12 +2977,20 @@ async fn cmd_totp_inner(conn: &Connection, path: &str, use_stdout: bool) -> Resu
         .await
         .unwrap_or_else(|_| "TOTP".to_string());
 
+    // Fetch the raw TOTP seed so the prompter can regenerate codes on expiry.
+    let seed: Option<String> = secrets_proxy
+        .call("GetSecretAttribute", &(&item_obj_path, "totp"))
+        .await
+        .ok()
+        .map(|bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned());
+
     let json = serde_json::json!({
         "title": format!("TOTP — {label}"),
         "totp_display": {
             "code": code,
             "remaining": remaining,
-            "period": 30
+            "period": 30,
+            "seed": seed,
         }
     });
 
