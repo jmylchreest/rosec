@@ -17,6 +17,7 @@ max_unlocked_minutes = 240      # lock after N minutes unlocked (omit to disable
 [prompt]
 backend = "builtin"             # "builtin" uses rosec-prompt; or path to custom binary
 # args = ["--hint=Backend: {{backend}}"]
+# theme_file = "tinct-theme.toml" # load theme from external file (relative to config dir)
 
 [prompt.theme]
 # Colors are 8-digit hex (#RRGGBBAA). Short aliases shown in comments.

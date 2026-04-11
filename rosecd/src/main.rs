@@ -1747,7 +1747,13 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&content)?;
+    let mut config: Config = toml::from_str(&content)?;
+
+    // Resolve external theme file (e.g. tinct-generated) relative to config dir.
+    if let Some(config_dir) = path.parent() {
+        config.resolve_theme_file(config_dir);
+    }
+
     Ok(config)
 }
 
