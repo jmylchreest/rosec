@@ -72,8 +72,10 @@ version_tag := `
   fi
 `
 
-# Latest stable tag (used to calculate next release version)
-_latest_tag := `git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "v0.0.0"`
+# Latest stable tag reachable from main (used to calculate next release version).
+# Tags reachable only from feature branches are intentionally ignored — the
+# release base is whatever shipped on main, not whatever is tagged anywhere.
+_latest_tag := `git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' main 2>/dev/null || echo "v0.0.0"`
 
 # ---------------------------------------------------------------------------
 # Default: list available recipes
@@ -149,7 +151,7 @@ version:
 
 # Calculate next patch/minor/major versions from latest tag
 _next_patch := `
-  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "v0.0.0")
+  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' main 2>/dev/null || echo "v0.0.0")
   TAG="${TAG#v}"
   MAJOR=$(echo "$TAG" | cut -d. -f1)
   MINOR=$(echo "$TAG" | cut -d. -f2)
@@ -158,7 +160,7 @@ _next_patch := `
 `
 
 _next_minor := `
-  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "v0.0.0")
+  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' main 2>/dev/null || echo "v0.0.0")
   TAG="${TAG#v}"
   MAJOR=$(echo "$TAG" | cut -d. -f1)
   MINOR=$(echo "$TAG" | cut -d. -f2)
@@ -166,7 +168,7 @@ _next_minor := `
 `
 
 _next_major := `
-  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "v0.0.0")
+  TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' main 2>/dev/null || echo "v0.0.0")
   TAG="${TAG#v}"
   MAJOR=$(echo "$TAG" | cut -d. -f1)
   echo "$((MAJOR + 1)).0.0"
@@ -200,9 +202,36 @@ _release version push="":
   VERSION="{{ version }}"
   PUSH="{{ push }}"
 
-  echo "Current version:  {{ cargo_version }}"
+  CARGO_VER="{{ cargo_version }}"
+  MAIN_TAG_VER="$(echo '{{ _latest_tag }}' | sed 's/^v//')"
+
+  echo "Cargo.toml:       ${CARGO_VER}"
+  echo "Latest tag(main): {{ _latest_tag }}"
   echo "Releasing:        ${VERSION}  (tag: v${VERSION})"
   echo ""
+
+  if [[ "${CARGO_VER}" != "${MAIN_TAG_VER}" ]]; then
+    echo "ERROR: Cargo.toml (${CARGO_VER}) and latest tag on main (${MAIN_TAG_VER}) disagree."
+    echo ""
+    echo "Likely causes:"
+    echo "  - A previous release tag points at an orphan commit (rebased into main"
+    echo "    under a different SHA), so 'git describe main' can't see it."
+    echo "  - Cargo.toml was bumped without a release tag, or vice versa."
+    echo ""
+    echo "Resolution:"
+    echo "  1. If main contains an equivalent 'chore: release vX.Y.Z' commit at a"
+    echo "     different SHA, retarget the tag at that commit:"
+    echo "       git log --oneline main | grep 'chore: release v${CARGO_VER}'"
+    echo "       git tag -f v${CARGO_VER} <main-commit-sha>"
+    echo "       git push origin v${CARGO_VER} --force   # only if origin needs it"
+    echo "  2. If Cargo.toml is wrong, set [workspace.package].version to match"
+    echo "     the latest tag and commit."
+    echo "  3. If the missing release commit was never landed on main, cherry-pick"
+    echo "     it onto main first, then retag."
+    echo ""
+    exit 1
+  fi
+
 
   if [[ "$PUSH" == "push" ]]; then
     echo "Mode: EXECUTE + PUSH — this will commit, tag, and push to origin"
