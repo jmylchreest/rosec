@@ -780,3 +780,478 @@ since busd and zbus are cross-platform.
 - Phase 3 implementation: **not started** (depends on busd evaluation)
 - Phase 4 implementation: **not started**
 - Phase 5 implementation: **not started**
+
+---
+
+## Daemon-level credential store
+
+### Overview
+
+Enable all providers to benefit from key-wrapping without modifying each
+provider.  A daemon-level credential store wraps per-provider unlock
+passwords behind its own set of wrapping entries.  When the user types a
+password during unlock, the daemon tries it against the store's wrapping
+entries; on match, stored provider passwords are auto-supplied — zero extra
+prompts.
+
+Registration fields (access tokens, client IDs) are already persisted by
+the WASM credential system at `$XDG_DATA_HOME/rosec/oauth/<provider-id>.toml`,
+encrypted with `HKDF(password + provider_id)`.  The credential store only
+stores the **password** for each provider.  Once the correct password is
+supplied, the existing `wasm_cred::load()` flow handles registration fields.
+
+Addresses: [#8](https://github.com/jmylchreest/rosec/issues/8)
+
+### Motivation
+
+Today the `unlock_with_tty()` opportunistic sweep tries the same password
+against all locked providers.  This works when providers share a password
+but silently fails when they differ.  Users want a single credential action
+to unlock everything — even when their Bitwarden master password differs
+from their local vault password.
+
+The credential store solves this by mapping:
+store wrapping password → per-provider passwords.
+
+### Data model
+
+#### Store file
+
+```
+Stored at: $XDG_DATA_HOME/rosec/credential-store.json
+Permissions: 0600
+```
+
+```json
+{
+  "version": 1,
+  "wrapping_entries": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "label": "master",
+      "kdf": { "salt": "base64...", "iterations": 600000 },
+      "wrapped_store_key": "base64(IV || AES-256-CBC(store_key))",
+      "wrapped_key_hmac": "base64(HMAC-SHA256)"
+    }
+  ],
+  "credentials": {
+    "bitwarden": {
+      "iv_b64": "...",
+      "ciphertext_b64": "...",
+      "mac_b64": "..."
+    }
+  }
+}
+```
+
+- **store_key**: Random 32-byte key (analogous to LocalVault's vault_key).
+- **wrapping_entries**: Each wraps the store_key with a different password
+  via PBKDF2 + AES-256-CBC + HMAC-SHA256 (same crypto pattern as
+  `rosec-vault/src/crypto.rs`).  Multiple entries allow unlocking with any
+  of several passwords.
+- **credentials**: Per-provider password blobs encrypted with a
+  `StorageKey` derived from the store_key via HKDF, using
+  `rosec_core::credential::encrypt/decrypt`.
+
+#### Key hierarchy
+
+```
+User password
+    │
+    ├── PBKDF2(password, kdf_params) ──► wrapping_key
+    │       │
+    │       └── AES-256-CBC decrypt ──► store_key (32 bytes)
+    │                                       │
+    │                                       ├── HKDF(store_key, info="rosec-cred-store-v1")
+    │                                       │       │
+    │                                       │       └── StorageKey (64 bytes: 32 enc + 32 mac)
+    │                                       │               │
+    │                                       │               ├── AES-256-CBC decrypt ──► provider "bw" password
+    │                                       │               ├── AES-256-CBC decrypt ──► provider "sm" password
+    │                                       │               └── ...
+    │                                       │
+    │                                       └── HKDF(store_key, info="mac key")
+    │                                               │
+    │                                               └── HMAC verify wrapping entry
+    │
+    └── (may also directly unlock a LocalVault via its own wrapping entries)
+```
+
+Adding/removing a wrapping password is O(1) — re-wrap the store_key, not
+re-encrypt every credential.
+
+### Configuration
+
+```toml
+# Global toggle (default: false)
+[credential_store]
+enabled = true
+
+# Per-provider opt-in (default: false)
+[[provider]]
+id = "bw"
+kind = "bitwarden-pm"
+stored_credentials = true
+
+[provider.options]
+email = "user@example.com"
+```
+
+Default behaviour (no `[credential_store]` section, no `stored_credentials`
+flags) is identical to today — no credential store operations occur.
+
+### Data flow
+
+#### Storing credentials (CLI)
+
+```
+1. User runs: rosec credential store <provider-id>
+2. CLI shows security warning, prompts for confirmation
+3. CLI prompts for store wrapping password
+4. CLI prompts for the provider's unlock password
+5. Daemon unlocks store (try wrapping entries with store password)
+   - If store file doesn't exist: create it (generate store_key,
+     wrap with supplied password, label "master")
+6. Daemon encrypts provider password with store_key-derived StorageKey
+7. Daemon saves credential-store.json (atomic write-then-rename, 0600)
+```
+
+#### Unlock flow (modified `unlock_with_tty`)
+
+```
+1. User types password (existing prompt — no change)
+2. Try password against credential store wrapping entries
+   (fast HMAC check per entry, same as LocalVault)
+   - Match → store_key decrypted, store is "open"
+   - No match → store stays closed, continue as today
+3. For each locked provider where:
+     - stored_credentials = true in config
+     - store is open
+     - store has an entry for this provider ID
+   → Decrypt stored provider password
+   → Call try_auth_provider() with that password
+     - Success → mark unlocked, sync, done
+     - TwoFactorRequired → add to need_2fa list (password prefilled)
+     - RegistrationRequired → add to need_registration list (password prefilled)
+     - AuthFailed → fall through to normal flow (stored password may be stale)
+   → Remove successfully-handled providers from the locked list
+4. Remaining locked providers → existing flow:
+   - Same password tried against each (opportunistic sweep)
+   - Individual prompts for failures
+```
+
+The store attempt is inserted after password collection (line ~141 of
+`unlock.rs`) and before the provider-by-provider loop.  No additional
+prompts.
+
+#### Lock
+
+```
+1. mark_locked() called (existing path)
+2. Store key zeroized (credential store closed)
+3. Store file remains on disk (encrypted at rest)
+4. Next unlock requires re-entering a wrapping password
+```
+
+#### Single-provider unlock (`AuthProviderWithTty`)
+
+Same pattern: after collecting the password, try credential store before
+calling `try_auth_provider()`.  If the store has a different password
+for this specific provider, use it.
+
+### Interfaces
+
+#### New config types
+
+```rust
+// rosec-core/src/config.rs
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CredentialStoreConfig {
+    /// Master switch.  Default `false` — no credential store operations
+    /// occur unless explicitly enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+// Added to ProviderEntry:
+/// Opt-in: store this provider's unlock password in the daemon
+/// credential store.  Default `false`.
+#[serde(default)]
+pub stored_credentials: bool,
+```
+
+#### New module: `rosec-core/src/credential_store.rs`
+
+```rust
+/// On-disk format.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CredentialStoreFile {
+    pub version: u32,
+    pub wrapping_entries: Vec<StoreWrappingEntry>,
+    pub credentials: HashMap<String, EncryptedFields>,
+}
+
+/// A wrapping entry protecting the store key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreWrappingEntry {
+    pub id: String,
+    pub label: Option<String>,
+    pub kdf: KdfParams,
+    pub wrapped_store_key: String,
+    pub wrapped_key_hmac: String,
+}
+
+/// In-memory unlocked state.  Zeroized on drop.
+pub struct UnlockedCredentialStore {
+    store_key: Zeroizing<[u8; 32]>,
+    file: CredentialStoreFile,
+    path: PathBuf,
+}
+
+impl UnlockedCredentialStore {
+    /// Try to unlock the store with a password.
+    /// Returns None if no wrapping entry matches (fast HMAC rejection).
+    pub fn try_open(path: &Path, password: &[u8]) -> Result<Option<Self>>;
+
+    /// Create a new store file with one wrapping entry.
+    pub fn create(path: &Path, password: &[u8], label: String) -> Result<Self>;
+
+    /// Decrypt a stored provider password.
+    pub fn get_password(&self, provider_id: &str) -> Option<Zeroizing<String>>;
+
+    /// Encrypt and store a provider password.
+    pub fn store_password(&mut self, provider_id: &str, password: &str) -> Result<()>;
+
+    /// Remove a stored provider password.
+    pub fn remove_password(&mut self, provider_id: &str) -> bool;
+
+    /// List provider IDs with stored passwords.
+    pub fn list_providers(&self) -> Vec<&str>;
+
+    /// Add a new wrapping entry (new password that can open the store).
+    pub fn add_wrapping_password(&mut self, password: &[u8], label: String) -> Result<String>;
+
+    /// Remove a wrapping entry by ID.  Refuses to remove the last one.
+    pub fn remove_wrapping_password(&mut self, entry_id: &str) -> Result<bool>;
+
+    /// List wrapping entries (id, label).
+    pub fn list_wrapping_passwords(&self) -> Vec<(&str, Option<&str>)>;
+
+    /// Persist to disk (atomic write-then-rename, mode 0600).
+    pub fn save(&self) -> Result<()>;
+}
+```
+
+#### Crypto functions (in `credential_store.rs`)
+
+```rust
+/// Generate a random 32-byte store key.
+fn generate_store_key() -> Zeroizing<[u8; 32]>;
+
+/// Wrap the store key with a password.
+///
+/// 1. Generate random KDF params (salt + iterations)
+/// 2. derive_key(password, kdf_params) → wrapping_key  (PBKDF2-SHA256)
+/// 3. derive_mac_key(wrapping_key) → mac_key  (HKDF, salt = "rosec-cred-store-mac-v1")
+/// 4. AES-256-CBC(store_key, wrapping_key) → wrapped bytes
+/// 5. HMAC-SHA256(wrapped_bytes, mac_key) → hmac
+/// 6. Return StoreWrappingEntry
+fn wrap_store_key(store_key: &[u8; 32], password: &[u8], label: String)
+    -> Result<StoreWrappingEntry>;
+
+/// Unwrap the store key.  Returns None on wrong password (HMAC mismatch).
+fn unwrap_store_key(entry: &StoreWrappingEntry, password: &[u8])
+    -> Result<Option<Zeroizing<[u8; 32]>>>;
+
+/// Derive a StorageKey from the store key for encrypting provider passwords.
+fn derive_credential_key(store_key: &[u8; 32]) -> Result<StorageKey>;
+```
+
+#### ServiceState changes
+
+```rust
+// rosec-secret-service/src/state.rs
+
+pub struct ServiceState {
+    // ... existing fields ...
+
+    /// Unlocked credential store (in-memory, zeroized on lock).
+    credential_store: Mutex<Option<UnlockedCredentialStore>>,
+}
+
+impl ServiceState {
+    /// Try to unlock the credential store with a password.
+    /// Returns true if the store was unlocked.
+    pub async fn try_unlock_credential_store(&self, password: &str) -> bool;
+
+    /// Get a stored provider password (if store is unlocked and has one).
+    pub async fn get_stored_password(&self, provider_id: &str) -> Option<Zeroizing<String>>;
+
+    /// Store a provider password (store must be unlocked).
+    pub async fn store_credential(&self, provider_id: &str, password: &str) -> Result<()>;
+
+    /// Remove a stored provider credential.
+    pub async fn remove_credential(&self, provider_id: &str) -> Result<bool>;
+
+    /// List provider IDs with stored credentials.
+    pub async fn list_stored_credentials(&self) -> Vec<String>;
+}
+```
+
+#### D-Bus methods
+
+| Method | Parameters | Returns | Notes |
+|--------|-----------|---------|-------|
+| `StoreProviderCredential` | `provider_id`, `store_pw_fd`, `provider_pw_fd` | `()` | fd-passing |
+| `RemoveProviderCredential` | `provider_id` | `bool` | |
+| `ListStoredProviderCredentials` | | `Vec<String>` | provider IDs |
+| `AddStorePassword` | `password_fd`, `label` | `String` | returns entry ID |
+| `RemoveStorePassword` | `entry_id` | `bool` | refuses last entry |
+| `ListStorePasswords` | | `Vec<(String, String)>` | (id, label) |
+
+#### CLI commands
+
+```
+rosec credential store <provider-id>         Store a provider's unlock password
+rosec credential remove <provider-id>        Remove a stored provider password
+rosec credential list                        List providers with stored passwords
+
+rosec credential add-password [--label]      Add a wrapping password to the store
+rosec credential remove-password <entry-id>  Remove a wrapping password
+rosec credential list-passwords              List store wrapping entries
+```
+
+### Key decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Store scope | Password only | Registration fields already handled by `wasm_cred` system. The store fills the one gap: different passwords across providers. |
+| Wrapping model | Multi-entry (like LocalVault) | Any of several passwords can open the store. Supports use cases like "laptop password" + "YubiKey-derived password" (future). Adding/removing entries is O(1). |
+| Store unlock trigger | Tried automatically with user's password | No extra prompt. The password typed for provider unlock is opportunistically tried against store wrapping entries. Silent no-op if it doesn't match. |
+| Separate from LocalVault | Yes — independent store file | The repo owner flagged that storing credentials *in* another provider is "giving away your master password to a potentially less secure vault." The daemon credential store is owned by the daemon, not by any provider. |
+| Crypto | Same primitives as LocalVault | PBKDF2 + AES-256-CBC + HMAC-SHA256, with store-specific HKDF domain separation (`rosec-cred-store-mac-v1`). Proven pattern, no new dependencies. |
+| Config model | Opt-in, normal naming | `stored_credentials = true` per provider + `[credential_store] enabled = true` globally. Security warning shown at CLI store time. |
+| Stale password handling | Fall through to normal flow | If a stored password fails `AuthFailed`, the provider is left in the `locked` list for the normal prompt flow. No automatic deletion of stored credentials on failure (the user may have just changed their password externally). |
+
+### Interaction with existing systems
+
+#### WASM credential storage (`wasm_cred`)
+
+The credential store supplies the *password* to `try_auth_provider()`.
+Inside the WASM provider's `unlock()`, this password is used to
+`wasm_cred::load()` registration fields (access tokens, client secrets)
+from `$XDG_DATA_HOME/rosec/oauth/<provider-id>.toml`.  No changes to
+`wasm_cred.rs` or `credential.rs` needed.
+
+#### Opportunistic sweep
+
+The credential store runs *before* the sweep.  Providers unlocked by
+stored credentials are removed from the `locked` list before the sweep
+runs.  The sweep still handles any remaining providers.
+
+#### PAM module
+
+`pam-rosec-unlock` passes the login password via pipe.  This password
+will also be tried against the credential store wrapping entries — if the
+user adds their login password as a store wrapping entry, PAM login
+unlocks all stored-credential providers automatically.
+
+#### Autolock
+
+`mark_locked()` clears the credential store from memory (`store_key`
+zeroized).  Re-unlock after autolock requires re-entering a wrapping
+password, same as re-entering the vault password today.
+
+### Acceptance criteria
+
+#### Core store mechanics
+- [ ] `CredentialStoreFile` format with version, wrapping_entries, credentials
+- [ ] `generate_store_key()` produces random 32-byte key
+- [ ] `wrap_store_key()` / `unwrap_store_key()` with HMAC-first fast rejection
+- [ ] Multiple wrapping entries supported (add, remove, list)
+- [ ] Cannot remove last wrapping entry
+- [ ] Provider passwords encrypted/decrypted via `credential::encrypt/decrypt`
+- [ ] Store file uses atomic write-then-rename, mode 0600
+
+#### Config
+- [ ] `[credential_store]` section with `enabled` flag (default false)
+- [ ] `stored_credentials` per-provider flag (default false)
+- [ ] Default config (no credential_store section) behaves identically to today
+
+#### Unlock integration
+- [ ] Store wrapping entries tried with user's password during `unlock_with_tty()`
+- [ ] Stored passwords auto-supplied to providers with `stored_credentials = true`
+- [ ] Providers with 2FA: password supplied, 2FA still prompted interactively
+- [ ] Providers with registration: password supplied, `wasm_cred` handles the rest
+- [ ] Failed stored password: provider falls through to normal prompt flow
+- [ ] Store locked on `mark_locked()`, store_key zeroized
+
+#### CLI
+- [ ] `rosec credential store` with security warning + confirmation
+- [ ] `rosec credential remove`, `list`
+- [ ] `rosec credential add-password`, `remove-password`, `list-passwords`
+- [ ] All passwords via fd-passing (never on D-Bus wire)
+
+### Security considerations
+
+1. **No password storage without opt-in**: Both `[credential_store] enabled = true`
+   and per-provider `stored_credentials = true` are required. Default behaviour
+   is unchanged.
+
+2. **Password-protected at rest**: Store key is wrapped with PBKDF2-derived
+   keys. Provider passwords are encrypted with store_key-derived keys. The
+   store file is meaningless without a wrapping password.
+
+3. **Zeroization**: All key material uses `Zeroizing<>` wrappers.  Store key
+   is scrubbed on lock.  Provider passwords are scrubbed after being passed
+   to `try_auth_provider()`.
+
+4. **No credentials on D-Bus**: All password parameters use fd-passing
+   (SCM_RIGHTS), consistent with existing unlock methods.
+
+5. **Atomic persistence**: Write-then-rename prevents partial writes.
+   File mode 0600 restricts access to the owning user.
+
+6. **Security warning**: CLI displays a clear warning when first storing
+   credentials, explaining that anyone who knows a store wrapping password
+   can access the provider's credentials.
+
+7. **Stale credentials**: Failed stored passwords do NOT auto-delete.  The
+   user may have mistyped their store password or changed their provider
+   password externally.  Manual `rosec credential remove` is required.
+
+### Files to create/modify
+
+#### New files
+- `rosec-core/src/credential_store.rs` — core store module (data types, crypto, file I/O)
+
+#### Modified files
+- `rosec-core/src/config.rs` — `CredentialStoreConfig`, `stored_credentials` field
+- `rosec-core/src/lib.rs` — re-export `credential_store` module
+- `rosec-secret-service/src/state.rs` — `credential_store` field, methods, `mark_locked()` integration
+- `rosec-secret-service/src/unlock.rs` — insert store unlock + auto-supply into `unlock_with_tty()`
+- `rosec-secret-service/src/daemon/management.rs` — new D-Bus methods
+- `rosec/src/cli.rs` — `CredentialCommands` subcommand group
+- `rosec/src/main.rs` — CLI handlers
+
+#### Reused (no changes needed)
+- `rosec-core/src/credential.rs` — `encrypt()`, `decrypt()`, `StorageKey`
+- `rosec-core/src/oauth.rs` — file I/O patterns
+- `rosec-wasm/src/wasm_cred.rs` — registration field storage (unchanged)
+- `rosec-vault/src/crypto.rs` — pattern reference for PBKDF2 + AES-256-CBC + HMAC
+
+### Out of scope
+
+- **FIDO2 / TPM wrapping entry types**: The wrapping entry model supports
+  a future `method` discriminant (currently always `"password"`), but
+  non-password mechanisms are a separate feature.
+- **systemd-creds integration**: Could inject a store wrapping password at
+  service start.  Compatible with this design but not part of initial work.
+- **Provider dependency chains**: The credential store is simpler and more
+  general — no need for explicit provider ordering or dependency declarations.
+- **Storing registration fields**: Already handled by `wasm_cred`.
+
+### Status
+
+- **Not started** — design only.  Tracked in [#8](https://github.com/jmylchreest/rosec/issues/8).
