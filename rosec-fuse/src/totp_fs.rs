@@ -26,6 +26,7 @@ use fuser::{
 use rosec_core::totp::TotpParams;
 use tracing::warn;
 
+use crate::fs::ArcFs;
 use crate::naming::sanitise_filename;
 
 const INO_ROOT: u64 = 1;
@@ -444,61 +445,6 @@ impl Filesystem for TotpFuse {
     }
 }
 
-/// Newtype wrapper so we can pass `Arc<TotpFuse>` as a `Filesystem`.
-struct ArcTotpFuse(Arc<TotpFuse>);
-
-impl Filesystem for ArcTotpFuse {
-    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        self.0.lookup(req, parent, name, reply);
-    }
-
-    fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
-        self.0.getattr(req, ino, fh, reply);
-    }
-
-    fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
-        self.0.access(req, ino, mask, reply);
-    }
-
-    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.0.open(req, ino, flags, reply);
-    }
-
-    fn opendir(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.0.opendir(req, ino, flags, reply);
-    }
-
-    fn read(
-        &self,
-        req: &Request,
-        ino: INodeNo,
-        fh: FileHandle,
-        offset: u64,
-        size: u32,
-        flags: OpenFlags,
-        lock_owner: Option<LockOwner>,
-        reply: ReplyData,
-    ) {
-        self.0
-            .read(req, ino, fh, offset, size, flags, lock_owner, reply);
-    }
-
-    fn readdir(
-        &self,
-        req: &Request,
-        ino: INodeNo,
-        fh: FileHandle,
-        offset: u64,
-        reply: ReplyDirectory,
-    ) {
-        self.0.readdir(req, ino, fh, offset, reply);
-    }
-
-    fn statfs(&self, req: &Request, ino: INodeNo, reply: ReplyStatfs) {
-        self.0.statfs(req, ino, reply);
-    }
-}
-
 /// Handle to the mounted TOTP FUSE filesystem.
 pub struct TotpMountHandle {
     session: Option<BackgroundSession>,
@@ -553,7 +499,7 @@ pub fn totp_mount(mountpoint: &Path) -> anyhow::Result<TotpMountHandle> {
     ];
     config.acl = SessionACL::Owner;
 
-    let fs_wrapper = ArcTotpFuse(Arc::clone(&fuse));
+    let fs_wrapper = ArcFs(Arc::clone(&fuse));
     let session = fuser::spawn_mount2(fs_wrapper, mountpoint, &config)
         .with_context(|| format!("mount TOTP FUSE at {:?}", mountpoint))?;
 
