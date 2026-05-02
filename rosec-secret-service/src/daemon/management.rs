@@ -27,6 +27,7 @@ impl RosecManagement {
         log_dbus_caller("management", "Status", &header);
         let cache_size = self
             .state
+            .cache
             .items
             .lock()
             .map(|items| items.len())

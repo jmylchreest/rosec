@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use rosec_core::config::{Config, PromptConfig};
 
+use crate::item_cache::ItemCache;
 use crate::lock_policy::LockPolicy;
 use crate::prompt_manager::PromptManager;
 use rosec_core::dedup::is_stale;
@@ -86,29 +87,12 @@ pub struct ServiceState {
     collection_map: RwLock<HashMap<String, String>>,
     pub router: Arc<Router>,
     pub sessions: Arc<SessionManager>,
-    pub items: Arc<Mutex<HashMap<String, ItemMeta>>>,
-    pub registered_items: Arc<Mutex<HashSet<String>>>,
-    pub last_sync: Arc<Mutex<Option<SystemTime>>>,
+    /// Item registry (mounted items, registered D-Bus paths, last-sync
+    /// timestamp, persistent metadata cache).  See [`ItemCache`].
+    pub cache: ItemCache,
     /// The active D-Bus connection.  Behind `RwLock` so it can be swapped
     /// from a private bus to the session bus during live migration.
     conn: RwLock<Connection>,
-    /// Persistent metadata cache that survives provider lock/unlock cycles.
-    ///
-    /// Per the Secret Service spec, `SearchItems` is a metadata-only operation
-    /// that MUST never error when providers are locked — items from locked
-    /// providers go in the `locked` return list.  Attributes are stored
-    /// unencrypted per spec, so they are always available.
-    ///
-    /// This cache is populated during `rebuild_cache_inner()` and **never
-    /// cleared** when providers lock.  When a provider locks, items belonging
-    /// to it have their `locked` flag flipped to `true` (via `mark_provider_locked_in_cache`).
-    /// When a provider unlocks and syncs, `rebuild_cache_inner()` replaces the
-    /// entries for that provider with fresh data.
-    ///
-    /// `SearchItems`, `SearchItemsGlob`, and `resolve_item_path` (hash lookup)
-    /// read from this cache, ensuring they always return results regardless of
-    /// provider lock state.
-    metadata_cache: Arc<Mutex<HashMap<String, ItemMeta>>>,
     /// Idle/max-unlocked tracking and unlock/sync mutex registry.  See
     /// [`LockPolicy`].
     pub locks: LockPolicy,
@@ -213,13 +197,10 @@ impl ServiceState {
             collection_map: RwLock::new(collection_map),
             router,
             sessions,
-            items: Arc::new(Mutex::new(HashMap::new())),
-            registered_items: Arc::new(Mutex::new(HashSet::new())),
-            last_sync: Arc::new(Mutex::new(None)),
+            cache: ItemCache::new(),
             conn: RwLock::new(conn),
             locks: LockPolicy::new(),
             tokio_handle,
-            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
         }
@@ -245,11 +226,7 @@ impl ServiceState {
     /// Used during bus migration so that `register_items()` re-registers
     /// all items on the new connection's `ObjectServer`.
     pub fn clear_registered_items(&self) {
-        let mut registered = self
-            .registered_items
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        registered.clear();
+        self.cache.clear_registered();
     }
 
     /// Atomically replace the live config.
@@ -341,7 +318,7 @@ impl ServiceState {
         &self,
         item_path: &str,
     ) -> Result<(Arc<dyn Provider>, String), FdoError> {
-        let items = self.items.lock().map_err(|_| {
+        let items = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "items lock poisoned".to_string(),
             ))
@@ -555,10 +532,10 @@ impl ServiceState {
 
             // Purge all items belonging to the removed provider from both caches
             // so they don't appear as ghost entries in SearchItems results.
-            if let Ok(mut items) = self.items.lock() {
+            if let Ok(mut items) = self.cache.items.lock() {
                 items.retain(|_, meta| meta.provider_id != id);
             }
-            if let Ok(mut cache) = self.metadata_cache.lock() {
+            if let Ok(mut cache) = self.cache.metadata_cache.lock() {
                 cache.retain(|_, meta| meta.provider_id != id);
             }
         }
@@ -1494,7 +1471,7 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        let items = self.items.lock().map_err(|_| {
+        let items = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "items lock poisoned".to_string(),
             ))
@@ -1514,7 +1491,7 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        let cache = self.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.metadata_cache.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "metadata_cache lock poisoned".to_string(),
             ))
@@ -1545,7 +1522,7 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
-        let cache = self.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.metadata_cache.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "metadata_cache lock poisoned".to_string(),
             ))
@@ -1571,7 +1548,7 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        let cache = self.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.metadata_cache.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "metadata_cache lock poisoned".to_string(),
             ))
@@ -1590,17 +1567,18 @@ impl ServiceState {
         meta: ItemMeta,
     ) -> Result<(), FdoError> {
         // 1. Insert into the items cache (Collection.Items, Collection.SearchItems).
-        if let Ok(mut items) = self.items.lock() {
+        if let Ok(mut items) = self.cache.items.lock() {
             items.insert(path.to_string(), meta.clone());
         }
         // 2. Insert into the persistent metadata cache (Service.SearchItems).
-        if let Ok(mut cache) = self.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
             cache.insert(path.to_string(), meta.clone());
         }
         // 3. If a D-Bus object already exists at this path (replace/update
         //    path), remove it so register_items will create a fresh one with
         //    updated metadata (label, attributes, etc.).
         let already_registered = self
+            .cache
             .registered_items
             .lock()
             .map(|r| r.contains(path))
@@ -1610,7 +1588,7 @@ impl ServiceState {
             let server = conn.object_server();
             // Ignore errors — the object might already be gone.
             let _ = server.remove::<SecretItem, _>(path).await;
-            if let Ok(mut registered) = self.registered_items.lock() {
+            if let Ok(mut registered) = self.cache.registered_items.lock() {
                 registered.remove(path);
             }
         }
@@ -1651,12 +1629,12 @@ impl ServiceState {
             meta.modified = Some(std::time::SystemTime::now());
         };
 
-        if let Ok(mut items) = self.items.lock()
+        if let Ok(mut items) = self.cache.items.lock()
             && let Some(meta) = items.get_mut(path)
         {
             patch(meta);
         }
-        if let Ok(mut cache) = self.metadata_cache.lock()
+        if let Ok(mut cache) = self.cache.metadata_cache.lock()
             && let Some(meta) = cache.get_mut(path)
         {
             patch(meta);
@@ -1666,10 +1644,10 @@ impl ServiceState {
     /// Remove a deleted item from both the `items` and `metadata_cache`
     /// caches so it disappears from `SearchItems` immediately.
     pub(crate) fn remove_deleted_item(&self, path: &str) {
-        if let Ok(mut items) = self.items.lock() {
+        if let Ok(mut items) = self.cache.items.lock() {
             items.remove(path);
         }
-        if let Ok(mut cache) = self.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
             cache.remove(path);
         }
         // Note: we do NOT deregister the D-Bus object here. zbus keeps
@@ -1685,7 +1663,7 @@ impl ServiceState {
     /// manual lock, etc.).  Does NOT remove items — they remain queryable
     /// via `SearchItems` and friends, just in the `locked` partition.
     pub fn mark_provider_locked_in_cache(&self, provider_id: &str) {
-        if let Ok(mut cache) = self.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
             for meta in cache.values_mut() {
                 if meta.provider_id == provider_id {
                     meta.locked = true;
@@ -1698,7 +1676,7 @@ impl ServiceState {
     ///
     /// Called during `auto_lock` / `Lock` when all providers are locked at once.
     fn mark_all_locked_in_cache(&self) {
-        if let Ok(mut cache) = self.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
             for meta in cache.values_mut() {
                 meta.locked = true;
             }
@@ -1714,7 +1692,7 @@ impl ServiceState {
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
         // Path lookup is synchronous — no Tokio needed.
         if let Some(item_paths) = item_paths {
-            let state_items = self.items.lock().map_err(|_| {
+            let state_items = self.cache.items.lock().map_err(|_| {
                 map_provider_error(ProviderError::Unavailable(
                     "items lock poisoned".to_string(),
                 ))
@@ -1877,6 +1855,7 @@ impl ServiceState {
         self: &Arc<Self>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
         let has_items = self
+            .cache
             .items
             .lock()
             .map_err(|_| {
@@ -1890,7 +1869,7 @@ impl ServiceState {
             if self.should_rebuild_cache().unwrap_or(false) {
                 return self.rebuild_cache_inner().await;
             }
-            let state_items = self.items.lock().map_err(|_| {
+            let state_items = self.cache.items.lock().map_err(|_| {
                 map_provider_error(ProviderError::Unavailable(
                     "items lock poisoned".to_string(),
                 ))
@@ -1906,7 +1885,7 @@ impl ServiceState {
         self.ensure_unlocked_inner().await?;
         let entries = self.fetch_entries().await?;
         self.register_items(&entries).await?;
-        let mut state_items = self.items.lock().map_err(|_| {
+        let mut state_items = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "items lock poisoned".to_string(),
             ))
@@ -1933,7 +1912,7 @@ impl ServiceState {
             .collect();
 
         {
-            let mut state_items = self.items.lock().map_err(|_| {
+            let mut state_items = self.cache.items.lock().map_err(|_| {
                 map_provider_error(ProviderError::Unavailable(
                     "items lock poisoned".to_string(),
                 ))
@@ -1951,7 +1930,7 @@ impl ServiceState {
         // skipped during fetch_entries (still locked) retain their
         // previous metadata_cache entries with `locked: true`.
         {
-            let mut cache = self.metadata_cache.lock().map_err(|_| {
+            let mut cache = self.cache.metadata_cache.lock().map_err(|_| {
                 map_provider_error(ProviderError::Unavailable(
                     "metadata_cache lock poisoned".to_string(),
                 ))
@@ -2039,7 +2018,7 @@ impl ServiceState {
     }
 
     fn should_rebuild_cache(&self) -> Result<bool, FdoError> {
-        let last_sync = self.last_sync.lock().map_err(|_| {
+        let last_sync = self.cache.last_sync.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable("sync lock poisoned".to_string()))
         })?;
         if let Some(last_sync) = *last_sync {
@@ -2050,7 +2029,7 @@ impl ServiceState {
     }
 
     fn update_cache_time(&self) -> Result<(), FdoError> {
-        let mut last_sync = self.last_sync.lock().map_err(|_| {
+        let mut last_sync = self.cache.last_sync.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable("sync lock poisoned".to_string()))
         })?;
         *last_sync = Some(SystemTime::now());
@@ -2065,7 +2044,7 @@ impl ServiceState {
         let server = conn.object_server();
         let mut pending = Vec::new();
         {
-            let registered = self.registered_items.lock().map_err(|_| {
+            let registered = self.cache.registered_items.lock().map_err(|_| {
                 map_provider_error(ProviderError::Unavailable(
                     "registered lock poisoned".to_string(),
                 ))
@@ -2101,7 +2080,7 @@ impl ServiceState {
                 sessions: self.sessions.clone(),
                 return_attr_patterns,
                 tokio_handle: self.tokio_handle.clone(),
-                items_cache: Arc::clone(&self.items),
+                items_cache: Arc::clone(&self.cache.items),
                 service_state: Arc::clone(self),
             };
             server
@@ -2110,7 +2089,7 @@ impl ServiceState {
                 .map_err(map_zbus_error)?;
         }
 
-        let mut registered = self.registered_items.lock().map_err(|_| {
+        let mut registered = self.cache.registered_items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "registered lock poisoned".to_string(),
             ))
@@ -2498,7 +2477,8 @@ impl ServiceState {
     /// Used to simulate items from providers that are currently locked
     /// (whose cache entries persisted from a prior unlock cycle).
     pub fn seed_metadata_cache(&self, path: &str, meta: ItemMeta) {
-        self.metadata_cache
+        self.cache
+            .metadata_cache
             .lock()
             .unwrap()
             .insert(path.to_string(), meta);
@@ -2786,7 +2766,7 @@ mod tests {
             .expect("cache");
         // Find the path we assigned.
         let path = {
-            let guard = state.items.lock().expect("items lock");
+            let guard = state.cache.items.lock().expect("items lock");
             guard.keys().next().cloned().expect("at least one item")
         };
         let (provider, item_id) = state

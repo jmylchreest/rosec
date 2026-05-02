@@ -144,7 +144,7 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
 
     let collection_state = CollectionState {
         label: "default".to_string(),
-        items: Arc::clone(&state.items),
+        items: Arc::clone(&state.cache.items),
         providers: state.providers_ordered(),
         service_state: Arc::clone(state),
         sessions: Arc::clone(&state.sessions),
