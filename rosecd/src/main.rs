@@ -1503,189 +1503,20 @@ async fn config_watcher(
 
         tracing::info!(path = %config_path.display(), "config changed, hot-reloading providers");
 
-        let known_ids: HashSet<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
+        reconcile_providers(
+            &state,
+            &known,
+            &new_fingerprints,
+            &new_config,
+            &ssh_manager,
+            &totp_manager,
+            &mut plugin_registry,
+        )
+        .await;
 
-        // Remove providers that are gone or changed (changed = remove + re-add).
-        let known_map: std::collections::HashMap<&str, &str> = known
-            .iter()
-            .map(|(id, fp)| (id.as_str(), fp.as_str()))
-            .collect();
-        let new_map: std::collections::HashMap<&str, &str> = new_fingerprints
-            .iter()
-            .map(|(id, fp)| (id.as_str(), fp.as_str()))
-            .collect();
+        log_non_provider_section_changes(&state, &new_config).await;
 
-        for id in &known_ids {
-            let changed = new_map
-                .get(id)
-                .is_none_or(|new_fp| known_map.get(id) != Some(new_fp));
-            if changed && state.hotreload_remove_provider(id).await {
-                tracing::info!(provider_id = id, "hot-reload: removed provider");
-                // Evict this provider's SSH keys immediately.
-                if let Some(ref sm) = ssh_manager {
-                    sm.remove_provider(id);
-                }
-            }
-        }
-
-        // Add providers that are new or changed.
-        let mut added_any = false;
-
-        // Re-scan WASM plugins if the new config references any provider
-        // kinds that the current registry doesn't know about.  This lets
-        // users deploy a new `.wasm` plugin and immediately reference it
-        // in config without restarting the daemon.
-        let needs_rescan = new_config.provider.iter().any(|entry| {
-            let id = entry.id.as_str();
-            let is_new = !known_ids.contains(id);
-            let is_changed = known_map
-                .get(id)
-                .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
-            (is_new || is_changed)
-                && !matches!(entry.kind.as_str(), "local")
-                && !plugin_registry.contains_kind(&entry.kind)
-        });
-        if needs_rescan {
-            tracing::info!("hot-reload: re-scanning WASM plugins for new provider kinds");
-            plugin_registry = rosec_wasm::discovery::scan_plugins(
-                new_config.service.wasm_prefer,
-                new_config.service.wasm_verify,
-            );
-        }
-
-        for entry in &new_config.provider {
-            let id = entry.id.as_str();
-            let is_new = !known_ids.contains(id);
-            let is_changed = known_map
-                .get(id)
-                .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
-            if is_new || is_changed {
-                // Skip disabled providers — they were already removed above
-                // (the fingerprint changed), so there is nothing to add back.
-                if !entry.enabled {
-                    tracing::info!(provider_id = id, "hot-reload: provider disabled, skipping");
-                    continue;
-                }
-                match entry.kind.as_str() {
-                    "local" => {
-                        let provider = build_vault_provider(entry);
-                        state.hotreload_add_provider(provider);
-                        tracing::info!(vault_id = id, "hot-reload: added vault");
-                        added_any = true;
-                    }
-                    _ => match build_single_provider(entry, &plugin_registry).await {
-                        Ok(provider) => {
-                            state.hotreload_add_provider(provider);
-                            tracing::info!(provider_id = id, "hot-reload: added provider");
-                            added_any = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!(provider_id = id, error = %e, "hot-reload: failed to construct provider");
-                        }
-                    },
-                }
-            }
-        }
-
-        // Re-wire callbacks after hot-reload so new providers get their event
-        // callbacks and nudge callbacks registered immediately.
-        if added_any {
-            wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
-        }
-
-        // ── Hot-reload non-provider config sections ────────────────────────
-        // These are live-updated in ServiceState and the Router so background
-        // tasks pick up the new values on their next tick without a restart.
-        let old_config = state.live_config();
-
-        // Track whether dedup-relevant state changed so we can rebuild the
-        // cache once at the end, ensuring all D-Bus clients see the new
-        // dedup results immediately.
-        let mut dedup_changed = false;
-
-        if new_config.service.dedup_strategy != old_config.service.dedup_strategy
-            || new_config.service.dedup_time_fallback != old_config.service.dedup_time_fallback
-        {
-            state
-                .router
-                .update_config(rosec_core::router::RouterConfig {
-                    dedup_strategy: new_config.service.dedup_strategy,
-                    dedup_time_fallback: new_config.service.dedup_time_fallback,
-                });
-            tracing::info!(
-                dedup_strategy = ?new_config.service.dedup_strategy,
-                dedup_time_fallback = ?new_config.service.dedup_time_fallback,
-                "hot-reload: service dedup config updated"
-            );
-            dedup_changed = true;
-        }
-
-        // Reorder providers to match the new config ordering.  This affects
-        // the Priority dedup strategy and tie-breaking in Newest.
-        let config_order: Vec<String> = new_config
-            .provider
-            .iter()
-            .filter(|e| e.enabled)
-            .map(|e| e.id.clone())
-            .collect();
-        if state.reorder_providers(&config_order) {
-            tracing::info!("hot-reload: provider order updated");
-            dedup_changed = true;
-        }
-
-        // If dedup config or provider order changed, force a cache rebuild
-        // so D-Bus clients see corrected results immediately.
-        if dedup_changed {
-            tracing::info!("hot-reload: rebuilding cache for new dedup/ordering config");
-            let state2 = Arc::clone(&state);
-            if let Err(e) = state2.rebuild_cache().await {
-                tracing::warn!(error = %e, "hot-reload: cache rebuild failed after dedup config change");
-            }
-        }
-        if new_config.service.refresh_interval_secs != old_config.service.refresh_interval_secs {
-            tracing::info!(
-                refresh_interval_secs = ?new_config.service.refresh_interval_secs,
-                "hot-reload: refresh_interval_secs updated (takes effect on next timer tick)"
-            );
-        }
-        // Log per-provider cache_sync_modifier changes.
-        for new_entry in &new_config.provider {
-            let old_fraction = old_config
-                .provider
-                .iter()
-                .find(|e| e.id == new_entry.id)
-                .and_then(|e| e.cache_sync_modifier);
-            if new_entry.cache_sync_modifier != old_fraction {
-                tracing::info!(
-                    provider = %new_entry.id,
-                    cache_sync_modifier = ?new_entry.cache_sync_modifier,
-                    effective = new_entry.effective_cache_sync_modifier(),
-                    "hot-reload: cache_sync_modifier updated (takes effect on next sync tick)"
-                );
-            }
-        }
-        if new_config.autolock != old_config.autolock {
-            tracing::info!(
-                idle_timeout_minutes = ?new_config.autolock.idle_timeout_minutes,
-                max_unlocked_minutes = ?new_config.autolock.max_unlocked_minutes,
-                on_session_lock = new_config.autolock.on_session_lock,
-                on_logout = new_config.autolock.on_logout,
-                "hot-reload: autolock policy updated"
-            );
-        }
-        if new_config.prompt.backend != old_config.prompt.backend
-            || new_config.prompt.args != old_config.prompt.args
-        {
-            tracing::info!(
-                backend = %new_config.prompt.backend,
-                "hot-reload: prompt config updated"
-            );
-        }
-
-        // Atomically push the new config into ServiceState so all live readers
-        // (autolock loop, cache rebuild, logind watcher, prompt) see it.
         state.update_live_config(new_config.clone());
-
         known = new_fingerprints;
         tracing::info!(
             "hot-reload complete ({} providers active)",
@@ -1694,6 +1525,188 @@ async fn config_watcher(
     }
 
     Ok(())
+}
+
+/// Apply a new fingerprint set to `ServiceState`: remove gone/changed providers,
+/// re-scan WASM plugins if the new config references unknown kinds, then add
+/// new/changed providers.  `plugin_registry` is updated in place if a re-scan
+/// happens.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_providers(
+    state: &Arc<rosec_secret_service::ServiceState>,
+    known: &[(String, String)],
+    new_fingerprints: &[(String, String)],
+    new_config: &Config,
+    ssh_manager: &Option<Arc<ssh::SshManager>>,
+    totp_manager: &Option<Arc<totp::TotpManager>>,
+    plugin_registry: &mut rosec_wasm::PluginRegistry,
+) {
+    let known_ids: HashSet<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
+    let known_map: std::collections::HashMap<&str, &str> = known
+        .iter()
+        .map(|(id, fp)| (id.as_str(), fp.as_str()))
+        .collect();
+    let new_map: std::collections::HashMap<&str, &str> = new_fingerprints
+        .iter()
+        .map(|(id, fp)| (id.as_str(), fp.as_str()))
+        .collect();
+
+    for id in &known_ids {
+        let changed = new_map
+            .get(id)
+            .is_none_or(|new_fp| known_map.get(id) != Some(new_fp));
+        if changed && state.hotreload_remove_provider(id).await {
+            tracing::info!(provider_id = id, "hot-reload: removed provider");
+            if let Some(sm) = ssh_manager {
+                sm.remove_provider(id);
+            }
+        }
+    }
+
+    let needs_rescan = new_config.provider.iter().any(|entry| {
+        let id = entry.id.as_str();
+        let is_new_or_changed = !known_ids.contains(id)
+            || known_map
+                .get(id)
+                .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
+        is_new_or_changed && entry.kind != "local" && !plugin_registry.contains_kind(&entry.kind)
+    });
+    if needs_rescan {
+        tracing::info!("hot-reload: re-scanning WASM plugins for new provider kinds");
+        *plugin_registry = rosec_wasm::discovery::scan_plugins(
+            new_config.service.wasm_prefer,
+            new_config.service.wasm_verify,
+        );
+    }
+
+    let mut added_any = false;
+    for entry in &new_config.provider {
+        let id = entry.id.as_str();
+        let is_new = !known_ids.contains(id);
+        let is_changed = known_map
+            .get(id)
+            .is_some_and(|old_fp| new_map.get(id).is_some_and(|new_fp| old_fp != new_fp));
+        if !(is_new || is_changed) {
+            continue;
+        }
+        if !entry.enabled {
+            tracing::info!(provider_id = id, "hot-reload: provider disabled, skipping");
+            continue;
+        }
+        let added = match entry.kind.as_str() {
+            "local" => {
+                let provider = build_vault_provider(entry);
+                state.hotreload_add_provider(provider);
+                tracing::info!(vault_id = id, "hot-reload: added vault");
+                true
+            }
+            _ => match build_single_provider(entry, plugin_registry).await {
+                Ok(provider) => {
+                    state.hotreload_add_provider(provider);
+                    tracing::info!(provider_id = id, "hot-reload: added provider");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(provider_id = id, error = %e, "hot-reload: failed to construct provider");
+                    false
+                }
+            },
+        };
+        added_any |= added;
+    }
+
+    if added_any {
+        wire_provider_callbacks(state, ssh_manager, totp_manager);
+    }
+}
+
+/// Apply non-provider config-section changes (dedup, ordering, autolock,
+/// prompt, refresh interval, per-provider sync fraction) and log each one.
+/// Rebuilds the cache if dedup or ordering changed.
+async fn log_non_provider_section_changes(
+    state: &Arc<rosec_secret_service::ServiceState>,
+    new_config: &Config,
+) {
+    let old_config = state.live_config();
+    let mut dedup_changed = false;
+
+    if new_config.service.dedup_strategy != old_config.service.dedup_strategy
+        || new_config.service.dedup_time_fallback != old_config.service.dedup_time_fallback
+    {
+        state
+            .router
+            .update_config(rosec_core::router::RouterConfig {
+                dedup_strategy: new_config.service.dedup_strategy,
+                dedup_time_fallback: new_config.service.dedup_time_fallback,
+            });
+        tracing::info!(
+            dedup_strategy = ?new_config.service.dedup_strategy,
+            dedup_time_fallback = ?new_config.service.dedup_time_fallback,
+            "hot-reload: service dedup config updated"
+        );
+        dedup_changed = true;
+    }
+
+    let config_order: Vec<String> = new_config
+        .provider
+        .iter()
+        .filter(|e| e.enabled)
+        .map(|e| e.id.clone())
+        .collect();
+    if state.reorder_providers(&config_order) {
+        tracing::info!("hot-reload: provider order updated");
+        dedup_changed = true;
+    }
+
+    if dedup_changed {
+        tracing::info!("hot-reload: rebuilding cache for new dedup/ordering config");
+        let state2 = Arc::clone(state);
+        if let Err(e) = state2.rebuild_cache().await {
+            tracing::warn!(error = %e, "hot-reload: cache rebuild failed after dedup config change");
+        }
+    }
+
+    if new_config.service.refresh_interval_secs != old_config.service.refresh_interval_secs {
+        tracing::info!(
+            refresh_interval_secs = ?new_config.service.refresh_interval_secs,
+            "hot-reload: refresh_interval_secs updated (takes effect on next timer tick)"
+        );
+    }
+
+    for new_entry in &new_config.provider {
+        let old_fraction = old_config
+            .provider
+            .iter()
+            .find(|e| e.id == new_entry.id)
+            .and_then(|e| e.cache_sync_modifier);
+        if new_entry.cache_sync_modifier != old_fraction {
+            tracing::info!(
+                provider = %new_entry.id,
+                cache_sync_modifier = ?new_entry.cache_sync_modifier,
+                effective = new_entry.effective_cache_sync_modifier(),
+                "hot-reload: cache_sync_modifier updated (takes effect on next sync tick)"
+            );
+        }
+    }
+
+    if new_config.autolock != old_config.autolock {
+        tracing::info!(
+            idle_timeout_minutes = ?new_config.autolock.idle_timeout_minutes,
+            max_unlocked_minutes = ?new_config.autolock.max_unlocked_minutes,
+            on_session_lock = new_config.autolock.on_session_lock,
+            on_logout = new_config.autolock.on_logout,
+            "hot-reload: autolock policy updated"
+        );
+    }
+
+    if new_config.prompt.backend != old_config.prompt.backend
+        || new_config.prompt.args != old_config.prompt.args
+    {
+        tracing::info!(
+            backend = %new_config.prompt.backend,
+            "hot-reload: prompt config updated"
+        );
+    }
 }
 
 /// Construct a single provider from a config entry.
