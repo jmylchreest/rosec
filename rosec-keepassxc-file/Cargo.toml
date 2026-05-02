@@ -25,3 +25,12 @@ zeroize = { version = "1", features = ["derive"] }
 
 # Semver matches the host's manifest type
 semver = { version = "1", features = ["serde"] }
+
+# Time conversions for entry creation/modification times
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# Base64 for binary-safe secret transport via the JSON protocol
+base64 = "0.22"
+
+# UUID parsing for resolving items by ID
+uuid = { version = "1", default-features = false }

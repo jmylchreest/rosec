@@ -756,11 +756,14 @@ dependencies = [
 name = "rosec-keepassxc-file"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "chrono",
  "extism-pdk",
  "keepass",
  "semver",
  "serde",
  "serde_json",
+ "uuid",
  "zeroize",
 ]
 

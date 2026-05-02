@@ -18,6 +18,7 @@ pub struct StatResponse {
     /// Modification time, seconds since UNIX epoch.  0 if unavailable.
     pub mtime_secs: u64,
     /// File size in bytes.
+    #[allow(dead_code)]
     pub size: u64,
 }
 

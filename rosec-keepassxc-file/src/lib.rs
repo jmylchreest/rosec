@@ -7,9 +7,9 @@
 //!
 //! # Status
 //!
-//! **EXPERIMENTAL.** Marked via `PluginManifest.experimental = true`.  The
-//! current build only declares itself; actual unlock/list_items wiring lands
-//! in a follow-up commit.
+//! **EXPERIMENTAL.** Marked via `PluginManifest.experimental = true`.
+//! Read-only: unlock decrypts via `keepass-rs`, but the plugin never writes
+//! back to the .kdbx file.  Capabilities advertised: `Sync` only.
 //!
 //! # Configuration
 //!
@@ -22,18 +22,16 @@
 //! # key_file = "/home/alice/Passwords.keyx"
 //! ```
 
-// Fields like `last_mtime_secs` and helpers like `host_file::read` are wired
-// up in the follow-up commit that adds real kdbx parsing.  Keep the scaffold
-// commit clippy-clean without scattering #[allow(dead_code)] across each
-// individual item.
-#![allow(dead_code)]
-
+mod cipher;
 mod host_file;
 mod protocol;
 
+use std::io::Cursor;
 use std::sync::{Mutex, MutexGuard};
 
+use base64::Engine;
 use extism_pdk::*;
+use keepass::{Database, DatabaseKey};
 
 use crate::protocol::*;
 
@@ -58,7 +56,7 @@ static STATE: WasmCell<Option<GuestState>> = WasmCell::new(None);
 
 struct GuestState {
     config: GuestConfig,
-    /// `None` when locked.  Will hold the decrypted database in a follow-up.
+    /// `None` when locked.
     auth: Option<AuthState>,
 }
 
@@ -70,10 +68,13 @@ struct GuestConfig {
     key_file: Option<String>,
 }
 
-/// Unlocked state — placeholder until kdbx parsing lands.
+/// Unlocked state — holds the decrypted KeePass database in memory.
 struct AuthState {
+    db: Database,
     /// Modification time of the file at unlock, for sync-on-mtime-change.
     last_mtime_secs: u64,
+    /// Epoch seconds when the database was loaded — exposed via `status`.
+    last_sync_epoch_secs: u64,
 }
 
 // ── plugin_manifest ───────────────────────────────────────────────────────────
@@ -143,24 +144,97 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
 #[plugin_fn]
 pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
     let guard = STATE.lock();
-    let locked = guard.as_ref().map(|s| s.auth.is_none()).unwrap_or(true);
+    let (locked, last_sync) = match guard.as_ref().and_then(|s| s.auth.as_ref()) {
+        Some(auth) => (false, Some(auth.last_sync_epoch_secs)),
+        None => (true, None),
+    };
     Ok(Json(StatusResponse {
         locked,
-        last_sync_epoch_secs: None,
+        last_sync_epoch_secs: last_sync,
     }))
 }
 
 // ── unlock ────────────────────────────────────────────────────────────────────
 
+fn open_database(path: &str, key_file: Option<&str>, password: &str) -> Result<Database, String> {
+    let bytes = host_file::read(path).map_err(|e| format!("read '{path}': {e}"))?;
+
+    let mut key = DatabaseKey::new().with_password(password);
+    if let Some(kf_path) = key_file {
+        let kf_bytes =
+            host_file::read(kf_path).map_err(|e| format!("read key file '{kf_path}': {e}"))?;
+        key = key
+            .with_keyfile(&mut Cursor::new(kf_bytes))
+            .map_err(|e| format!("invalid key file '{kf_path}': {e}"))?;
+    }
+
+    Database::open(&mut Cursor::new(bytes), key).map_err(|e| {
+        // Convert the keepass-rs error into a flat string.  The most common
+        // case is wrong password / corrupt header — surface the type.
+        format!("kdbx open failed: {e}")
+    })
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[plugin_fn]
-pub fn unlock(Json(_req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
-    // Stub — real kdbx open lands in the next commit.
-    Ok(Json(SimpleResponse {
-        ok: false,
-        error: Some("keepassxc-file unlock not yet implemented".into()),
-        error_kind: Some(ErrorKind::Unavailable),
-        two_factor_methods: None,
-    }))
+pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
+    let mut guard = STATE.lock();
+
+    let Some(state) = guard.as_mut() else {
+        return Ok(Json(SimpleResponse {
+            ok: false,
+            error: Some("plugin not initialised".into()),
+            error_kind: Some(ErrorKind::Unavailable),
+            two_factor_methods: None,
+        }));
+    };
+
+    let path = state.config.path.clone();
+    let key_file = state.config.key_file.clone();
+
+    let mtime_secs = host_file::stat(&path).map(|s| s.mtime_secs).unwrap_or(0);
+
+    match open_database(&path, key_file.as_deref(), &req.password) {
+        Ok(db) => {
+            state.auth = Some(AuthState {
+                db,
+                last_mtime_secs: mtime_secs,
+                last_sync_epoch_secs: now_epoch_secs(),
+            });
+            Ok(Json(SimpleResponse {
+                ok: true,
+                error: None,
+                error_kind: None,
+                two_factor_methods: None,
+            }))
+        }
+        Err(msg) => {
+            // Heuristic: keepass-rs returns an InvalidKey-shaped error string
+            // for wrong password / wrong key file.  Map that to AuthFailed
+            // so the rosec auth flow re-prompts for the master password
+            // rather than treating it as an unavailable provider.
+            let kind = if msg.contains("InvalidKey")
+                || msg.to_lowercase().contains("incorrect password")
+                || msg.contains("HmacBlock")
+            {
+                ErrorKind::AuthFailed
+            } else {
+                ErrorKind::Unavailable
+            };
+            Ok(Json(SimpleResponse {
+                ok: false,
+                error: Some(msg),
+                error_kind: Some(kind),
+                two_factor_methods: None,
+            }))
+        }
+    }
 }
 
 // ── lock ──────────────────────────────────────────────────────────────────────
@@ -169,6 +243,8 @@ pub fn unlock(Json(_req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>>
 pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
     if let Some(state) = guard.as_mut() {
+        // Drop the in-memory database — keepass-rs holds secrets in
+        // SecretBox/Zeroizing types that scrub on Drop.
         state.auth = None;
     }
     Ok(Json(SimpleResponse {
@@ -183,60 +259,201 @@ pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
 
 #[plugin_fn]
 pub fn sync(_: ()) -> FnResult<Json<SimpleResponse>> {
-    // Re-stat the file; if mtime changed, re-decrypt.  Not yet wired.
+    let mut guard = STATE.lock();
+    let Some(state) = guard.as_mut() else {
+        return Ok(Json(SimpleResponse {
+            ok: false,
+            error: Some("plugin not initialised".into()),
+            error_kind: Some(ErrorKind::Unavailable),
+            two_factor_methods: None,
+        }));
+    };
+    let Some(auth) = state.auth.as_mut() else {
+        // Locked — sync is a no-op until next unlock.
+        return Ok(Json(SimpleResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            two_factor_methods: None,
+        }));
+    };
+
+    // Re-stat the file; if mtime is unchanged, nothing to do.
+    let stat = match host_file::stat(&state.config.path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(Json(SimpleResponse {
+                ok: false,
+                error: Some(format!("stat: {e}")),
+                error_kind: Some(ErrorKind::Unavailable),
+                two_factor_methods: None,
+            }));
+        }
+    };
+
+    if stat.mtime_secs == auth.last_mtime_secs {
+        // Stamp last_sync so status reports the freshness check happened.
+        auth.last_sync_epoch_secs = now_epoch_secs();
+        return Ok(Json(SimpleResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            two_factor_methods: None,
+        }));
+    }
+
+    // File on disk changed.  Without the master password we cannot re-decrypt;
+    // ask the host to prompt for unlock again.  Returning Unavailable makes
+    // the host treat this as a transient error rather than a hard failure.
     Ok(Json(SimpleResponse {
-        ok: true,
-        error: None,
-        error_kind: None,
+        ok: false,
+        error: Some(
+            "kdbx file changed on disk — re-authenticate to pick up the new contents".into(),
+        ),
+        error_kind: Some(ErrorKind::Unavailable),
         two_factor_methods: None,
     }))
+}
+
+// ── helpers for item-level functions ─────────────────────────────────────────
+
+fn with_db<R>(f: impl FnOnce(&str, &Database) -> R) -> Result<R, String> {
+    let guard = STATE.lock();
+    let state = guard.as_ref().ok_or("plugin not initialised")?;
+    let auth = state.auth.as_ref().ok_or("provider locked")?;
+    Ok(f(&state.config.provider_id, &auth.db))
+}
+
+fn lookup_entry_by_id<'a>(db: &'a Database, id: &str) -> Option<keepass::db::EntryRef<'a>> {
+    let target = uuid::Uuid::parse_str(id).ok()?;
+    db.iter_all_entries().find(|e| e.id().uuid() == target)
+}
+
+fn matches_filter(
+    attrs: &std::collections::HashMap<String, String>,
+    filter: &std::collections::HashMap<String, String>,
+) -> bool {
+    filter
+        .iter()
+        .all(|(k, want)| attrs.get(k.as_str()).is_some_and(|got| got == want))
 }
 
 // ── list_items / search ───────────────────────────────────────────────────────
 
 #[plugin_fn]
 pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
-    Ok(Json(ItemListResponse {
-        ok: true,
-        error: None,
-        error_kind: None,
-        items: vec![],
-    }))
+    match with_db(|provider_id, db| {
+        db.iter_all_entries()
+            .map(|e| cipher::entry_to_item_meta(provider_id, db, &e))
+            .collect::<Vec<_>>()
+    }) {
+        Ok(items) => Ok(Json(ItemListResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            items,
+        })),
+        Err(msg) => Ok(Json(ItemListResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            items: vec![],
+        })),
+    }
 }
 
 #[plugin_fn]
-pub fn search(Json(_req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
-    Ok(Json(ItemListResponse {
-        ok: true,
-        error: None,
-        error_kind: None,
-        items: vec![],
-    }))
+pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
+    match with_db(|provider_id, db| {
+        db.iter_all_entries()
+            .map(|e| cipher::entry_to_item_meta(provider_id, db, &e))
+            .filter(|item| matches_filter(&item.attributes, &req.attributes))
+            .collect::<Vec<_>>()
+    }) {
+        Ok(items) => Ok(Json(ItemListResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            items,
+        })),
+        Err(msg) => Ok(Json(ItemListResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            items: vec![],
+        })),
+    }
 }
 
 // ── attribute access ──────────────────────────────────────────────────────────
 
 #[plugin_fn]
 pub fn get_item_attributes(
-    Json(_req): Json<ItemIdRequest>,
+    Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
-    Ok(Json(ItemAttributesResponse {
-        ok: false,
-        error: Some("not implemented".into()),
-        error_kind: Some(ErrorKind::NotFound),
-        public: Default::default(),
-        secret_names: vec![],
-    }))
+    let result: Result<Option<(_, _)>, String> = with_db(|provider_id, db| {
+        lookup_entry_by_id(db, &req.id).map(|entry| {
+            (
+                cipher::build_public_attrs(provider_id, db, &entry),
+                cipher::build_secret_names(&entry),
+            )
+        })
+    });
+
+    match result {
+        Ok(Some((public, secret_names))) => Ok(Json(ItemAttributesResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            public,
+            secret_names,
+        })),
+        Ok(None) => Ok(Json(ItemAttributesResponse {
+            ok: false,
+            error: Some(format!("item not found: {}", req.id)),
+            error_kind: Some(ErrorKind::NotFound),
+            public: Default::default(),
+            secret_names: vec![],
+        })),
+        Err(msg) => Ok(Json(ItemAttributesResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            public: Default::default(),
+            secret_names: vec![],
+        })),
+    }
 }
 
 #[plugin_fn]
-pub fn get_secret_attr(Json(_req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
-    Ok(Json(SecretAttrResponse {
-        ok: false,
-        error: Some("not implemented".into()),
-        error_kind: Some(ErrorKind::NotFound),
-        value_b64: None,
-    }))
+pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
+    let bytes_result: Result<Option<Vec<u8>>, String> = with_db(|_, db| {
+        lookup_entry_by_id(db, &req.id).and_then(|e| cipher::resolve_secret(&e, &req.attr))
+    });
+
+    match bytes_result {
+        Ok(Some(bytes)) => Ok(Json(SecretAttrResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            value_b64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+        })),
+        Ok(None) => Ok(Json(SecretAttrResponse {
+            ok: false,
+            error: Some(format!(
+                "attribute '{}' not found on item {}",
+                req.attr, req.id
+            )),
+            error_kind: Some(ErrorKind::NotFound),
+            value_b64: None,
+        })),
+        Err(msg) => Ok(Json(SecretAttrResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            value_b64: None,
+        })),
+    }
 }
 
 // ── Static metadata queried once at plugin load ───────────────────────────────
