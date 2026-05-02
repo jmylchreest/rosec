@@ -45,6 +45,34 @@ $XDG_RUNTIME_DIR/rosec/ssh/
 
 All `.pub` files contain the OpenSSH wire-format public key (the same line you would put in `~/.ssh/authorized_keys`).
 
+## Hooking it up to OpenSSH
+
+Two lines in `~/.ssh/config` are enough to wire rosec into your existing SSH workflow:
+
+```
+Include /run/user/1000/rosec/ssh/config.d/*
+
+Host *
+    IdentityAgent /run/user/1000/rosec/agent.sock
+```
+
+Replace `1000` with your UID (`id -u`) — or substitute `${XDG_RUNTIME_DIR}` if your `ssh` build supports it.
+
+**What each line does:**
+
+- **`Include …/config.d/*`** pulls in per-item snippets generated from any vault item that has an `ssh_host` attribute. Each snippet binds the matching `Host` pattern to its specific key + `IdentityAgent`. The directory lives on the FUSE mount, so the snippets stay in lock-step with your vault — nothing to regenerate manually.
+- **`Host * IdentityAgent …`** is the catch-all. It points everything else at the rosec agent socket so any key in the agent (whether or not it has `ssh_host` mappings) is offered for hosts not covered by a snippet.
+
+> Place the `Host *` block **after** the `Include` line. SSH applies per-parameter first-match-wins, so the snippets' `IdentityFile` / `IdentitiesOnly` settings need to be seen first.
+
+You can also export `SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock"` in your shell profile if you'd rather not edit `~/.ssh/config`. The env var and the config-based approach are interchangeable; pick whichever you prefer. Per-host snippets work either way.
+
+Quick check that everything's wired up:
+
+```bash
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock" ssh-add -l
+```
+
 ## SSH Key Sources
 
 rosec discovers SSH keys from any vault item regardless of type.  Two sources are supported:
@@ -147,16 +175,6 @@ If multiple vault items claim the same `ssh_host` pattern, the item with the **m
 
 This ensures generated configs are deterministic and consistent across vault re-syncs.
 
-### Activating the generated configs
-
-Add one line to `~/.ssh/config` (replace `1000` with your actual UID, or use the resolved path):
-
-```
-Include /run/user/1000/rosec/ssh/config.d/*
-```
-
-Because the `config.d/` directory lives on the FUSE mount, the snippets are always up-to-date — there is nothing to regenerate manually.  You can also copy individual `.conf` files to a static location if you prefer.
-
 ### Wildcard patterns in filenames
 
 OpenSSH `Host` patterns use `*` and `?` as wildcards.  Since `*` is illegal in FUSE filenames (it would trigger shell glob expansion), the `by-host/` directory substitutes `*` with `_star` and `?` with `_qmark`:
@@ -169,40 +187,7 @@ OpenSSH `Host` patterns use `*` and `?` as wildcards.  Since `*` is illegal in F
 
 The `config.d/` snippets use the original pattern in the `Host` line — the substitution only applies to FUSE filenames.
 
-## Using the SSH Agent
-
-### As the default agent (environment variable)
-
-```bash
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock"
-```
-
-Add this to your shell profile to make rosec the default agent for all SSH connections.
-
-### As the default agent (SSH config)
-
-Alternatively, you can set `IdentityAgent` globally in `~/.ssh/config` so that all connections use the rosec agent without needing the environment variable:
-
-```
-Host *
-    IdentityAgent /run/user/1000/rosec/agent.sock
-```
-
-Replace `1000` with your actual UID (or use `${XDG_RUNTIME_DIR}` if your SSH client supports it).  This approach is useful when you want rosec to handle *all* SSH connections, not just those with explicit `ssh_host` mappings.
-
-> **Note:** Place the `Host *` block **after** the `Include config.d/*` line so that per-host `IdentityFile` and `IdentitiesOnly` settings from the generated snippets take priority (SSH uses first-match-wins per parameter).
-
-### Per-host via generated config
-
-When you use the `Include config.d/*` approach, each generated snippet sets `IdentityAgent` explicitly, so neither `SSH_AUTH_SOCK` nor a `Host *` block is needed for those hosts.
-
-### Checking loaded keys
-
-```bash
-SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock" ssh-add -l
-```
-
-### Signing confirmation
+## Signing confirmation
 
 By default, signing operations are silent (like standard `ssh-agent`).  To require interactive confirmation before a key is used for signing, add a text custom field to the vault item:
 
