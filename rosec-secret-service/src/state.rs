@@ -9,6 +9,7 @@ use rosec_core::config::{Config, PromptConfig};
 use crate::item_cache::ItemCache;
 use crate::lock_policy::LockPolicy;
 use crate::prompt_manager::PromptManager;
+use crate::provider_registry::ProviderRegistry;
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
@@ -30,61 +31,17 @@ use crate::session::SessionManager;
 // error is `TwoFactorRequired`, consumed in `unlock.rs` when the sentinel
 // `"two_factor_required"` is detected.
 //
-/// Default ordered list of attribute name patterns tried when `return_attr` is
-/// not configured for a provider.
-///
-/// The service iterates these patterns in order, calling `get_secret_attr()` for
-/// the first sensitive attribute name that matches.  Falls back to
-/// `rosec_core::primary_secret()` if no attribute matches.
-const DEFAULT_RETURN_ATTR: &[&str] = &["password", "number", "private_key", "notes"];
-
-// TODO(P3-12): Decompose ServiceState into focused sub-structs.
-//
-// Current state: 15+ fields covering 4 distinct concerns.  Proposed grouping:
-//
-// 1. **ProviderRegistry** — `providers`, `provider_order`, `return_attr_map`,
-//    `collection_map`.  Owns provider lifecycle (add/remove/hot-reload) and
-//    per-provider config.  Methods: `get()`, `get_order()`, `add()`, `remove()`,
-//    `reload()`, `return_attr_for()`, `collection_for()`.
-//
-// 2. **ItemCache** — `items`, `registered_items`, `metadata_cache`, `last_sync`.
-//    Owns the D-Bus item registration and the persistent metadata cache.
-//    Methods: `rebuild()`, `search()`, `search_glob()`, `mark_locked()`,
-//    `mark_unlocked()`, `resolve_path()`.
-//
-// 3. **LockPolicy** — `last_activity`, `unlocked_since`, `unlocked_since_map`,
-//    `unlock_in_progress`, `sync_in_progress`.  Owns idle/max-unlocked
-//    tracking and sync coalescing.  Methods: `touch_activity()`,
-//    `mark_provider_unlocked()`, `clear_provider_unlocked()`,
-//    `should_idle_lock()`, `should_max_unlock_lock()`.
-//
-// 4. **PromptManager** — `prompt_counter`, `active_prompts`, `prompt_config`.
-//    Owns prompt subprocess lifecycle.  Methods: `next_path()`,
-//    `register()`, `dismiss()`, `update_config()`.
-//
-// Shared / top-level: `router`, `sessions`, `conn`, `tokio_handle`,
-// `live_config` stay on `ServiceState` as injected dependencies.
-//
-// Migration: introduce sub-structs one at a time behind the same public API.
-// Start with PromptManager (smallest, fewest callers), then LockPolicy,
-// then ItemCache, then ProviderRegistry.  Each step is independently testable.
+// State is decomposed into four focused sub-structs (P3-12 complete):
+// `registry` (providers + per-provider config), `cache` (item registry +
+// metadata cache), `locks` (idle/max-unlocked + unlock/sync mutexes), and
+// `prompts` (prompt registry + serialization mutex).  Methods on
+// `ServiceState` that need cross-cutting access (prompt deregistration uses
+// `conn`, hotreload_remove_provider purges `cache`) stay here as orchestration
+// wrappers; the sub-structs only own data.
 pub struct ServiceState {
-    /// All registered providers, keyed by provider ID.
-    /// Wrapped in `RwLock` to support hot-reload without restarting.
-    providers: RwLock<HashMap<String, Arc<dyn Provider>>>,
-    /// Provider IDs in the order they were configured (fan-out order).
-    provider_order: RwLock<Vec<String>>,
-    /// Per-provider ordered list of attribute name glob patterns used to
-    /// select which sensitive attribute to return for standard Secret Service
-    /// `GetSecret` calls (`return_attr` config field).
-    ///
-    /// Key: provider ID.  Value: ordered patterns (first match wins).
-    /// Falls back to `DEFAULT_RETURN_ATTR` when a provider has no entry.
-    return_attr_map: RwLock<HashMap<String, Vec<String>>>,
-    /// Optional collection label per provider.  When present, the label is
-    /// stamped onto every item from that provider as the `"collection"` attribute
-    /// at cache-build time.  Key: provider ID.  Value: collection label string.
-    collection_map: RwLock<HashMap<String, String>>,
+    /// Registered providers, ordering, and per-provider config (return-attr
+    /// patterns and optional collection label).  See [`ProviderRegistry`].
+    pub registry: ProviderRegistry,
     pub router: Arc<Router>,
     pub sessions: Arc<SessionManager>,
     /// Item registry (mounted items, registered D-Bus paths, last-sync
@@ -114,13 +71,8 @@ pub struct ServiceState {
 
 impl std::fmt::Debug for ServiceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let order = self
-            .provider_order
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
         f.debug_struct("ServiceState")
-            .field("providers", &order)
+            .field("providers", &self.registry.order_snapshot())
             .finish()
     }
 }
@@ -185,16 +137,8 @@ impl ServiceState {
         prompt_config: PromptConfig,
         initial_config: Config,
     ) -> Self {
-        let provider_order: Vec<String> = providers.iter().map(|b| b.id().to_string()).collect();
-        let providers_map: HashMap<String, Arc<dyn Provider>> = providers
-            .into_iter()
-            .map(|b| (b.id().to_string(), b))
-            .collect();
         Self {
-            providers: RwLock::new(providers_map),
-            provider_order: RwLock::new(provider_order),
-            return_attr_map: RwLock::new(return_attr_map),
-            collection_map: RwLock::new(collection_map),
+            registry: ProviderRegistry::new(providers, return_attr_map, collection_map),
             router,
             sessions,
             cache: ItemCache::new(),
@@ -258,19 +202,8 @@ impl ServiceState {
     }
 
     /// Return the `return_attr` patterns for a given provider ID.
-    ///
-    /// Returns the configured patterns if present, otherwise the default list.
     fn return_attr_patterns(&self, provider_id: &str) -> Vec<String> {
-        let map = self
-            .return_attr_map
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        map.get(provider_id).cloned().unwrap_or_else(|| {
-            DEFAULT_RETURN_ATTR
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect()
-        })
+        self.registry.return_attr_patterns(provider_id)
     }
 
     /// Resolve the primary secret for an item using `return_attr` patterns.
@@ -356,33 +289,17 @@ impl ServiceState {
 
     /// Return all providers in configured order.
     pub fn providers_ordered(&self) -> Vec<Arc<dyn Provider>> {
-        let order = self
-            .provider_order
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let map = self.providers.read().unwrap_or_else(|e| e.into_inner());
-        order
-            .iter()
-            .filter_map(|id| map.get(id))
-            .map(Arc::clone)
-            .collect()
+        self.registry.ordered()
     }
 
     /// Look up a provider by its ID.
     pub fn provider_by_id(&self, id: &str) -> Option<Arc<dyn Provider>> {
-        self.providers
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(id)
-            .map(Arc::clone)
+        self.registry.by_id(id)
     }
 
     /// Return a snapshot of the current provider ordering (config-driven).
     pub fn provider_order_snapshot(&self) -> Vec<String> {
-        self.provider_order
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.registry.order_snapshot()
     }
 
     /// Return the provider to use for write operations.
@@ -446,100 +363,45 @@ impl ServiceState {
 
     /// Return the number of currently registered providers.
     pub fn provider_count(&self) -> usize {
-        self.providers
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.registry.count()
     }
 
-    /// Hot-add a new provider at runtime.
-    ///
-    /// No-op if a provider with the same ID is already registered.
+    /// Hot-add a new provider at runtime.  No-op if the ID is already registered.
     pub fn hotreload_add_provider(&self, provider: Arc<dyn Provider>) {
-        let id = provider.id().to_string();
-        let mut map = self.providers.write().unwrap_or_else(|e| e.into_inner());
-        if map.contains_key(&id) {
-            return;
-        }
-        map.insert(id.clone(), provider);
-        drop(map);
-        self.provider_order
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(id);
+        self.registry.add(provider);
     }
 
-    /// Reorder `provider_order` to match the given config ordering.
-    ///
-    /// Provider ordering affects the `Priority` dedup strategy and
-    /// tie-breaking in `Newest`.  When the user reorders providers in
-    /// config without changing their fingerprints, the hot-reload loop
-    /// must call this so the new ordering takes effect.
+    /// Reorder providers to match the given config ordering.
     ///
     /// Returns `true` if the ordering actually changed.
     pub fn reorder_providers(&self, new_order: &[String]) -> bool {
-        let mut order = self
-            .provider_order
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        // Build the desired ordering: keep only IDs that are currently
-        // present in provider_order (don't add unknown IDs).
-        let current: HashSet<&str> = order.iter().map(String::as_str).collect();
-        let reordered: Vec<String> = new_order
-            .iter()
-            .filter(|id| current.contains(id.as_str()))
-            .cloned()
-            .collect();
-        // Append any IDs that exist in the current order but are missing
-        // from new_order (defensive — shouldn't happen in practice).
-        let new_set: HashSet<&str> = new_order.iter().map(String::as_str).collect();
-        let mut result = reordered;
-        for id in order.iter() {
-            if !new_set.contains(id.as_str()) {
-                result.push(id.clone());
-            }
-        }
-        if *order != result {
-            *order = result;
-            true
-        } else {
-            false
-        }
+        self.registry.reorder(new_order)
     }
 
     /// Hot-remove a provider at runtime.
     ///
-    /// Locks the provider first to zeroize in-memory secrets, then drops it.
+    /// Locks the provider first to zeroize in-memory secrets, then drops it,
+    /// and purges its items from both caches.
     /// Returns `true` if a provider with that ID was found and removed.
     pub async fn hotreload_remove_provider(&self, id: &str) -> bool {
-        // Take the provider out of the map under write lock, then lock+drop outside.
-        let provider = {
-            let mut map = self.providers.write().unwrap_or_else(|e| e.into_inner());
-            map.remove(id)
+        let Some(provider) = self.registry.remove(id) else {
+            return false;
         };
-        let found = provider.is_some();
-        if let Some(b) = provider
-            && let Err(e) = b.lock().await
-        {
+        if let Err(e) = provider.lock().await {
             warn!(provider_id = id, error = %e, "error locking provider during hot-remove");
         }
-        // b is dropped here — Zeroizing<> fields zeroize on drop
-        if found {
-            self.provider_order
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .retain(|existing| existing != id);
+        // provider is dropped here — Zeroizing<> fields zeroize on drop
+        drop(provider);
 
-            // Purge all items belonging to the removed provider from both caches
-            // so they don't appear as ghost entries in SearchItems results.
-            if let Ok(mut items) = self.cache.items.lock() {
-                items.retain(|_, meta| meta.provider_id != id);
-            }
-            if let Ok(mut cache) = self.cache.metadata_cache.lock() {
-                cache.retain(|_, meta| meta.provider_id != id);
-            }
+        // Purge all items belonging to the removed provider from both caches
+        // so they don't appear as ghost entries in SearchItems results.
+        if let Ok(mut items) = self.cache.items.lock() {
+            items.retain(|_, meta| meta.provider_id != id);
         }
-        found
+        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
+            cache.retain(|_, meta| meta.provider_id != id);
+        }
+        true
     }
 
     /// Allocate a unique prompt D-Bus path for the given provider.
@@ -1415,18 +1277,13 @@ impl ServiceState {
         password: &Zeroizing<String>,
         exclude_id: &str,
     ) {
-        let providers = {
-            let order = self
-                .provider_order
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            let map = self.providers.read().unwrap_or_else(|e| e.into_inner());
-            order
-                .iter()
-                .filter(|id| id.as_str() != exclude_id)
-                .filter_map(|id| map.get(id).map(|b| (id.clone(), Arc::clone(b))))
-                .collect::<Vec<_>>()
-        };
+        let providers: Vec<(String, Arc<dyn Provider>)> = self
+            .registry
+            .ordered()
+            .into_iter()
+            .filter(|p| p.id() != exclude_id)
+            .map(|p| (p.id().to_string(), p))
+            .collect();
 
         for (id, provider) in &providers {
             // Skip already-unlocked providers.
@@ -1967,12 +1824,7 @@ impl ServiceState {
                 Err(e) => return Err(map_provider_error(e)),
             };
             // Tag each item with its provider_id and optional collection label.
-            let collection_label: Option<String> = self
-                .collection_map
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&bid)
-                .cloned();
+            let collection_label = self.registry.collection_label(&bid);
             let tagged: Vec<ItemMeta> = fetched
                 .into_iter()
                 .map(|mut item| {

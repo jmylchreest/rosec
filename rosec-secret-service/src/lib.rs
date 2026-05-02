@@ -8,6 +8,7 @@ pub mod lock_policy;
 pub mod portal;
 pub mod prompt;
 pub mod prompt_manager;
+pub mod provider_registry;
 pub mod server;
 pub mod service;
 pub mod session;
