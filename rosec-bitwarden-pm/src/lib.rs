@@ -33,7 +33,10 @@ use zeroize::Zeroizing;
 use crate::api::{ApiClient, ServerUrls, TwoFactorSubmission};
 use crate::error::BitwardenError;
 use crate::protocol::*;
-use crate::vault::{CipherType, DecryptedCipher, DecryptedField, VaultState};
+use crate::vault::{
+    CipherType, DecryptedCard, DecryptedCipher, DecryptedField, DecryptedIdentity, DecryptedLogin,
+    DecryptedSshKey, VaultState,
+};
 
 // ═══════════════════════════════════════════════════════════════════
 // Global state
@@ -418,99 +421,106 @@ fn build_item_attributes(
     (public, secret_names)
 }
 
+/// Convert a `Zeroizing<String>` to bytes (for secret attribute returns).
+fn zeroizing_to_bytes(s: &Zeroizing<String>) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
 /// Resolve a named secret attribute from a decrypted cipher.
 ///
-/// Returns base64-encoded secret bytes, or `None` if the attribute
-/// doesn't exist or has no value.
+/// Returns the secret value as bytes, or `None` if the attribute doesn't
+/// exist on this cipher type or has no value.
 ///
 /// Port of `BitwardenProvider::resolve_secret_attr`.
 fn resolve_secret_attr(dc: &DecryptedCipher, attr: &str) -> Option<Vec<u8>> {
-    /// Helper: convert a `Zeroizing<String>` to bytes.
-    fn to_bytes(s: &Zeroizing<String>) -> Vec<u8> {
-        s.as_bytes().to_vec()
-    }
-
-    // notes — common to all types
     if attr == "notes" {
-        return dc.notes.as_ref().map(to_bytes);
+        return dc.notes.as_ref().map(zeroizing_to_bytes);
     }
-
-    // Custom fields (prefixed with "custom.")
     if let Some(custom_name) = attr.strip_prefix("custom.") {
-        let (base_name, occurrence) = match custom_name.rsplit_once('.') {
-            Some((base, suffix)) => match suffix.parse::<usize>() {
-                Ok(idx) => (base, idx),
-                Err(_) => (custom_name, 0),
-            },
-            None => (custom_name, 0),
-        };
-        let mut count = 0usize;
-        for field in &dc.fields {
-            if field.name.as_deref() == Some(base_name) {
-                if count == occurrence {
-                    return field.value.as_ref().map(to_bytes);
-                }
-                count += 1;
-            }
-        }
-        return None;
+        return resolve_custom_field(dc, custom_name);
     }
-
-    // Type-specific attributes
     match dc.cipher_type {
-        CipherType::Login => {
-            let login = dc.login.as_ref()?;
-            match attr {
-                "password" => login.password.as_ref().map(to_bytes),
-                "totp" => login.totp.as_ref().map(to_bytes),
-                "username" => login.username.as_ref().map(to_bytes),
-                _ => None,
-            }
-        }
-        CipherType::Card => {
-            let card = dc.card.as_ref()?;
-            match attr {
-                "cardholder" => card.cardholder_name.as_ref().map(to_bytes),
-                "number" => card.number.as_ref().map(to_bytes),
-                "exp_month" => card.exp_month.as_ref().map(to_bytes),
-                "exp_year" => card.exp_year.as_ref().map(to_bytes),
-                "code" => card.code.as_ref().map(to_bytes),
-                _ => None,
-            }
-        }
-        CipherType::SshKey => {
-            let ssh = dc.ssh_key.as_ref()?;
-            match attr {
-                "private_key" => ssh.private_key.as_ref().map(to_bytes),
-                _ => None,
-            }
-        }
-        CipherType::Identity => {
-            let ident = dc.identity.as_ref()?;
-            match attr {
-                "title" => ident.title.as_ref().map(to_bytes),
-                "first_name" => ident.first_name.as_ref().map(to_bytes),
-                "middle_name" => ident.middle_name.as_ref().map(to_bytes),
-                "last_name" => ident.last_name.as_ref().map(to_bytes),
-                "username" => ident.username.as_ref().map(to_bytes),
-                "company" => ident.company.as_ref().map(to_bytes),
-                "ssn" => ident.ssn.as_ref().map(to_bytes),
-                "passport_number" => ident.passport_number.as_ref().map(to_bytes),
-                "license_number" => ident.license_number.as_ref().map(to_bytes),
-                "email" => ident.email.as_ref().map(to_bytes),
-                "phone" => ident.phone.as_ref().map(to_bytes),
-                "address1" => ident.address1.as_ref().map(to_bytes),
-                "address2" => ident.address2.as_ref().map(to_bytes),
-                "address3" => ident.address3.as_ref().map(to_bytes),
-                "city" => ident.city.as_ref().map(to_bytes),
-                "state" => ident.state.as_ref().map(to_bytes),
-                "postal_code" => ident.postal_code.as_ref().map(to_bytes),
-                "country" => ident.country.as_ref().map(to_bytes),
-                _ => None,
-            }
-        }
+        CipherType::Login => resolve_login_attr(dc.login.as_ref()?, attr),
+        CipherType::Card => resolve_card_attr(dc.card.as_ref()?, attr),
+        CipherType::SshKey => resolve_ssh_key_attr(dc.ssh_key.as_ref()?, attr),
+        CipherType::Identity => resolve_identity_attr(dc.identity.as_ref()?, attr),
         CipherType::SecureNote | CipherType::Unknown(_) => None,
     }
+}
+
+/// Look up `custom.<name>[.<occurrence>]` against the cipher's custom fields.
+fn resolve_custom_field(dc: &DecryptedCipher, custom_name: &str) -> Option<Vec<u8>> {
+    let (base_name, occurrence) = match custom_name.rsplit_once('.') {
+        Some((base, suffix)) => match suffix.parse::<usize>() {
+            Ok(idx) => (base, idx),
+            Err(_) => (custom_name, 0),
+        },
+        None => (custom_name, 0),
+    };
+    let mut count = 0usize;
+    for field in &dc.fields {
+        if field.name.as_deref() == Some(base_name) {
+            if count == occurrence {
+                return field.value.as_ref().map(zeroizing_to_bytes);
+            }
+            count += 1;
+        }
+    }
+    None
+}
+
+fn resolve_login_attr(login: &DecryptedLogin, attr: &str) -> Option<Vec<u8>> {
+    let value = match attr {
+        "password" => login.password.as_ref(),
+        "totp" => login.totp.as_ref(),
+        "username" => login.username.as_ref(),
+        _ => None,
+    };
+    value.map(zeroizing_to_bytes)
+}
+
+fn resolve_card_attr(card: &DecryptedCard, attr: &str) -> Option<Vec<u8>> {
+    let value = match attr {
+        "cardholder" => card.cardholder_name.as_ref(),
+        "number" => card.number.as_ref(),
+        "exp_month" => card.exp_month.as_ref(),
+        "exp_year" => card.exp_year.as_ref(),
+        "code" => card.code.as_ref(),
+        _ => None,
+    };
+    value.map(zeroizing_to_bytes)
+}
+
+fn resolve_ssh_key_attr(ssh: &DecryptedSshKey, attr: &str) -> Option<Vec<u8>> {
+    match attr {
+        "private_key" => ssh.private_key.as_ref().map(zeroizing_to_bytes),
+        _ => None,
+    }
+}
+
+fn resolve_identity_attr(ident: &DecryptedIdentity, attr: &str) -> Option<Vec<u8>> {
+    let value = match attr {
+        "title" => ident.title.as_ref(),
+        "first_name" => ident.first_name.as_ref(),
+        "middle_name" => ident.middle_name.as_ref(),
+        "last_name" => ident.last_name.as_ref(),
+        "username" => ident.username.as_ref(),
+        "company" => ident.company.as_ref(),
+        "ssn" => ident.ssn.as_ref(),
+        "passport_number" => ident.passport_number.as_ref(),
+        "license_number" => ident.license_number.as_ref(),
+        "email" => ident.email.as_ref(),
+        "phone" => ident.phone.as_ref(),
+        "address1" => ident.address1.as_ref(),
+        "address2" => ident.address2.as_ref(),
+        "address3" => ident.address3.as_ref(),
+        "city" => ident.city.as_ref(),
+        "state" => ident.state.as_ref(),
+        "postal_code" => ident.postal_code.as_ref(),
+        "country" => ident.country.as_ref(),
+        _ => None,
+    };
+    value.map(zeroizing_to_bytes)
 }
 
 // ── SSH key helpers ──────────────────────────────────────────────
