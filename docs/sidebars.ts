@@ -26,6 +26,12 @@ const sidebars: SidebarsConfig = {
     },
     'troubleshooting',
     'faq',
+    {
+      type: 'category',
+      label: 'Developers',
+      collapsed: true,
+      items: ['developers/wasm-provider-guide'],
+    },
   ],
 };
 

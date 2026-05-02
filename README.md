@@ -107,7 +107,7 @@ A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.gi
 
 **How is the master password stored?** It isn't — only a wrapped key. PBKDF2-SHA256 with a per-vault salt, AES-256 wrap. Unlocking re-derives in memory; locking zeroes it.
 
-**Can I write a custom provider?** Yes — providers other than `local` are Extism WASM guests. See `notes/internal/wasm-provider-guide.md` in this repo.
+**Can I write a custom provider?** Yes — providers other than `local` are Extism WASM guests. See the [WASM Provider Guide](https://jmylchreest.github.io/rosec/developers/wasm-provider-guide).
 
 **`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
 

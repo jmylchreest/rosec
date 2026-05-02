@@ -1,8 +1,12 @@
-# WASM Provider Development Guide
+---
+sidebar_position: 1
+---
 
-This document describes the contract between rosec's WASM host (`rosec-wasm`)
-and guest plugins.  Follow these rules to build a well-behaved, crash-resilient
-provider.
+# WASM Provider Guide
+
+This guide is for **plugin authors** writing a new WASM-based rosec provider, or anyone curious about the boundary between the daemon and its sandboxed plugins. End-users setting up an existing provider should look in [Providers](../providers/capabilities) instead.
+
+The contract below is what `rosec-wasm` (the host) expects of your `*.wasm` guest. Three reference implementations exist in the rosec repo (`rosec-bitwarden-pm`, `rosec-gnome-keyring`, `rosec-keepassxc-file`); skim them alongside this doc.
 
 ## Architecture overview
 
@@ -314,8 +318,8 @@ Create + Chmod) only produces one guest call. The guest's handler should be
 idempotent — typically just invalidate any cached state and let the next
 `sync()` re-read.
 
-The reference implementation is [`rosec-keepassxc-file`](../rosec-keepassxc-file)
-(see [providers/keepassxc-file.md](providers/keepassxc-file.md)).
+The reference implementation is `rosec-keepassxc-file` in the rosec repo;
+end-user setup is documented at [providers/keepassxc-file](../providers/keepassxc-file).
 
 ## Plugin lifecycle and recreation
 

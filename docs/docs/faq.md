@@ -34,7 +34,7 @@ Once discovered, keys are exposed through the rosec SSH agent at `$XDG_RUNTIME_D
 
 ## Can I write my own provider?
 
-Yes — providers other than `local` are Extism WASM guests. You implement a small set of `plugin_fn` exports and the daemon does the rest (D-Bus surface, prompting, locking, sync, SSH agent integration). See `notes/internal/wasm-provider-guide.md` in the repo for the function contract and host-import reference.
+Yes — providers other than `local` are Extism WASM guests. You implement a small set of `plugin_fn` exports and the daemon does the rest (D-Bus surface, prompting, locking, sync, SSH agent integration). See the [WASM Provider Guide](./developers/wasm-provider-guide) for the function contract, host-import reference, and offline-cache protocol.
 
 ## Why two FUSE mounts and not just one?
 

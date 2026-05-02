@@ -17,11 +17,13 @@ const config: Config = {
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
 
-  onBrokenLinks: 'warn',
+  // Fail the build (and thus CI) on broken links — keeps the published
+  // site honest as docs evolve.
+  onBrokenLinks: 'throw',
 
   markdown: {
     hooks: {
-      onBrokenMarkdownLinks: 'warn',
+      onBrokenMarkdownLinks: 'throw',
     },
   },
 
