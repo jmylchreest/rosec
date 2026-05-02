@@ -26,10 +26,12 @@ use std::sync::{Arc, Mutex};
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use serde::Serialize;
 
+use crate::path_util::expand_tilde;
+
 /// Namespace where the guest-side `#[host_fn] extern "ExtismHost"` import
 /// declarations are looked up.  Matches the default used by `extism-pdk`
 /// when no explicit namespace is given on the `extern` block.
-const HOST_USER_MODULE: &str = "extism:host/user";
+pub(crate) const HOST_USER_MODULE: &str = "extism:host/user";
 
 /// State shared by `file_read` and `file_stat` — the canonicalised allow-list.
 ///
@@ -115,22 +117,6 @@ fn check_allowed(state: &FileState, path: &Path) -> Result<PathBuf, extism::Erro
         )));
     }
     Ok(canon)
-}
-
-/// Expand a leading `~/` against `$HOME`.  Other paths pass through.
-fn expand_tilde(path: &Path) -> PathBuf {
-    let s = match path.to_str() {
-        Some(s) => s,
-        None => return path.to_path_buf(),
-    };
-    if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        let mut p = PathBuf::from(home);
-        p.push(rest);
-        return p;
-    }
-    path.to_path_buf()
 }
 
 /// `file_read(path: string) -> bytes`

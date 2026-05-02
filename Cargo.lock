@@ -4334,6 +4334,7 @@ dependencies = [
  "hmac",
  "http",
  "minisign-verify",
+ "notify",
  "rand 0.10.1",
  "rosec-core",
  "semver",

@@ -406,12 +406,16 @@ fn probe_plugin(wasm_path: &Path) -> Result<PluginManifest, anyhow::Error> {
     // No allowed hosts for probing — plugin_manifest must not make HTTP requests.
     let manifest = Manifest::new([wasm]);
 
-    // Register the host_file functions with an empty allow-list so plugins
-    // that import them (e.g. keepassxc-file) link successfully during the
-    // probe phase.  `plugin_manifest` is metadata-only and should never
-    // actually call file_read/file_stat — if it does, the empty allow-list
-    // returns an error and the probe fails cleanly.
-    let host_fns = crate::host_file::build_file_host_functions(&[]);
+    // Register the host_file and host_watch functions with empty allow-lists
+    // so plugins that import them (e.g. keepassxc-file) link successfully
+    // during the probe phase.  `plugin_manifest` is metadata-only and should
+    // never actually call them — if it does, the empty allow-list rejects
+    // the call and the probe fails cleanly.  The watch receiver is dropped
+    // immediately, so any guest call to `register_watch` would push events
+    // into a dead channel — also harmless.
+    let mut host_fns = crate::host_file::build_file_host_functions(&[]);
+    let (watch_fns, _watch_rx) = crate::host_watch::build_watch_host_functions(&[]);
+    host_fns.extend(watch_fns);
 
     let mut plugin = PluginBuilder::new(manifest)
         .with_wasi(true)

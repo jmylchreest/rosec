@@ -139,6 +139,22 @@ pub struct WasmProvider {
     /// Present when the provider is unlocked and declares `Capability::Notifications`.
     /// Dropped on lock (cancels the WebSocket connection).
     notifications_handle: std::sync::Mutex<Option<crate::notifications::NotificationsHandle>>,
+    /// Background dispatcher for `host_watch` events.  Drains the receiver
+    /// returned by `build_watch_host_functions` and calls into the guest's
+    /// `on_path_changed` export.  Replaced whenever the underlying plugin
+    /// is recreated (since each plugin instance owns its own watcher).
+    /// Aborted on drop so the task terminates cleanly with the provider.
+    watch_dispatcher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for WasmProvider {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.watch_dispatcher.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 impl std::fmt::Debug for WasmProvider {
@@ -210,6 +226,9 @@ impl WasmProvider {
         host_fns.extend(crate::host_file::build_file_host_functions(
             &config.allowed_files,
         ));
+        let (watch_fns, watch_rx) =
+            crate::host_watch::build_watch_host_functions(&config.allowed_files);
+        host_fns.extend(watch_fns);
         let mut plugin = Plugin::new(&manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to load WASM plugin '{}': {e}",
@@ -238,9 +257,12 @@ impl WasmProvider {
             "WASM provider initialised",
         );
 
+        let plugin = Arc::new(Mutex::new(plugin));
+        let dispatcher = spawn_watch_dispatcher(config.id.clone(), plugin.clone(), watch_rx);
+
         Ok(Self {
             config,
-            plugin: Arc::new(Mutex::new(plugin)),
+            plugin,
             manifest,
             capabilities,
             attribute_descriptors,
@@ -255,6 +277,7 @@ impl WasmProvider {
             last_cache_write: std::sync::Mutex::new(None),
             last_cache_blob_hash: std::sync::Mutex::new(None),
             notifications_handle: std::sync::Mutex::new(None),
+            watch_dispatcher: std::sync::Mutex::new(Some(dispatcher)),
         })
     }
 
@@ -270,11 +293,20 @@ impl WasmProvider {
     fn recreate_plugin(
         manifest: &Manifest,
         config: &WasmProviderConfig,
-    ) -> Result<Plugin, ProviderError> {
+    ) -> Result<
+        (
+            Plugin,
+            tokio::sync::mpsc::UnboundedReceiver<crate::host_watch::WatchEvent>,
+        ),
+        ProviderError,
+    > {
         let mut host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
         host_fns.extend(crate::host_file::build_file_host_functions(
             &config.allowed_files,
         ));
+        let (watch_fns, watch_rx) =
+            crate::host_watch::build_watch_host_functions(&config.allowed_files);
+        host_fns.extend(watch_fns);
         let mut plugin = Plugin::new(manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to recreate WASM plugin '{}': {e}",
@@ -285,7 +317,7 @@ impl WasmProvider {
         // Re-run init with the same config.
         init_guest(&mut plugin, config, "re-init")?;
 
-        Ok(plugin)
+        Ok((plugin, watch_rx))
     }
 
     /// Recreate the plugin after a failed `plugin.call()`.
@@ -314,10 +346,20 @@ impl WasmProvider {
             "WASM plugin call failed, recreating instance",
         );
         match Self::recreate_plugin(&self.manifest, &self.config) {
-            Ok(new_plugin) => {
+            Ok((new_plugin, watch_rx)) => {
                 *plugin = new_plugin;
                 self.poisoned
                     .store(false, std::sync::atomic::Ordering::Release);
+                // Replace the watch dispatcher: the old one's sender is dropped
+                // when the old plugin's host fns are dropped, so the old task
+                // will exit naturally.  Spawn a fresh task bound to the new plugin.
+                let dispatcher =
+                    spawn_watch_dispatcher(self.config.id.clone(), self.plugin.clone(), watch_rx);
+                if let Ok(mut guard) = self.watch_dispatcher.lock()
+                    && let Some(old) = guard.replace(dispatcher)
+                {
+                    old.abort();
+                }
                 debug!(
                     provider = %self.config.id,
                     "plugin instance recreated successfully (now locked)",
@@ -1841,6 +1883,80 @@ fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta
             .map(|s| UNIX_EPOCH + Duration::from_secs(s)),
         locked: false,
     }
+}
+
+/// Spawn a tokio task that drains `host_watch` events and dispatches them
+/// into the guest's `on_path_changed` export.
+///
+/// Events are coalesced inside a 500 ms quiet window before each dispatch:
+/// a single editor save typically fires 3-5 inotify events (Modify, Create,
+/// Chmod, etc.) and we only want one guest call per logical change.
+///
+/// The task exits when the receiver returns `None` — which happens once the
+/// last `WatchEvent` sender is dropped (i.e. the plugin holding the watch
+/// host fns has been dropped).  The handle is also `abort()`ed in
+/// `WasmProvider::Drop`.
+fn spawn_watch_dispatcher(
+    provider_id: String,
+    plugin: Arc<Mutex<Plugin>>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::host_watch::WatchEvent>,
+) -> tokio::task::JoinHandle<()> {
+    use std::collections::HashMap;
+    const DEBOUNCE: Duration = Duration::from_millis(500);
+
+    tokio::spawn(async move {
+        loop {
+            let Some(first) = rx.recv().await else {
+                debug!(provider = %provider_id, "host_watch dispatcher: channel closed, exiting");
+                return;
+            };
+            // Coalesce: keep the most recent kind seen for each path within
+            // the debounce window.
+            let mut pending: HashMap<String, String> = HashMap::new();
+            pending.insert(first.path.clone(), first.kind.clone());
+
+            let deadline = tokio::time::Instant::now() + DEBOUNCE;
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(evt)) => {
+                        pending.insert(evt.path, evt.kind);
+                    }
+                    Ok(None) => break,
+                    Err(_) => break, // deadline reached
+                }
+            }
+
+            for (path, kind) in pending {
+                let payload = crate::host_watch::WatchEvent { path, kind };
+                let plugin = plugin.clone();
+                let mut p = plugin.lock().await;
+                if !p.function_exists("on_path_changed") {
+                    continue;
+                }
+                let json = match serde_json::to_vec(&payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(provider = %provider_id, error = %e, "host_watch: serialize failed");
+                        continue;
+                    }
+                };
+                debug!(
+                    provider = %provider_id,
+                    path = %payload.path,
+                    kind = %payload.kind,
+                    "host_watch: dispatching on_path_changed",
+                );
+                if let Err(e) = p.call::<&[u8], &[u8]>("on_path_changed", &json) {
+                    debug!(
+                        provider = %provider_id,
+                        path = %payload.path,
+                        error = %e,
+                        "on_path_changed call failed",
+                    );
+                }
+            }
+        }
+    })
 }
 
 /// Convert a `WasmSshKeyMeta` to a core `SshKeyMeta`.
