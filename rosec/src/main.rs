@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -14,6 +14,7 @@ use rosec_core::config_edit;
 
 mod cli;
 mod enable;
+mod item;
 mod provider;
 
 use cli::*;
@@ -50,7 +51,7 @@ async fn main() -> Result<()> {
         Commands::Status => cmd_status().await,
         Commands::Sync => cmd_sync().await,
         Commands::Search(args) => cmd_search(args).await,
-        Commands::Item { action } => cmd_item(action).await,
+        Commands::Item { action } => item::dispatch(action).await,
         Commands::Get(args) => cmd_get(args).await,
         Commands::Totp(cmd) => cmd_totp_dispatch(cmd).await,
         Commands::Inspect(args) => cmd_inspect(args).await,
@@ -170,7 +171,7 @@ fn extract_locked_provider(err: &zbus::Error) -> Option<String> {
 /// Returns `Ok(true)` if the provider was successfully unlocked (caller should
 /// retry the original operation).  Returns `Ok(false)` if the error was not a
 /// locked sentinel (caller should propagate the original error).
-async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Result<bool> {
+pub(crate) async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Result<bool> {
     // Only trigger for the locked sentinel — not for generic errors.
     if extract_locked_provider(err).is_none() {
         return Ok(false);
@@ -188,7 +189,7 @@ async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Result<bool> {
 /// the newly-unlocked items.
 ///
 /// Credentials never cross D-Bus — the daemon handles everything internally.
-async fn trigger_unlock(conn: &Connection) -> Result<()> {
+pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
     use futures_util::StreamExt as _;
 
     // Build a Secret Service proxy for Unlock().
@@ -947,7 +948,7 @@ async fn cmd_sync() -> Result<()> {
 ///
 /// Locked providers are skipped — the caller handles unlock via the Prompt flow
 /// and can call this again afterwards to sync the newly-unlocked providers.
-async fn preemptive_sync(conn: &Connection) -> Result<()> {
+pub(crate) async fn preemptive_sync(conn: &Connection) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1008,7 +1009,7 @@ async fn preemptive_sync(conn: &Connection) -> Result<()> {
 ///
 /// Used by `cmd_search` with `--sync` to decide whether an unlock prompt is
 /// worthwhile — there is no point prompting for a provider that cannot sync.
-async fn any_syncable_providers_locked(conn: &Connection) -> Result<bool> {
+pub(crate) async fn any_syncable_providers_locked(conn: &Connection) -> Result<bool> {
     let proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1026,7 +1027,7 @@ async fn any_syncable_providers_locked(conn: &Connection) -> Result<bool> {
 
 /// Output format for `rosec search`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum OutputFormat {
+pub(crate) enum OutputFormat {
     Human,
     Table,
     Kv,
@@ -1034,7 +1035,7 @@ enum OutputFormat {
 }
 
 /// Convert a clap `Format` enum to the internal `OutputFormat`.
-fn cli_format_to_output(f: Format) -> OutputFormat {
+pub(crate) fn cli_format_to_output(f: Format) -> OutputFormat {
     match f {
         Format::Human => OutputFormat::Human,
         Format::Table => OutputFormat::Table,
@@ -1044,11 +1045,11 @@ fn cli_format_to_output(f: Format) -> OutputFormat {
 }
 
 /// All data fetched for a single search result item.
-struct ItemSummary {
-    label: String,
-    attrs: HashMap<String, String>,
-    path: String,
-    locked: bool,
+pub(crate) struct ItemSummary {
+    pub(crate) label: String,
+    pub(crate) attrs: HashMap<String, String>,
+    pub(crate) path: String,
+    pub(crate) locked: bool,
 }
 
 impl ItemSummary {
@@ -1068,13 +1069,13 @@ impl ItemSummary {
 }
 
 /// Returns true if the value string contains any wildmatch glob metacharacters.
-fn is_glob(s: &str) -> bool {
+pub(crate) fn is_glob(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
 }
 
 /// Spec-compliant exact-match search via `org.freedesktop.Secret.Service.SearchItems`.
 /// Handles lazy-unlock automatically unless `no_unlock` is set.
-async fn search_exact(
+pub(crate) async fn search_exact(
     conn: &Connection,
     attrs: &HashMap<String, String>,
     no_unlock: bool,
@@ -1112,7 +1113,7 @@ async fn search_exact(
 ///
 /// Call this once per command and pass the result as `is_rosecd: bool` to
 /// avoid redundant round-trips.
-async fn is_rosecd(conn: &Connection) -> bool {
+pub(crate) async fn is_rosecd(conn: &Connection) -> bool {
     let proxy = match zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1130,7 +1131,7 @@ async fn is_rosecd(conn: &Connection) -> bool {
 /// If rosecd is running with no configured providers, print a warning to stderr
 /// and suggest next steps.  Non-fatal — the caller continues normally (an empty
 /// provider list returns empty results, which is correct behaviour).
-async fn warn_if_no_providers(conn: &Connection) {
+pub(crate) async fn warn_if_no_providers(conn: &Connection) {
     let Ok(proxy) = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1161,7 +1162,7 @@ async fn warn_if_no_providers(conn: &Connection) {
 /// Keyring, KWallet, or any other spec-compliant Secret Service daemon.
 ///
 /// When `no_unlock` is true, the lazy-unlock retry is suppressed.
-async fn search_with_glob_fallback(
+pub(crate) async fn search_with_glob_fallback(
     conn: &Connection,
     attrs: &HashMap<String, String>,
     is_rosecd: bool,
@@ -1356,7 +1357,11 @@ async fn cmd_search(args: SearchArgs) -> Result<()> {
 }
 
 /// Fetch Label and Attributes for an item into a structured summary.
-async fn fetch_item_data(conn: &zbus::Connection, path: &str, locked: bool) -> Result<ItemSummary> {
+pub(crate) async fn fetch_item_data(
+    conn: &zbus::Connection,
+    path: &str,
+    locked: bool,
+) -> Result<ItemSummary> {
     let item_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -1499,7 +1504,7 @@ pub(crate) fn fit_columns(cols: &mut [ColSpec], gap: usize, avail: usize) -> boo
 /// Column widths adapt to the terminal width.  When the table is too wide,
 /// columns are shrunk in reverse priority order (URI first, then USERNAME,
 /// NAME, PROVIDER, ID, TYPE last).
-fn print_search_table(items: &[ItemSummary], show_path: bool) {
+pub(crate) fn print_search_table(items: &[ItemSummary], show_path: bool) {
     const H_TYPE: &str = "TYPE";
     const H_PROV: &str = "PROVIDER";
     const H_NAME: &str = "NAME";
@@ -1674,7 +1679,7 @@ fn print_search_table(items: &[ItemSummary], show_path: bool) {
 }
 
 /// Print results as key=value pairs (one item block per result).
-fn print_search_kv(items: &[ItemSummary], show_path: bool) {
+pub(crate) fn print_search_kv(items: &[ItemSummary], show_path: bool) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             println!();
@@ -1701,7 +1706,7 @@ fn print_search_kv(items: &[ItemSummary], show_path: bool) {
 }
 
 /// Print results as a JSON array.
-fn print_search_json(items: &[ItemSummary]) -> Result<()> {
+pub(crate) fn print_search_json(items: &[ItemSummary]) -> Result<()> {
     let json_items: Vec<serde_json::Value> = items
         .iter()
         .map(|item| {
@@ -1751,7 +1756,7 @@ fn print_search_json(items: &[ItemSummary]) -> Result<()> {
 /// Returns `(path, is_locked)` where `is_locked` is `true` if the item was
 /// found in the `locked` list of `SearchItems`.  For full paths and legacy
 /// segments (where we don't call `SearchItems`), `is_locked` is `false`.
-async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool)> {
+pub(crate) async fn resolve_item_path(conn: &Connection, raw: &str) -> Result<(String, bool)> {
     if raw.starts_with('/') {
         return Ok((raw.to_string(), false));
     }
@@ -2953,1119 +2958,4 @@ fn cmd_config_set(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// rosec item <subcommand>
-// ---------------------------------------------------------------------------
-
-async fn cmd_item(action: Option<ItemCommands>) -> Result<()> {
-    let action = action.unwrap_or(ItemCommands::List(ItemListArgs {
-        provider: None,
-        item_type: None,
-        format: Format::Table,
-        show_path: false,
-        sync: false,
-        no_unlock: false,
-        filters: Vec::new(),
-    }));
-    match action {
-        ItemCommands::List(args) => cmd_item_list(args).await,
-        ItemCommands::Add(args) => cmd_item_add(args).await,
-        ItemCommands::Edit(args) => cmd_item_edit(args).await,
-        ItemCommands::Delete(args) => cmd_item_delete(args).await,
-        ItemCommands::Export(args) => cmd_item_export(args).await,
-        ItemCommands::Import(args) => cmd_item_import(args).await,
-    }
-}
-
-/// `rosec item list` — delegates to the search infrastructure with convenience
-/// `--provider` and `--type` filters that get merged into the attribute query.
-async fn cmd_item_list(args: ItemListArgs) -> Result<()> {
-    let format = cli_format_to_output(args.format);
-    let show_path = args.show_path;
-    let sync = args.sync;
-    let no_unlock = args.no_unlock;
-    let mut all_attrs: HashMap<String, String> = HashMap::new();
-
-    if let Some(ref prov) = args.provider {
-        all_attrs.insert(rosec_core::ATTR_PROVIDER.to_string(), prov.clone());
-    }
-    if let Some(ref typ) = args.item_type {
-        all_attrs.insert(rosec_core::ATTR_TYPE.to_string(), typ.clone());
-    }
-    for filter in &args.filters {
-        if let Some((key, value)) = filter.split_once('=') {
-            all_attrs.insert(key.to_string(), value.to_string());
-        } else {
-            bail!("invalid filter: {filter} (expected key=value)");
-        }
-    }
-
-    if sync && no_unlock {
-        bail!("--sync and --no-unlock are mutually exclusive");
-    }
-
-    let conn = conn().await?;
-    let rosecd = is_rosecd(&conn).await;
-    if rosecd {
-        warn_if_no_providers(&conn).await;
-    }
-
-    if sync {
-        preemptive_sync(&conn).await?;
-    }
-
-    let has_globs = all_attrs.values().any(|v| is_glob(v)) || all_attrs.contains_key("name");
-
-    let do_search = |conn: &Connection| {
-        let conn = conn.clone();
-        let all_attrs = all_attrs.clone();
-        async move {
-            if has_globs {
-                search_with_glob_fallback(&conn, &all_attrs, rosecd, no_unlock).await
-            } else {
-                search_exact(&conn, &all_attrs, no_unlock).await
-            }
-        }
-    };
-
-    let (unlocked, locked) = match do_search(&conn).await {
-        Ok(result) => result,
-        Err(e) if sync => {
-            trigger_unlock(&conn).await?;
-            preemptive_sync(&conn).await?;
-            do_search(&conn).await.map_err(|_| e)?
-        }
-        Err(e) => return Err(e),
-    };
-
-    let needs_unlock = !no_unlock && sync && any_syncable_providers_locked(&conn).await?;
-    let (unlocked, locked) = if needs_unlock {
-        trigger_unlock(&conn).await?;
-        preemptive_sync(&conn).await?;
-        do_search(&conn).await?
-    } else {
-        (unlocked, locked)
-    };
-
-    if unlocked.is_empty() && locked.is_empty() {
-        if format != OutputFormat::Json {
-            println!("No items found.");
-        } else {
-            println!("[]");
-        }
-        return Ok(());
-    }
-
-    let mut items: Vec<ItemSummary> = Vec::new();
-    for path in &unlocked {
-        let summary = fetch_item_data(&conn, path, false)
-            .await
-            .unwrap_or_else(|_| ItemSummary {
-                label: path.clone(),
-                attrs: HashMap::new(),
-                path: path.clone(),
-                locked: false,
-            });
-        items.push(summary);
-    }
-    for path in &locked {
-        let summary = fetch_item_data(&conn, path, true)
-            .await
-            .unwrap_or_else(|_| ItemSummary {
-                label: path.clone(),
-                attrs: HashMap::new(),
-                path: path.clone(),
-                locked: true,
-            });
-        items.push(summary);
-    }
-
-    match format {
-        OutputFormat::Human | OutputFormat::Table => print_search_table(&items, show_path),
-        OutputFormat::Kv => print_search_kv(&items, show_path),
-        OutputFormat::Json => print_search_json(&items)?,
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// TOML template generation for $EDITOR workflow
-// ---------------------------------------------------------------------------
-
-/// Generate an ed25519 SSH key pair and return a pre-populated TOML template.
-///
-/// The private key PEM is placed in `[secrets].private_key` as a multi-line
-/// TOML string.  The public key (OpenSSH format) and fingerprint are placed
-/// in `[attributes]`.  The user only needs to fill in the label.
-fn generate_ssh_key_template() -> Result<String> {
-    use ssh_key::{Algorithm, HashAlg, PrivateKey, rand_core::OsRng};
-
-    let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
-        .map_err(|e| anyhow::anyhow!("failed to generate SSH key: {e}"))?;
-
-    let pem = private_key
-        .to_openssh(ssh_key::LineEnding::LF)
-        .map_err(|e| anyhow::anyhow!("failed to encode private key as PEM: {e}"))?;
-
-    let public_key = private_key
-        .public_key()
-        .to_openssh()
-        .map_err(|e| anyhow::anyhow!("failed to encode public key: {e}"))?;
-
-    let fingerprint = private_key.fingerprint(HashAlg::Sha256);
-
-    let pem_str: &str = &pem;
-
-    let mut out = String::new();
-    out.push_str("# rosec item — type: ssh-key (generated ed25519 key)\n");
-    out.push_str("# Lines starting with '#' are comments and will be ignored.\n");
-    out.push_str("# The private key below was generated fresh — fill in the label.\n\n");
-
-    out.push_str("[item]\n");
-    out.push_str("label = \"\"\n");
-    out.push_str("type = \"ssh-key\"\n\n");
-
-    out.push_str("[attributes]\n");
-    out.push_str(&format!("public_key = {}\n", toml_quote(&public_key)));
-    out.push_str(&format!("fingerprint = \"{fingerprint}\"\n\n"));
-
-    out.push_str("[secrets]\n");
-    out.push_str(&format!("private_key = \"\"\"\n{pem_str}\"\"\"\n"));
-    out.push_str("notes = \"\"\n");
-
-    Ok(out)
-}
-
-/// Generate a TOML template for a given item type, suitable for editing in $EDITOR.
-///
-/// The template has three sections: `[item]`, `[attributes]`, `[secrets]`.
-/// Comments explain each field.  Empty string values are placeholders the user
-/// fills in; they are stripped on parse (empty secrets are not stored).
-fn generate_item_template(item_type: &str) -> String {
-    match item_type {
-        "login" => "\
-# rosec item — type: login
-# Lines starting with '#' are comments and will be ignored.
-# Empty secret values will not be stored.
-
-[item]
-label = \"\"
-type = \"login\"
-
-[attributes]
-username = \"\"
-uri = \"\"
-
-[secrets]
-password = \"\"
-totp = \"\"
-notes = \"\"
-"
-        .to_string(),
-
-        "ssh-key" => "\
-# rosec item — type: ssh-key
-# Lines starting with '#' are comments and will be ignored.
-# Empty secret values will not be stored.
-#
-# Paste the PEM-encoded private key as the value of 'private_key' below.
-# Multi-line values use triple quotes: private_key = \"\"\"...\"\"\"
-
-[item]
-label = \"\"
-type = \"ssh-key\"
-
-[attributes]
-public_key = \"\"
-fingerprint = \"\"
-
-[secrets]
-private_key = \"\"
-notes = \"\"
-"
-        .to_string(),
-
-        "note" => "\
-# rosec item — type: note
-# Lines starting with '#' are comments and will be ignored.
-# The note body is stored as a secret.
-#
-# Multi-line notes use triple quotes: secret = \"\"\"...\"\"\"
-
-[item]
-label = \"\"
-type = \"note\"
-
-[attributes]
-
-[secrets]
-secret = \"\"
-"
-        .to_string(),
-
-        "card" => "\
-# rosec item — type: card
-# Lines starting with '#' are comments and will be ignored.
-# Empty secret values will not be stored.
-
-[item]
-label = \"\"
-type = \"card\"
-
-[attributes]
-cardholder_name = \"\"
-brand = \"\"
-exp_month = \"\"
-exp_year = \"\"
-
-[secrets]
-number = \"\"
-security_code = \"\"
-notes = \"\"
-"
-        .to_string(),
-
-        "identity" => "\
-# rosec item — type: identity
-# Lines starting with '#' are comments and will be ignored.
-# Empty secret values will not be stored.
-
-[item]
-label = \"\"
-type = \"identity\"
-
-[attributes]
-title = \"\"
-first_name = \"\"
-middle_name = \"\"
-last_name = \"\"
-email = \"\"
-phone = \"\"
-company = \"\"
-address1 = \"\"
-address2 = \"\"
-address3 = \"\"
-city = \"\"
-state = \"\"
-postal_code = \"\"
-country = \"\"
-
-[secrets]
-ssn = \"\"
-passport_number = \"\"
-license_number = \"\"
-notes = \"\"
-"
-        .to_string(),
-
-        // generic (default)
-        _ => "\
-# rosec item — type: generic
-# Lines starting with '#' are comments and will be ignored.
-# Empty secret values will not be stored.
-#
-# Add any key = \"value\" pairs you need under [attributes] or [secrets].
-
-[item]
-label = \"\"
-type = \"generic\"
-
-[attributes]
-
-[secrets]
-secret = \"\"
-notes = \"\"
-"
-        .to_string(),
-    }
-}
-
-/// Parsed result of an item TOML document.
-struct ParsedItem {
-    label: String,
-    item_type: String,
-    attributes: HashMap<String, String>,
-    /// Secret name → raw bytes (UTF-8 encoded).
-    secrets: HashMap<String, Vec<u8>>,
-}
-
-/// Parse a TOML document written by the user in $EDITOR into a `ParsedItem`.
-///
-/// Expects sections `[item]` (with `label` and `type`), `[attributes]`, and
-/// `[secrets]`.  Empty string values in `[secrets]` are silently dropped.
-fn parse_item_toml(content: &str) -> Result<ParsedItem> {
-    let doc: toml::Value = toml::from_str(content)
-        .map_err(|e: toml::de::Error| anyhow::anyhow!("failed to parse TOML: {e}"))?;
-
-    let item_table = doc
-        .get("item")
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("[item] section is missing or not a table"))?;
-
-    let label = item_table
-        .get("label")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    if label.is_empty() {
-        bail!("item label is required (set label = \"...\" in [item])");
-    }
-
-    let raw_type = item_table
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("generic");
-
-    // Validate and normalize the item type (e.g. "sshkey" → "ssh-key").
-    let item_type = raw_type
-        .parse::<rosec_core::ItemType>()
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .as_str()
-        .to_string();
-
-    let mut attributes = HashMap::new();
-    if let Some(attrs_table) = doc.get("attributes").and_then(|v| v.as_table()) {
-        for (k, v) in attrs_table {
-            let val = match v {
-                toml::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            if !val.is_empty() {
-                attributes.insert(k.clone(), val);
-            }
-        }
-    }
-
-    let mut secrets: HashMap<String, Vec<u8>> = HashMap::new();
-    if let Some(secrets_table) = doc.get("secrets").and_then(|v| v.as_table()) {
-        for (k, v) in secrets_table {
-            match v {
-                // Plain string → UTF-8 bytes (common case: passwords, TOML, notes).
-                toml::Value::String(s) => {
-                    if !s.is_empty() {
-                        secrets.insert(k.clone(), s.as_bytes().to_vec());
-                    }
-                }
-                // Inline table with `base64` key → decode binary secret.
-                toml::Value::Table(tbl) => {
-                    if let Some(toml::Value::String(b64)) = tbl.get("base64") {
-                        use base64::Engine;
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(b64)
-                            .map_err(|e| anyhow::anyhow!("secret \"{k}\": invalid base64: {e}"))?;
-                        if !bytes.is_empty() {
-                            secrets.insert(k.clone(), bytes);
-                        }
-                    } else {
-                        bail!(
-                            "secret \"{k}\": inline table must have a \"base64\" key \
-                             (e.g. {{ base64 = \"...\" }})"
-                        );
-                    }
-                }
-                other => {
-                    // Fallback: stringify non-string scalar values.
-                    let val = other.to_string();
-                    if !val.is_empty() {
-                        secrets.insert(k.clone(), val.into_bytes());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(ParsedItem {
-        label,
-        item_type,
-        attributes,
-        secrets,
-    })
-}
-
-/// Determine the editor command.  Checks `$VISUAL`, then `$EDITOR`, then
-/// falls back to `vi`.
-fn editor_command() -> String {
-    std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string())
-}
-
-/// Open a temp file in the user's editor and return the edited content.
-///
-/// The file is created with a `.toml` extension so editors enable syntax
-/// highlighting.  Returns `None` if the user quit without saving (content
-/// unchanged from the initial template) or if the file is empty.
-fn open_editor(initial_content: &str) -> Result<Option<String>> {
-    use std::io::Write;
-
-    let dir = tempfile::tempdir()?;
-    let file_path = dir.path().join("rosec-item.toml");
-    {
-        let mut f = std::fs::File::create(&file_path)?;
-        f.write_all(initial_content.as_bytes())?;
-        f.flush()?;
-    }
-
-    let editor = editor_command();
-    // Split the editor command on whitespace to support e.g. "code --wait".
-    let parts: Vec<&str> = editor.split_whitespace().collect();
-    let (cmd, cmd_args) = parts.split_first().ok_or_else(|| {
-        anyhow::anyhow!("$EDITOR / $VISUAL is empty; set it to your preferred editor")
-    })?;
-
-    let status = std::process::Command::new(cmd)
-        .args(cmd_args.iter())
-        .arg(&file_path)
-        .status()
-        .map_err(|e| anyhow::anyhow!("failed to launch editor '{editor}': {e}"))?;
-
-    if !status.success() {
-        bail!(
-            "editor exited with status {} — item not created",
-            status.code().unwrap_or(-1)
-        );
-    }
-
-    let edited = std::fs::read_to_string(&file_path)?;
-
-    // If the user didn't change anything, treat it as abort.
-    if edited.trim() == initial_content.trim() || edited.trim().is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(edited))
-}
-
-/// `rosec item add` — create a new item via $EDITOR.
-///
-/// 1. Parse flags (`--provider`, `--type`, `--generate-ssh-key`)
-/// 2. Verify write capability via D-Bus `GetCapabilities`
-/// 3. Generate a TOML template for the item type
-/// 4. Open `$EDITOR` for the user to fill in
-/// 5. Parse the edited TOML
-/// 6. Call `CreateItemExtended` on `org.rosec.Items`
-/// 7. Print the created item path / ID
-async fn cmd_item_add(args: ItemAddArgs) -> Result<()> {
-    let provider_id = args.provider.unwrap_or_default();
-    let mut item_type = args.item_type;
-    let generate_ssh_key = args.generate_ssh_key;
-
-    // Validate item type early.
-    item_type
-        .parse::<rosec_core::ItemType>()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    if generate_ssh_key && item_type != "ssh-key" {
-        // Auto-set the type when --generate-ssh-key is used without --type.
-        if item_type == "generic" {
-            item_type = "ssh-key".to_string();
-        } else {
-            bail!("--generate-ssh-key can only be used with --type=ssh-key");
-        }
-    }
-
-    let conn = conn().await?;
-    if !is_rosecd(&conn).await {
-        bail!("rosec item add requires rosecd (the rosec daemon) to be running");
-    }
-
-    // Verify the provider supports Write capability.
-    let items_proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Items",
-        "org.rosec.Items",
-    )
-    .await?;
-
-    let caps: Vec<String> = items_proxy
-        .call("GetCapabilities", &(&provider_id,))
-        .await?;
-    if !caps.iter().any(|c| c == "Write") {
-        if provider_id.is_empty() {
-            bail!("no write-capable provider available — add a local vault first");
-        } else {
-            bail!("provider '{provider_id}' does not support writes");
-        }
-    }
-
-    // Verify the provider supports the requested item type.
-    let supported_types: Vec<String> = items_proxy
-        .call("GetSupportedItemTypes", &(&provider_id,))
-        .await?;
-    if !supported_types.is_empty() && !supported_types.contains(&item_type) {
-        bail!(
-            "provider does not support item type '{item_type}'\nsupported: {}",
-            supported_types.join(", ")
-        );
-    }
-
-    // Generate the TOML template.
-    let template = if generate_ssh_key {
-        generate_ssh_key_template()?
-    } else {
-        generate_item_template(&item_type)
-    };
-
-    // Open editor and get the result.
-    let edited = open_editor(&template)?;
-    let content = match edited {
-        Some(c) => c,
-        None => {
-            println!("No changes — item not created.");
-            return Ok(());
-        }
-    };
-
-    let parsed = parse_item_toml(&content)?;
-
-    if parsed.secrets.is_empty() && parsed.attributes.is_empty() {
-        bail!("item has no attributes or secrets — nothing to store");
-    }
-
-    // Call CreateItemExtended via D-Bus.
-    let item_path: String = items_proxy
-        .call(
-            "CreateItemExtended",
-            &(
-                &parsed.label,
-                &parsed.item_type,
-                &parsed.attributes,
-                &parsed.secrets,
-                false, // replace
-            ),
-        )
-        .await?;
-
-    // Extract the display ID from the path.
-    let display_id = item_path
-        .rsplit('/')
-        .next()
-        .and_then(|seg| seg.rsplit('_').next())
-        .unwrap_or(&item_path);
-
-    println!("Created item: {} ({})", parsed.label, display_id);
-    Ok(())
-}
-
-/// Data fetched from an existing item via D-Bus.
-struct FetchedItemData {
-    label: String,
-    item_type: String,
-    pub_attrs: HashMap<String, String>,
-    /// Secret name → raw bytes (may not be valid UTF-8).
-    secrets: Vec<(String, Vec<u8>)>,
-}
-
-/// Fetch a full item's data (label, public attributes, secret names + values)
-/// from D-Bus.  Unlike `fetch_item_data` (which returns only public metadata),
-/// this also retrieves all secret attributes via the `org.rosec.Secrets`
-/// extension interface.
-async fn fetch_full_item(conn: &zbus::Connection, item_path: &str) -> Result<FetchedItemData> {
-    let item_proxy = zbus::Proxy::new(
-        conn,
-        "org.freedesktop.secrets",
-        item_path,
-        "org.freedesktop.Secret.Item",
-    )
-    .await?;
-
-    let label: String = item_proxy.get_property("Label").await?;
-    let pub_attrs: HashMap<String, String> = item_proxy.get_property("Attributes").await?;
-
-    // Normalize through ItemType so legacy strings like "sshkey" become "ssh-key".
-    let item_type = rosec_core::ItemType::from_attributes(&pub_attrs)
-        .as_str()
-        .to_string();
-
-    // Fetch secret attribute names and values via rosec extension.
-    let secrets_proxy = zbus::Proxy::new(
-        conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Secrets",
-        "org.rosec.Secrets",
-    )
-    .await?;
-
-    let item_obj_path = OwnedObjectPath::try_from(item_path.to_string())
-        .map_err(|e| anyhow::anyhow!("invalid item path: {e}"))?;
-
-    let secret_names: Vec<String> = secrets_proxy
-        .call("GetSecretAttributeNames", &(&item_obj_path,))
-        .await
-        .unwrap_or_default();
-
-    let mut secrets: Vec<(String, Vec<u8>)> = Vec::new();
-    for name in &secret_names {
-        let bytes: Vec<u8> = secrets_proxy
-            .call("GetSecretAttribute", &(&item_obj_path, name.as_str()))
-            .await
-            .unwrap_or_default();
-        secrets.push((name.clone(), bytes));
-    }
-
-    Ok(FetchedItemData {
-        label,
-        item_type,
-        pub_attrs,
-        secrets,
-    })
-}
-
-/// Build a TOML document from an existing item's data, suitable for editing.
-///
-/// The document mirrors the template format: `[item]`, `[attributes]`,
-/// `[secrets]`.  Internal/reserved attributes (`rosec:type`, `rosec:provider`,
-/// `xdg:schema`) are omitted from `[attributes]` since they are handled by
-/// `[item].type` or are read-only.
-///
-/// Secret values that are valid UTF-8 are emitted as plain TOML strings.
-/// Binary (non-UTF-8) values are emitted as inline tables:
-///   `key = { base64 = "..." }`
-/// so that the import side can distinguish and decode them losslessly.
-fn build_item_toml(
-    label: &str,
-    item_type: &str,
-    pub_attrs: &HashMap<String, String>,
-    secrets: &[(String, Vec<u8>)],
-) -> String {
-    use base64::Engine;
-
-    let mut out = String::new();
-
-    out.push_str(&format!("# rosec item — type: {item_type}\n"));
-    out.push_str("# Lines starting with '#' are comments and will be ignored.\n");
-    out.push_str("# Empty secret values will not be stored.\n");
-    out.push_str("# Removing a secret key will leave the existing value unchanged.\n\n");
-
-    // [item] section
-    out.push_str("[item]\n");
-    out.push_str(&format!("label = {}\n", toml_quote(label)));
-    out.push_str(&format!(
-        "type = \"{}\"    # generic | login | ssh-key | note | card | identity\n\n",
-        item_type
-    ));
-
-    // [attributes] section — skip reserved/internal attrs
-    out.push_str("[attributes]\n");
-    let mut sorted_attrs: Vec<_> = pub_attrs
-        .iter()
-        .filter(|(k, _)| !k.starts_with("rosec:") && !k.starts_with("xdg:"))
-        .collect();
-    sorted_attrs.sort_by_key(|(k, _)| k.as_str());
-    for (k, v) in &sorted_attrs {
-        out.push_str(&format!("{} = {}\n", toml_key(k), toml_quote(v)));
-    }
-    out.push('\n');
-
-    // [secrets] section
-    out.push_str("[secrets]\n");
-    for (k, v) in secrets {
-        let key = toml_key(k);
-        match std::str::from_utf8(v) {
-            Ok(text) => {
-                // Valid UTF-8: emit as a plain TOML string.
-                if text.contains('\n') {
-                    out.push_str(&format!("{key} = \"\"\"\n{}\"\"\"\n", toml_escape(text)));
-                } else {
-                    out.push_str(&format!("{key} = {}\n", toml_quote(text)));
-                }
-            }
-            Err(_) => {
-                // Binary data: base64-encode into an inline table.
-                let encoded = base64::engine::general_purpose::STANDARD.encode(v);
-                out.push_str(&format!("{key} = {{ base64 = \"{}\" }}\n", encoded));
-            }
-        }
-    }
-
-    out
-}
-
-/// TOML-safe quoting: wraps in double quotes, escaping backslashes, quotes,
-/// and control characters (which are not allowed unescaped in TOML basic
-/// strings).
-fn toml_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\u{0008}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{000C}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            // All other control characters (U+0000..U+001F, U+007F) must use
-            // the \uXXXX escape.
-            c if c.is_control() => {
-                let cp = c as u32;
-                if cp <= 0xFFFF {
-                    out.push_str(&format!("\\u{cp:04X}"));
-                } else {
-                    out.push_str(&format!("\\U{cp:08X}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Escape a string for use inside TOML triple-quoted (multi-line basic)
-/// strings.  Newlines are preserved, but control characters and backslashes
-/// are escaped.
-fn toml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\u{0008}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push('\n'), // preserved in multi-line strings
-            '\u{000C}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => {
-                let cp = c as u32;
-                if cp <= 0xFFFF {
-                    out.push_str(&format!("\\u{cp:04X}"));
-                } else {
-                    out.push_str(&format!("\\U{cp:08X}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// TOML-safe key: bare keys may only contain `[A-Za-z0-9_-]`.  Anything else
-/// (e.g. dots, colons) must be quoted.
-fn toml_key(k: &str) -> String {
-    if k.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        k.to_string()
-    } else {
-        toml_quote(k)
-    }
-}
-
-/// `rosec item edit` — edit an existing item via $EDITOR.
-///
-/// 1. Resolve the item path
-/// 2. Fetch label, public attributes, secret attribute names + values
-/// 3. Build a TOML document
-/// 4. Open $EDITOR
-/// 5. Parse the edited TOML
-/// 6. Call UpdateItem via D-Bus
-async fn cmd_item_edit(args: ItemEditArgs) -> Result<()> {
-    let sync = args.sync;
-    let raw = args.item.as_str();
-
-    let conn = conn().await?;
-    if !is_rosecd(&conn).await {
-        bail!("rosec item edit requires rosecd (the rosec daemon) to be running");
-    }
-
-    if sync {
-        preemptive_sync(&conn).await?;
-    }
-
-    // Resolve the item path.
-    let (path, is_locked) = match resolve_item_path(&conn, raw).await {
-        Ok(result) => result,
-        Err(e) if sync => {
-            trigger_unlock(&conn).await?;
-            preemptive_sync(&conn).await?;
-            resolve_item_path(&conn, raw).await.map_err(|_| e)?
-        }
-        Err(e) => return Err(e),
-    };
-
-    if is_locked {
-        trigger_unlock(&conn).await?;
-        if sync {
-            preemptive_sync(&conn).await?;
-        }
-    }
-
-    // Fetch current item data.
-    let fetched = fetch_full_item(&conn, &path).await?;
-
-    // Build the TOML document.
-    let toml_content = build_item_toml(
-        &fetched.label,
-        &fetched.item_type,
-        &fetched.pub_attrs,
-        &fetched.secrets,
-    );
-
-    // Open editor.
-    let edited = open_editor(&toml_content)?;
-    let content = match edited {
-        Some(c) => c,
-        None => {
-            println!("No changes — item not updated.");
-            return Ok(());
-        }
-    };
-
-    let parsed = parse_item_toml(&content)?;
-
-    // Call UpdateItem via D-Bus.
-    let items_proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Items",
-        "org.rosec.Items",
-    )
-    .await?;
-
-    let _: () = items_proxy
-        .call(
-            "UpdateItem",
-            &(
-                path.as_str(),
-                parsed.label.as_str(),
-                parsed.item_type.as_str(),
-                &parsed.attributes,
-                &parsed.secrets,
-            ),
-        )
-        .await?;
-
-    let display_id = path
-        .rsplit('/')
-        .next()
-        .and_then(|seg| seg.rsplit('_').next())
-        .unwrap_or(&path);
-
-    println!("Updated item: {} ({})", parsed.label, display_id);
-    Ok(())
-}
-
-/// `rosec item delete` — delete an item with confirmation.
-///
-/// 1. Resolve the item path
-/// 2. Fetch label for the confirmation prompt
-/// 3. Prompt for confirmation (unless `--yes` / `-y`)
-/// 4. Call DeleteItem via D-Bus
-async fn cmd_item_delete(args: ItemDeleteArgs) -> Result<()> {
-    let sync = args.sync;
-    let yes = args.yes;
-    let raw = args.item.as_str();
-
-    let conn = conn().await?;
-    if !is_rosecd(&conn).await {
-        bail!("rosec item delete requires rosecd (the rosec daemon) to be running");
-    }
-
-    if sync {
-        preemptive_sync(&conn).await?;
-    }
-
-    // Resolve the item path.
-    let (path, is_locked) = match resolve_item_path(&conn, raw).await {
-        Ok(result) => result,
-        Err(e) if sync => {
-            trigger_unlock(&conn).await?;
-            preemptive_sync(&conn).await?;
-            resolve_item_path(&conn, raw).await.map_err(|_| e)?
-        }
-        Err(e) => return Err(e),
-    };
-
-    if is_locked {
-        trigger_unlock(&conn).await?;
-        if sync {
-            preemptive_sync(&conn).await?;
-        }
-    }
-
-    // Fetch the label so we can show a meaningful confirmation.
-    let item_proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        path.as_str(),
-        "org.freedesktop.Secret.Item",
-    )
-    .await?;
-
-    let label: String = item_proxy
-        .get_property("Label")
-        .await
-        .unwrap_or_else(|_| "<unknown>".to_string());
-
-    let display_id = path
-        .rsplit('/')
-        .next()
-        .and_then(|seg| seg.rsplit('_').next())
-        .unwrap_or(&path);
-
-    // Confirmation prompt.
-    if !yes {
-        eprint!("Delete item '{}' ({})? [y/N] ", label, display_id);
-        let mut line = String::new();
-        io::stdin().lock().read_line(&mut line)?;
-        let answer = line.trim().to_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("Cancelled.");
-            return Ok(());
-        }
-    }
-
-    // Call DeleteItem via D-Bus.
-    let items_proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Items",
-        "org.rosec.Items",
-    )
-    .await?;
-
-    let _: () = items_proxy.call("DeleteItem", &(path.as_str(),)).await?;
-
-    println!("Deleted item: {} ({})", label, display_id);
-    Ok(())
-}
-
-/// `rosec item export` — export an item as TOML to stdout.
-///
-/// The output uses the same `[item]`/`[attributes]`/`[secrets]` format as
-/// the editor workflow, so it can be piped into `rosec item import` or
-/// redirected to a file for backup.
-async fn cmd_item_export(args: ItemExportArgs) -> Result<()> {
-    let sync = args.sync;
-    let raw = args.item.as_str();
-
-    let conn = conn().await?;
-    if !is_rosecd(&conn).await {
-        bail!("rosec item export requires rosecd (the rosec daemon) to be running");
-    }
-
-    if sync {
-        preemptive_sync(&conn).await?;
-    }
-
-    // Resolve the item path.
-    let (path, is_locked) = match resolve_item_path(&conn, raw).await {
-        Ok(result) => result,
-        Err(e) if sync => {
-            trigger_unlock(&conn).await?;
-            preemptive_sync(&conn).await?;
-            resolve_item_path(&conn, raw).await.map_err(|_| e)?
-        }
-        Err(e) => return Err(e),
-    };
-
-    if is_locked {
-        trigger_unlock(&conn).await?;
-        if sync {
-            preemptive_sync(&conn).await?;
-        }
-    }
-
-    // Fetch item data including secrets.
-    let fetched = fetch_full_item(&conn, &path).await?;
-
-    // Build TOML and write to stdout.
-    let toml_content = build_item_toml(
-        &fetched.label,
-        &fetched.item_type,
-        &fetched.pub_attrs,
-        &fetched.secrets,
-    );
-    print!("{toml_content}");
-
-    Ok(())
-}
-
-/// `rosec item import` — import an item from TOML on stdin.
-///
-/// Reads the same `[item]`/`[attributes]`/`[secrets]` TOML format produced
-/// by `rosec item export`.  Creates the item via `CreateItemExtended` on
-/// the specified (or default write-capable) provider.
-async fn cmd_item_import(args: ItemImportArgs) -> Result<()> {
-    let provider_id = args.provider.unwrap_or_default();
-
-    // Read TOML from stdin.
-    let mut content = String::new();
-    io::stdin().lock().read_to_string(&mut content)?;
-
-    if content.trim().is_empty() {
-        bail!("no input on stdin — pipe a TOML document or redirect a file");
-    }
-
-    let parsed = parse_item_toml(&content)?;
-
-    if parsed.secrets.is_empty() && parsed.attributes.is_empty() {
-        bail!("item has no attributes or secrets — nothing to store");
-    }
-
-    let conn = conn().await?;
-    if !is_rosecd(&conn).await {
-        bail!("rosec item import requires rosecd (the rosec daemon) to be running");
-    }
-
-    // Verify the provider supports Write capability.
-    let items_proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Items",
-        "org.rosec.Items",
-    )
-    .await?;
-
-    let caps: Vec<String> = items_proxy
-        .call("GetCapabilities", &(&provider_id,))
-        .await?;
-    if !caps.iter().any(|c| c == "Write") {
-        if provider_id.is_empty() {
-            bail!("no write-capable provider available — add a local vault first");
-        } else {
-            bail!("provider '{provider_id}' does not support writes");
-        }
-    }
-
-    // Verify the provider supports the item type.
-    let supported_types: Vec<String> = items_proxy
-        .call("GetSupportedItemTypes", &(&provider_id,))
-        .await?;
-    if !supported_types.is_empty() && !supported_types.contains(&parsed.item_type) {
-        bail!(
-            "provider does not support item type '{}'\nsupported: {}",
-            parsed.item_type,
-            supported_types.join(", ")
-        );
-    }
-
-    // Call CreateItemExtended via D-Bus.
-    let item_path: String = items_proxy
-        .call(
-            "CreateItemExtended",
-            &(
-                &parsed.label,
-                &parsed.item_type,
-                &parsed.attributes,
-                &parsed.secrets,
-                false, // replace
-            ),
-        )
-        .await?;
-
-    // Extract the display ID from the path.
-    let display_id = item_path
-        .rsplit('/')
-        .next()
-        .and_then(|seg| seg.rsplit('_').next())
-        .unwrap_or(&item_path);
-
-    // Print to stderr so stdout stays clean for piping.
-    eprintln!("Imported item: {} ({})", parsed.label, display_id);
-    Ok(())
-}
+// (item subcommand tree moved to rosec/src/item/)
