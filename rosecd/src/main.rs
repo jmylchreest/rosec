@@ -1751,12 +1751,34 @@ async fn build_single_provider(
             }
 
             // Forward all options except host-consumed ones to the guest.
+            // Any string value that starts with `~/` is expanded against
+            // `$HOME` here — once, at the daemon-side boundary — so all
+            // downstream consumers (compute_allowed_files, the guest itself,
+            // any future path-aware option) see resolved paths without each
+            // re-implementing tilde handling.  The on-disk config is left
+            // untouched so it stays portable across users.
             let mut guest_options: std::collections::HashMap<String, serde_json::Value> = entry
                 .options
                 .iter()
                 .filter(|(k, _)| !matches!(k.as_str(), "name" | "allowed_hosts"))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), expand_tilde_in_value(v)))
                 .collect();
+
+            // `path` and `collection` are top-level fields on ProviderEntry
+            // (historically local-vault-specific).  Plugins like
+            // keepassxc-file declare them as manifest options, so forward
+            // them into guest_options when set, unless an explicit option
+            // of the same name already exists (which takes precedence).
+            if let Some(p) = entry.path.as_ref() {
+                guest_options.entry("path".to_string()).or_insert_with(|| {
+                    expand_tilde_in_value(&serde_json::Value::String(p.clone()))
+                });
+            }
+            if let Some(c) = entry.collection.as_ref() {
+                guest_options
+                    .entry("collection".to_string())
+                    .or_insert_with(|| serde_json::Value::String(c.clone()));
+            }
 
             // Inject host-managed device_id if the guest doesn't already have one.
             // Bitwarden APIs require a stable deviceIdentifier; the WASM sandbox
@@ -1850,6 +1872,8 @@ fn compute_wasi_allowed_paths(
 ///
 /// Currently only `keepassxc-file` uses this — its `path` option points to
 /// the user's `.kdbx` database, which is the only file the guest can read.
+/// `options` is expected to already have any `~/` expansion applied (done
+/// once at the daemon-side boundary in [`build_single_provider`]).
 fn compute_allowed_files(
     kind: &str,
     options: &std::collections::HashMap<String, serde_json::Value>,
@@ -1867,6 +1891,23 @@ fn compute_allowed_files(
     }
 
     files
+}
+
+/// Expand `~/` for any string-valued option.  Non-string values pass through
+/// unchanged (numbers, bools, nested objects).  Strings without a `~/` prefix
+/// pass through unchanged.
+fn expand_tilde_in_value(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) if s.starts_with("~/") => {
+            if let Some(home) = std::env::var_os("HOME") {
+                let mut p = PathBuf::from(home);
+                p.push(&s[2..]);
+                return serde_json::Value::String(p.to_string_lossy().into_owned());
+            }
+            v.clone()
+        }
+        other => other.clone(),
+    }
 }
 
 /// Parse `--config <path>` from CLI args, falling back to XDG default.

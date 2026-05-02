@@ -37,7 +37,13 @@ use crate::protocol::{
 /// exceeds this duration the WASM execution is interrupted via
 /// wasmtime epoch interruption, and the provider returns an error
 /// instead of blocking indefinitely.
-const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Hard wall-clock cap on a single guest function call.  Set high enough to
+/// cover slow paths in WASM-compiled crypto (Argon2 KDF in keepassxc-file
+/// can take 30–60 s for default KeePassXC params, and significantly longer
+/// for heavily-tuned databases).  Too short causes spurious traps mid-KDF;
+/// too long lets a misbehaving plugin pin a host thread.  3 minutes is
+/// generous for legitimate slow paths and still bounded.
+const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Configuration for constructing a `WasmProvider`.
 #[derive(Debug, Clone)]

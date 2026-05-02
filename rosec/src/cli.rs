@@ -483,6 +483,12 @@ pub struct ProviderAddArgs {
     #[arg(long)]
     pub collection: Option<String>,
 
+    /// Non-interactive: auto-confirm experimental warnings and skip
+    /// optional-option prompts (treat as "Enter to skip").  Required
+    /// options that aren't supplied still error out.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+
     /// Provider options as key=value pairs
     #[arg(trailing_var_arg = true)]
     pub options: Vec<String>,

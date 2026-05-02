@@ -48,7 +48,10 @@ struct FileState {
 pub(crate) fn build_file_host_functions(allowed_files: &[PathBuf]) -> Vec<Function> {
     let allowed: HashSet<PathBuf> = allowed_files
         .iter()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .map(|p| {
+            let expanded = expand_tilde(p);
+            std::fs::canonicalize(&expanded).unwrap_or(expanded)
+        })
         .collect();
 
     let user_data: UserData<FileState> = UserData::new(FileState { allowed });
@@ -95,10 +98,11 @@ fn write_output_bytes(data: &mut CurrentPlugin, bytes: &[u8]) -> Result<u64, ext
     Ok(handle.offset())
 }
 
-/// Validate a path against the allow-list.  Canonicalises before comparison
-/// so symlinks and `..` traversal can't escape.
+/// Validate a path against the allow-list.  Expands a leading `~/` against
+/// `$HOME`, then canonicalises so symlinks and `..` traversal can't escape.
 fn check_allowed(state: &FileState, path: &Path) -> Result<PathBuf, extism::Error> {
-    let canon = std::fs::canonicalize(path).map_err(|e| {
+    let expanded = expand_tilde(path);
+    let canon = std::fs::canonicalize(&expanded).map_err(|e| {
         extism::Error::msg(format!(
             "file_read: cannot canonicalise '{}': {e}",
             path.display()
@@ -111,6 +115,22 @@ fn check_allowed(state: &FileState, path: &Path) -> Result<PathBuf, extism::Erro
         )));
     }
     Ok(canon)
+}
+
+/// Expand a leading `~/` against `$HOME`.  Other paths pass through.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let s = match path.to_str() {
+        Some(s) => s,
+        None => return path.to_path_buf(),
+    };
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let mut p = PathBuf::from(home);
+        p.push(rest);
+        return p;
+    }
+    path.to_path_buf()
 }
 
 /// `file_read(path: string) -> bytes`

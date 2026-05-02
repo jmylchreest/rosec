@@ -157,7 +157,9 @@ pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
 // ── unlock ────────────────────────────────────────────────────────────────────
 
 fn open_database(path: &str, key_file: Option<&str>, password: &str) -> Result<Database, String> {
+    info!("kdbx: reading file '{}'", path);
     let bytes = host_file::read(path).map_err(|e| format!("read '{path}': {e}"))?;
+    info!("kdbx: read {} bytes; building key", bytes.len());
 
     if password.is_empty() && key_file.is_none() {
         return Err("master password or key file required".into());
@@ -184,7 +186,14 @@ fn open_database(path: &str, key_file: Option<&str>, password: &str) -> Result<D
             .map_err(|e| format!("invalid key file '{kf_path}': {e}"))?;
     }
 
-    Database::open(&mut Cursor::new(bytes), key).map_err(|e| format!("kdbx open failed: {e}"))
+    info!("kdbx: starting Database::open (Argon2 KDF + decrypt + parse)");
+    let db = Database::open(&mut Cursor::new(bytes), key)
+        .map_err(|e| format!("kdbx open failed: {e}"))?;
+    info!(
+        "kdbx: open complete; entry count = {}",
+        db.iter_all_entries().count()
+    );
+    Ok(db)
 }
 
 fn now_epoch_secs() -> u64 {

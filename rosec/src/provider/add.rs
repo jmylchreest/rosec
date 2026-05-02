@@ -34,9 +34,13 @@ pub async fn run(args: ProviderAddArgs) -> Result<()> {
             "warning: provider kind '{kind}' is EXPERIMENTAL — interfaces, \
              on-disk format, and behaviour may change without notice."
         );
-        let confirm = crate::prompt_field("Continue? (yes/no)", "no", "text").await?;
-        if confirm.as_str() != "yes" {
-            bail!("cancelled");
+        if args.yes {
+            eprintln!("(--yes given, continuing without confirmation)");
+        } else {
+            let confirm = crate::prompt_field("Continue? (yes/no)", "no", "text").await?;
+            if confirm.as_str() != "yes" {
+                bail!("cancelled");
+            }
         }
     }
 
@@ -45,17 +49,62 @@ pub async fn run(args: ProviderAddArgs) -> Result<()> {
 
     let mut supplied: std::collections::HashSet<String> =
         options.iter().map(|(k, _)| k.clone()).collect();
+    // `parse_option_args` extracts `path` and `collection` into separate
+    // variables (legacy of the local-vault add flow) — so they don't appear
+    // in `options` at this point, which means a manifest that declares
+    // `path` as required (e.g. keepassxc-file) would re-prompt the user
+    // even when `path=...` was given.  Mark them as supplied here so the
+    // prompt-and-collect loop skips them.
+    if custom_path.is_some() {
+        supplied.insert("path".to_string());
+    }
+    if collection.is_some() {
+        supplied.insert("collection".to_string());
+    }
     let required = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Required);
-    prompt_and_collect(&required, &supplied, &mut options).await?;
+    if args.yes {
+        // Non-interactive: required options must already be supplied, else
+        // bail with a clear list rather than prompting.
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|p| !supplied.contains(&p.key))
+            .map(|p| p.key.as_str())
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "missing required options for kind '{kind}': {}\n\
+                 pass them as `key=value` arguments",
+                missing.join(", ")
+            );
+        }
+    } else {
+        prompt_and_collect(&required, &supplied, &mut options).await?;
+    }
 
+    // Build a temporary view of options for ID derivation that includes the
+    // extracted `path`/`collection` (parse_option_args pulls them out into
+    // separate vars; without re-merging here, manifests whose
+    // id_derivation_key is "path" would fall through to the bare kind name).
     let id = match args.id {
         Some(id) => id,
-        None => derive_provider_id(kind, &options, &registry),
+        None => {
+            let mut for_derivation = options.clone();
+            if let Some(p) = &custom_path {
+                for_derivation.push(("path".to_string(), p.clone()));
+            }
+            if let Some(c) = &collection {
+                for_derivation.push(("collection".to_string(), c.clone()));
+            }
+            derive_provider_id(kind, &for_derivation, &registry)
+        }
     };
 
     supplied.extend(options.iter().map(|(k, _)| k.clone()));
     let optional = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Optional);
-    prompt_and_collect(&optional, &supplied, &mut options).await?;
+    if !args.yes {
+        prompt_and_collect(&optional, &supplied, &mut options).await?;
+    }
+    // With --yes, optional fields not supplied on the CLI are simply omitted.
 
     if let Some(p) = &custom_path {
         options.push(("path".to_string(), p.clone()));
