@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rosec_core::{ItemMeta, ItemType, ItemUpdate, NewItem, SecretBytes};
+use rosec_core::{ItemMeta, ItemType, ItemUpdate, NewItem, Provider, SecretBytes};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -17,6 +17,20 @@ pub struct RosecItems {
 impl RosecItems {
     pub fn new(state: Arc<ServiceState>) -> Self {
         Self { state }
+    }
+
+    /// Resolve `provider_id` to a Provider, falling back to the default
+    /// write-capable provider when the id is empty.
+    fn resolve_provider(&self, provider_id: &str) -> Result<Arc<dyn Provider>, FdoError> {
+        if provider_id.is_empty() {
+            self.state
+                .write_provider()
+                .ok_or_else(|| FdoError::Failed("no write-capable provider available".into()))
+        } else {
+            self.state
+                .provider_by_id(provider_id)
+                .ok_or_else(|| FdoError::Failed(format!("provider not found: {provider_id}")))
+        }
     }
 }
 
@@ -230,17 +244,7 @@ impl RosecItems {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<String>, FdoError> {
         log_dbus_caller("items-extension", "GetCapabilities", &header);
-
-        let provider = if provider_id.is_empty() {
-            self.state
-                .write_provider()
-                .ok_or_else(|| FdoError::Failed("no write-capable provider available".into()))?
-        } else {
-            self.state
-                .provider_by_id(provider_id)
-                .ok_or_else(|| FdoError::Failed(format!("provider not found: {provider_id}")))?
-        };
-
+        let provider = self.resolve_provider(provider_id)?;
         Ok(provider
             .capabilities()
             .iter()
@@ -257,17 +261,7 @@ impl RosecItems {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<String>, FdoError> {
         log_dbus_caller("items-extension", "GetSupportedItemTypes", &header);
-
-        let provider = if provider_id.is_empty() {
-            self.state
-                .write_provider()
-                .ok_or_else(|| FdoError::Failed("no write-capable provider available".into()))?
-        } else {
-            self.state
-                .provider_by_id(provider_id)
-                .ok_or_else(|| FdoError::Failed(format!("provider not found: {provider_id}")))?
-        };
-
+        let provider = self.resolve_provider(provider_id)?;
         Ok(provider
             .supported_item_types()
             .iter()
