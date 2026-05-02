@@ -992,161 +992,47 @@ async fn cmd_provider_auth(args: &ProviderAuthArgs) -> Result<()> {
 
 /// `rosec provider add <kind> [--id <id>] [key=value ...]`
 async fn cmd_provider_add(args: ProviderAddArgs) -> Result<()> {
-    // Scan for discovered plugin kinds so we can validate and prompt correctly.
     let registry = rosec_wasm::discovery::scan_plugins(
         WasmPreference::default(),
         rosec_core::WasmVerify::default(),
     );
 
-    let all_kinds: Vec<String> = {
-        let mut v: Vec<String> = config_edit::KNOWN_KINDS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        for kind in registry.kinds() {
-            if !v.iter().any(|k| k == kind) {
-                v.push(kind.to_string());
-            }
-        }
-        v
-    };
-    let all_kinds_display = all_kinds.join(", ");
-
     let kind = &args.kind;
-
     let is_builtin = config_edit::KNOWN_KINDS.contains(&kind.as_str());
     let is_discovered = registry.contains_kind(kind);
-
     if !is_builtin && !is_discovered {
-        bail!("unknown provider kind '{kind}'. Known kinds: {all_kinds_display}");
+        let known = known_kinds_display(&registry);
+        bail!("unknown provider kind '{kind}'. Known kinds: {known}");
     }
 
-    // Extract flags and key=value pairs from clap-parsed args.
-    let custom_id: Option<String> = args.id;
-    let mut custom_path: Option<String> = args.path;
-    let mut collection: Option<String> = args.collection;
-    let mut options: Vec<(String, String)> = Vec::new();
-    for opt in &args.options {
-        if let Some((k, v)) = opt.split_once('=') {
-            match k {
-                "path" => custom_path = Some(v.to_string()),
-                "collection" => collection = Some(v.to_string()),
-                _ => options.push((k.to_string(), v.to_string())),
-            }
-        }
-    }
+    let (mut options, custom_path, collection) =
+        parse_option_args(&args.options, args.path, args.collection);
 
-    // Snapshot the keys already supplied on the command line.
-    let supplied: std::collections::HashSet<String> =
+    let mut supplied: std::collections::HashSet<String> =
         options.iter().map(|(k, _)| k.clone()).collect();
+    let required = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Required);
+    prompt_and_collect(&required, &supplied, &mut options).await?;
 
-    // Collect required options first — we need them to auto-generate the ID.
-    // For built-in kinds, use config_edit; for discovered kinds, use the registry.
-    if is_discovered {
-        if let Some(req_opts) = rosec_wasm::discovery::required_options(&registry, kind) {
-            for opt in &req_opts {
-                if !supplied.contains(&opt.key) {
-                    let v = prompt_field(&opt.description, "", &opt.kind).await?;
-                    let s = v.as_str().to_string();
-                    if !s.is_empty() {
-                        options.push((opt.key.clone(), s));
-                    }
-                }
-            }
-        }
-    } else {
-        for (key, description) in config_edit::required_options_for_kind(kind) {
-            if !supplied.contains(*key) {
-                let field_kind = if key.contains("secret") || key.contains("password") {
-                    "secret"
-                } else {
-                    "text"
-                };
-                let v = prompt_field(description, "", field_kind).await?;
-                let s = v.as_str().to_string();
-                if !s.is_empty() {
-                    options.push((key.to_string(), s));
-                }
-            }
-        }
-    }
-
-    // Determine the provider ID: explicit --id wins; otherwise derive from credentials.
-    let id = match custom_id {
-        Some(ref id) => id.clone(),
+    let id = match args.id {
+        Some(id) => id,
         None => derive_provider_id(kind, &options, &registry),
     };
 
-    // Prompt for optional options not already supplied.
-    let supplied_after_required: std::collections::HashSet<String> =
-        options.iter().map(|(k, _)| k.clone()).collect();
-    if is_discovered {
-        if let Some(opt_opts) = rosec_wasm::discovery::optional_options(&registry, kind) {
-            for opt in &opt_opts {
-                if !supplied_after_required.contains(&opt.key) {
-                    let v = prompt_field(
-                        &format!("{} (optional, Enter to skip)", opt.description),
-                        "",
-                        &opt.kind,
-                    )
-                    .await?;
-                    let s = v.as_str().to_string();
-                    if !s.is_empty() {
-                        options.push((opt.key.clone(), s));
-                    }
-                }
-            }
-        }
-    } else {
-        for (key, description) in config_edit::optional_options_for_kind(kind) {
-            if !supplied_after_required.contains(*key) {
-                let v = prompt_field(
-                    &format!("{description} (optional, Enter to skip)"),
-                    "",
-                    "text",
-                )
-                .await?;
-                let s = v.as_str().to_string();
-                if !s.is_empty() {
-                    options.push((key.to_string(), s));
-                }
-            }
-        }
-    }
+    supplied.extend(options.iter().map(|(k, _)| k.clone()));
+    let optional = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Optional);
+    prompt_and_collect(&optional, &supplied, &mut options).await?;
 
-    // Inject --path and --collection into options if they were supplied as flags.
-    if let Some(ref p) = custom_path {
+    if let Some(p) = &custom_path {
         options.push(("path".to_string(), p.clone()));
     }
-    if let Some(ref c) = collection {
+    if let Some(c) = &collection {
         options.push(("collection".to_string(), c.clone()));
     }
 
-    // For local vaults, ensure a path is present — derive one from the ID if
-    // the user did not supply an explicit --path or path= argument.
-    if kind == "local" && custom_path.is_none() {
-        let path = default_vault_path(&id);
-        options.push(("path".to_string(), path));
-    }
-
-    // Resolve the vault path for local providers so we can check for conflicts.
     if kind == "local" {
-        let path_value = options
-            .iter()
-            .find(|(k, _)| k == "path")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
-        let resolved = expand_tilde(path_value);
-        if std::path::Path::new(&resolved).exists() {
-            bail!(
-                "a vault file already exists at {resolved}\n\
-                 Use `rosec provider attach --path {resolved}` to attach an existing vault."
-            );
-        }
+        ensure_local_vault_path(&id, &mut options, custom_path.is_none())?;
     }
 
-    // Check for duplicate ID early (add_provider also checks, but this gives
-    // a friendlier message before we touch the config file).
     let cfg_data = load_config();
     if cfg_data.provider.iter().any(|p| p.id == id) {
         bail!("provider '{id}' already exists. Use --id to choose a different name.");
@@ -1156,9 +1042,6 @@ async fn cmd_provider_add(args: ProviderAddArgs) -> Result<()> {
     config_edit::add_provider(&cfg, &id, kind, &options)?;
     println!("Added provider '{id}' (kind: {kind}) to {}", cfg.display());
 
-    // If rosecd is running, wait for it to hot-reload the new provider then
-    // immediately kick off the auth flow so the user doesn't have to run
-    // `rosec provider auth <id>` manually as a separate step.
     if let Some(proxy) = wait_for_daemon_reload(&id).await {
         println!("rosecd picked up the new provider — starting authentication.");
         let tty_fd = open_tty_owned_fd()?;
@@ -1171,6 +1054,140 @@ async fn cmd_provider_add(args: ProviderAddArgs) -> Result<()> {
         println!("Run `rosec provider auth {id}` to authenticate.");
     }
 
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OptionScope {
+    Required,
+    Optional,
+}
+
+struct OptionPrompt {
+    key: String,
+    description: String,
+    field_kind: String,
+}
+
+fn known_kinds_display(registry: &rosec_wasm::PluginRegistry) -> String {
+    let mut v: Vec<String> = config_edit::KNOWN_KINDS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    for kind in registry.kinds() {
+        if !v.iter().any(|k| k == kind) {
+            v.push(kind.to_string());
+        }
+    }
+    v.join(", ")
+}
+
+fn parse_option_args(
+    raw: &[String],
+    initial_path: Option<String>,
+    initial_collection: Option<String>,
+) -> (Vec<(String, String)>, Option<String>, Option<String>) {
+    let mut options = Vec::new();
+    let mut path = initial_path;
+    let mut collection = initial_collection;
+    for opt in raw {
+        if let Some((k, v)) = opt.split_once('=') {
+            match k {
+                "path" => path = Some(v.to_string()),
+                "collection" => collection = Some(v.to_string()),
+                _ => options.push((k.to_string(), v.to_string())),
+            }
+        }
+    }
+    (options, path, collection)
+}
+
+fn collect_option_prompts(
+    kind: &str,
+    registry: &rosec_wasm::PluginRegistry,
+    is_discovered: bool,
+    scope: OptionScope,
+) -> Vec<OptionPrompt> {
+    let suffix = match scope {
+        OptionScope::Required => "",
+        OptionScope::Optional => " (optional, Enter to skip)",
+    };
+
+    if is_discovered {
+        let opts = match scope {
+            OptionScope::Required => rosec_wasm::discovery::required_options(registry, kind),
+            OptionScope::Optional => rosec_wasm::discovery::optional_options(registry, kind),
+        };
+        return opts
+            .unwrap_or_default()
+            .into_iter()
+            .map(|opt| OptionPrompt {
+                description: format!("{}{suffix}", opt.description),
+                key: opt.key,
+                field_kind: opt.kind,
+            })
+            .collect();
+    }
+
+    let builtin = match scope {
+        OptionScope::Required => config_edit::required_options_for_kind(kind),
+        OptionScope::Optional => config_edit::optional_options_for_kind(kind),
+    };
+    builtin
+        .iter()
+        .map(|(key, description)| OptionPrompt {
+            key: (*key).to_string(),
+            description: format!("{description}{suffix}"),
+            field_kind: builtin_field_kind(key, scope).to_string(),
+        })
+        .collect()
+}
+
+fn builtin_field_kind(key: &str, scope: OptionScope) -> &'static str {
+    match scope {
+        OptionScope::Required if key.contains("secret") || key.contains("password") => "secret",
+        _ => "text",
+    }
+}
+
+async fn prompt_and_collect(
+    prompts: &[OptionPrompt],
+    supplied: &std::collections::HashSet<String>,
+    out: &mut Vec<(String, String)>,
+) -> Result<()> {
+    for p in prompts {
+        if supplied.contains(&p.key) {
+            continue;
+        }
+        let v = prompt_field(&p.description, "", &p.field_kind).await?;
+        let s = v.as_str().to_string();
+        if !s.is_empty() {
+            out.push((p.key.clone(), s));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_local_vault_path(
+    id: &str,
+    options: &mut Vec<(String, String)>,
+    derive_default: bool,
+) -> Result<()> {
+    if derive_default {
+        options.push(("path".to_string(), default_vault_path(id)));
+    }
+    let path_value = options
+        .iter()
+        .find(|(k, _)| k == "path")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    let resolved = expand_tilde(path_value);
+    if std::path::Path::new(&resolved).exists() {
+        bail!(
+            "a vault file already exists at {resolved}\n\
+             Use `rosec provider attach --path {resolved}` to attach an existing vault."
+        );
+    }
     Ok(())
 }
 
