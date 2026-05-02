@@ -15,6 +15,7 @@ use keepass::{
     Database,
     db::{EntryRef, GroupId, fields},
 };
+use zeroize::Zeroizing;
 
 use crate::protocol::WasmItemMeta;
 
@@ -24,16 +25,29 @@ pub(crate) const ATTR_TYPE: &str = "rosec:type";
 pub(crate) const ATTR_PROVIDER: &str = "rosec:provider";
 pub(crate) const ATTR_FOLDER: &str = "rosec:keepassxc:folder";
 pub(crate) const ATTR_UUID: &str = "rosec:keepassxc:uuid";
+pub(crate) const ATTR_TOTP: &str = "rosec:totp";
 pub(crate) const ATTR_XDG_SCHEMA: &str = "xdg:schema";
 
 // Standard secret names exposed by KeePass entries.
 pub(crate) const SECRET_PASSWORD: &str = "password";
 pub(crate) const SECRET_NOTES: &str = "notes";
 pub(crate) const SECRET_TOTP: &str = "totp";
+/// Name used by `rosec` and `libsecret`-style consumers to fetch an SSH
+/// private key.  Matches the convention used by the local vault and
+/// bitwarden-pm providers; the host's `return_attr` default ordering
+/// includes `private_key` so it's also what `inspect` shows for SSH items.
+pub(crate) const SECRET_PRIVATE_KEY: &str = "private_key";
 
 // ── Item type heuristic ──────────────────────────────────────────────────────
 
 fn item_type_for(entry: &EntryRef<'_>) -> &'static str {
+    // SSH config wins over the password/notes heuristic — an SSH-agent
+    // entry typically also has a passphrase in the password field, but
+    // the right `rosec:type` is `ssh-key`, not `login`.
+    if crate::ssh::entry_has_ssh_key(entry) {
+        return "ssh-key";
+    }
+
     let has_password = entry.get_password().is_some_and(|s| !s.is_empty());
     let has_notes = entry.get(fields::NOTES).is_some_and(|s| !s.is_empty());
 
@@ -99,6 +113,13 @@ pub(crate) fn build_public_attrs(
         attrs.insert("uri".to_string(), u.to_string());
     }
 
+    // Stamp `rosec:totp=true` so `rosec search rosec:totp=true` and the
+    // TOTP FUSE filesystem can find this entry.  The host's automatic
+    // stamping only applies to the local vault provider, not WASM guests.
+    if entry.get_raw_otp_value().is_some_and(|s| !s.is_empty()) {
+        attrs.insert(ATTR_TOTP.to_string(), "true".to_string());
+    }
+
     // Tags — first as "tag", subsequent as "tag.1", "tag.2", ... mirrors the
     // multi-value attribute convention used elsewhere in rosec.
     for (i, tag) in entry.tags.iter().enumerate() {
@@ -143,6 +164,13 @@ fn is_well_known_field(name: &str) -> bool {
 pub(crate) fn build_secret_names(entry: &EntryRef<'_>) -> Vec<String> {
     let mut names = Vec::new();
 
+    // SSH-key entries advertise `private_key` first so the daemon's
+    // default `return_attr` ordering (private_key → password → notes)
+    // gives consumers the actual key when they call GetSecret.
+    if crate::ssh::entry_has_ssh_key(entry) {
+        names.push(SECRET_PRIVATE_KEY.to_string());
+    }
+
     if entry.get_password().is_some_and(|s| !s.is_empty()) {
         names.push(SECRET_PASSWORD.to_string());
     }
@@ -168,7 +196,21 @@ pub(crate) fn build_secret_names(entry: &EntryRef<'_>) -> Vec<String> {
 
 // ── Secret resolution (name → bytes) ─────────────────────────────────────────
 
-pub(crate) fn resolve_secret(entry: &EntryRef<'_>, attr: &str) -> Option<Vec<u8>> {
+/// Returns the decrypted secret bytes inside a `Zeroizing` buffer so the
+/// allocation is scrubbed when dropped.  The borrowed `&str` from
+/// keepass-rs is backed by its `SecretBox` storage, which already
+/// zeroizes on drop — what we wrap here is the *new* allocation we make
+/// to ferry the bytes out of this function.
+pub(crate) fn resolve_secret(entry: &EntryRef<'_>, attr: &str) -> Option<Zeroizing<Vec<u8>>> {
+    // Fast path for the SSH PEM — routes through ssh::resolve_ssh_private_key
+    // which handles attachment vs external-file lookup, decryption with the
+    // entry password, and re-encoding as unencrypted OpenSSH PEM.
+    if attr == SECRET_PRIVATE_KEY {
+        return crate::ssh::resolve_ssh_private_key(entry)
+            .ok()
+            .map(|pem| Zeroizing::new(pem.as_bytes().to_vec()));
+    }
+
     let value: Option<&str> = match attr {
         SECRET_PASSWORD => entry.get_password(),
         SECRET_NOTES => entry.get(fields::NOTES),
@@ -181,7 +223,7 @@ pub(crate) fn resolve_secret(entry: &EntryRef<'_>, attr: &str) -> Option<Vec<u8>
     };
     value
         .filter(|s| !s.is_empty())
-        .map(|s| s.as_bytes().to_vec())
+        .map(|s| Zeroizing::new(s.as_bytes().to_vec()))
 }
 
 // ── ItemMeta builder ─────────────────────────────────────────────────────────

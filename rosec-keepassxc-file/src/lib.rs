@@ -24,7 +24,9 @@
 
 mod cipher;
 mod host_file;
+mod host_watch;
 mod protocol;
+mod ssh;
 
 use std::io::Cursor;
 use std::sync::{Mutex, MutexGuard};
@@ -32,6 +34,7 @@ use std::sync::{Mutex, MutexGuard};
 use base64::Engine;
 use extism_pdk::*;
 use keepass::{Database, DatabaseKey};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::protocol::*;
 
@@ -75,6 +78,17 @@ struct AuthState {
     last_mtime_secs: u64,
     /// Epoch seconds when the database was loaded — exposed via `status`.
     last_sync_epoch_secs: u64,
+    /// Cached master password.  Held in `Zeroizing` so it scrubs on lock().
+    /// Lets `sync()` re-decrypt automatically when the kdbx file changes
+    /// on disk (e.g. when KeePassXC saves a new entry) instead of
+    /// forcing the user to re-authenticate.
+    ///
+    /// Trade-off: master password sits in WASM linear memory for the
+    /// duration of the unlocked session.  Same threat model as the
+    /// existing rosec-wasm cache_key mechanism for Bitwarden — acceptable
+    /// because the WASM sandbox is process-isolated and lock() zeroizes
+    /// the entire AuthState.
+    master_password: Zeroizing<String>,
 }
 
 // ── plugin_manifest ───────────────────────────────────────────────────────────
@@ -204,10 +218,13 @@ fn now_epoch_secs() -> u64 {
 }
 
 #[plugin_fn]
-pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
+pub fn unlock(Json(mut req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
     let Some(state) = guard.as_mut() else {
+        // Scrub the password before returning so the caller-supplied bytes
+        // don't linger in WASM linear memory.
+        req.password.zeroize();
         return Ok(Json(SimpleResponse {
             ok: false,
             error: Some("plugin not initialised".into()),
@@ -221,13 +238,34 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
 
     let mtime_secs = host_file::stat(&path).map(|s| s.mtime_secs).unwrap_or(0);
 
-    match open_database(&path, key_file.as_deref(), &req.password) {
+    // Hand-off the password to a Zeroizing buffer immediately, then scrub
+    // the original on the request struct.  Two reasons:
+    //  - `req.password` is an ordinary `String` whose backing allocation
+    //    is freed (without zeroing) when this function returns.
+    //  - The cached copy on `AuthState.master_password` lives for the
+    //    duration of the unlocked session for host_watch re-decrypt; we
+    //    don't want a *second* copy on the stack/heap as well.
+    let password = Zeroizing::new(std::mem::take(&mut req.password));
+
+    match open_database(&path, key_file.as_deref(), &password) {
         Ok(db) => {
             state.auth = Some(AuthState {
                 db,
                 last_mtime_secs: mtime_secs,
                 last_sync_epoch_secs: now_epoch_secs(),
+                master_password: password,
             });
+            // Subscribe to host filesystem events for the kdbx (and the key
+            // file, if any).  Failure here is non-fatal — we still fall back
+            // to mtime polling on each sync().
+            if let Err(e) = host_watch::watch(&path) {
+                info!("host_watch: register failed for kdbx: {e}");
+            }
+            if let Some(kf) = &key_file
+                && let Err(e) = host_watch::watch(kf)
+            {
+                info!("host_watch: register failed for key file: {e}");
+            }
             Ok(Json(SimpleResponse {
                 ok: true,
                 error: None,
@@ -276,6 +314,66 @@ pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
     }))
 }
 
+// ── host_watch event handler ──────────────────────────────────────────────────
+
+/// Payload format must match `rosec_wasm::host_watch::WatchEvent`.
+#[derive(Debug, serde::Deserialize)]
+struct WatchEvent {
+    path: String,
+    kind: String,
+}
+
+/// Re-stat the kdbx and re-decrypt with the cached master password if mtime
+/// has advanced.  Used by both `sync()` and `on_path_changed`.
+///
+/// Returns `Ok(true)` if a re-decrypt happened, `Ok(false)` if the file was
+/// unchanged.  Returns `Err(msg)` on stat or decrypt failure; on decrypt
+/// failure the caller is responsible for clearing `state.auth` (KeePassXC
+/// may have rotated the master password externally).
+fn try_redecrypt(state: &mut GuestState) -> Result<bool, String> {
+    let Some(auth) = state.auth.as_mut() else {
+        return Ok(false);
+    };
+    let stat = host_file::stat(&state.config.path).map_err(|e| format!("stat: {e}"))?;
+    if stat.mtime_secs == auth.last_mtime_secs {
+        auth.last_sync_epoch_secs = now_epoch_secs();
+        return Ok(false);
+    }
+    info!(
+        "kdbx: file mtime changed ({} -> {}), re-decrypting",
+        auth.last_mtime_secs, stat.mtime_secs
+    );
+    let path = state.config.path.clone();
+    let key_file = state.config.key_file.clone();
+    // Hold the password by &Zeroizing<String>; no plaintext clone.
+    let db = open_database(&path, key_file.as_deref(), &auth.master_password)?;
+    auth.db = db;
+    auth.last_mtime_secs = stat.mtime_secs;
+    auth.last_sync_epoch_secs = now_epoch_secs();
+    Ok(true)
+}
+
+/// Called by the host whenever a file we registered via `host_watch::watch`
+/// changes on disk.  Triggers an immediate re-decrypt with the cached
+/// master password.  Failure clears `auth` so the next call surfaces an
+/// auth error rather than serving stale data.
+#[plugin_fn]
+pub fn on_path_changed(Json(evt): Json<WatchEvent>) -> FnResult<()> {
+    info!("on_path_changed: {} {}", evt.kind, evt.path);
+    let mut guard = STATE.lock();
+    let Some(state) = guard.as_mut() else {
+        return Ok(());
+    };
+    match try_redecrypt(state) {
+        Ok(_) => {}
+        Err(msg) => {
+            warn!("on_path_changed: re-decrypt failed, locking provider: {msg}");
+            state.auth = None;
+        }
+    }
+    Ok(())
+}
+
 // ── sync ──────────────────────────────────────────────────────────────────────
 
 #[plugin_fn]
@@ -289,32 +387,8 @@ pub fn sync(_: ()) -> FnResult<Json<SimpleResponse>> {
             two_factor_methods: None,
         }));
     };
-    let Some(auth) = state.auth.as_mut() else {
+    if state.auth.is_none() {
         // Locked — sync is a no-op until next unlock.
-        return Ok(Json(SimpleResponse {
-            ok: true,
-            error: None,
-            error_kind: None,
-            two_factor_methods: None,
-        }));
-    };
-
-    // Re-stat the file; if mtime is unchanged, nothing to do.
-    let stat = match host_file::stat(&state.config.path) {
-        Ok(s) => s,
-        Err(e) => {
-            return Ok(Json(SimpleResponse {
-                ok: false,
-                error: Some(format!("stat: {e}")),
-                error_kind: Some(ErrorKind::Unavailable),
-                two_factor_methods: None,
-            }));
-        }
-    };
-
-    if stat.mtime_secs == auth.last_mtime_secs {
-        // Stamp last_sync so status reports the freshness check happened.
-        auth.last_sync_epoch_secs = now_epoch_secs();
         return Ok(Json(SimpleResponse {
             ok: true,
             error: None,
@@ -323,17 +397,31 @@ pub fn sync(_: ()) -> FnResult<Json<SimpleResponse>> {
         }));
     }
 
-    // File on disk changed.  Without the master password we cannot re-decrypt;
-    // ask the host to prompt for unlock again.  Returning Unavailable makes
-    // the host treat this as a transient error rather than a hard failure.
-    Ok(Json(SimpleResponse {
-        ok: false,
-        error: Some(
-            "kdbx file changed on disk — re-authenticate to pick up the new contents".into(),
-        ),
-        error_kind: Some(ErrorKind::Unavailable),
-        two_factor_methods: None,
-    }))
+    match try_redecrypt(state) {
+        Ok(_) => Ok(Json(SimpleResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            two_factor_methods: None,
+        })),
+        Err(msg) => {
+            // Re-decrypt failed.  Usually means the master password was
+            // rotated externally (File → Database settings → Database
+            // credentials).  Drop AuthState so the next call forces a
+            // re-auth with the new password.
+            warn!("kdbx: re-decrypt failed, locking provider: {msg}");
+            state.auth = None;
+            Ok(Json(SimpleResponse {
+                ok: false,
+                error: Some(format!(
+                    "kdbx file changed on disk and re-decrypt failed ({msg}) — \
+                     re-authenticate to continue"
+                )),
+                error_kind: Some(ErrorKind::AuthFailed),
+                two_factor_methods: None,
+            }))
+        }
+    }
 }
 
 // ── helpers for item-level functions ─────────────────────────────────────────
@@ -448,17 +536,27 @@ pub fn get_item_attributes(
 
 #[plugin_fn]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
-    let bytes_result: Result<Option<Vec<u8>>, String> = with_db(|_, db| {
+    let bytes_result: Result<Option<Zeroizing<Vec<u8>>>, String> = with_db(|_, db| {
         lookup_entry_by_id(db, &req.id).and_then(|e| cipher::resolve_secret(&e, &req.attr))
     });
 
     match bytes_result {
-        Ok(Some(bytes)) => Ok(Json(SecretAttrResponse {
-            ok: true,
-            error: None,
-            error_kind: None,
-            value_b64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-        })),
+        Ok(Some(bytes)) => {
+            // Encode to base64 for transit, then drop the plaintext buffer
+            // (Zeroizing scrubs on drop).  The base64 string itself is a
+            // separate allocation owned by the response and serialized
+            // through extism — it can't be wrapped in Zeroizing across the
+            // protocol boundary, but it's confined to this WASM instance's
+            // linear memory, which is destroyed when the plugin exits.
+            let value_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            drop(bytes);
+            Ok(Json(SecretAttrResponse {
+                ok: true,
+                error: None,
+                error_kind: None,
+                value_b64: Some(value_b64),
+            }))
+        }
         Ok(None) => Ok(Json(SecretAttrResponse {
             ok: false,
             error: Some(format!(
@@ -477,13 +575,81 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
     }
 }
 
+// ── SSH key extraction ────────────────────────────────────────────────────────
+
+#[plugin_fn]
+pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
+    let result: Result<Vec<WasmSshKeyMeta>, String> = with_db(|_, db| {
+        db.iter_all_entries()
+            .filter_map(|e| ssh::entry_to_ssh_key_meta(db, &e))
+            .collect()
+    });
+    match result {
+        Ok(keys) => Ok(Json(SshKeyListResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            keys,
+        })),
+        Err(msg) => Ok(Json(SshKeyListResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            keys: Vec::new(),
+        })),
+    }
+}
+
+#[plugin_fn]
+pub fn get_ssh_private_key(
+    Json(req): Json<SshPrivateKeyRequest>,
+) -> FnResult<Json<SshPrivateKeyResponse>> {
+    let pem_result: Result<Result<Zeroizing<String>, String>, String> = with_db(|_, db| {
+        match lookup_entry_by_id(db, &req.item_id) {
+            Some(entry) => ssh::resolve_ssh_private_key(&entry),
+            None => Err(format!("item not found: {}", req.item_id)),
+        }
+    });
+
+    match pem_result {
+        Ok(Ok(pem)) => {
+            // The clone here is unavoidable — `SshPrivateKeyResponse.pem`
+            // is `Option<String>`, and serde owns the buffer it serializes.
+            // The `Zeroizing<String>` source is dropped at end of scope,
+            // scrubbing that one copy; the host wraps the deserialized
+            // string in `Zeroizing` again on receipt.
+            let response = SshPrivateKeyResponse {
+                ok: true,
+                error: None,
+                error_kind: None,
+                pem: Some(pem.to_string()),
+            };
+            drop(pem);
+            Ok(Json(response))
+        }
+        Ok(Err(msg)) => Ok(Json(SshPrivateKeyResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::NotFound),
+            pem: None,
+        })),
+        Err(msg) => Ok(Json(SshPrivateKeyResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::Unavailable),
+            pem: None,
+        })),
+    }
+}
+
 // ── Static metadata queried once at plugin load ───────────────────────────────
 
 #[plugin_fn]
 pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     // Phase 1: read-only, sync via mtime polling.
+    // Ssh: SSH key extraction from KeeAgent.settings + binary attachments.
     Ok(Json(CapabilitiesResponse {
-        capabilities: vec!["Sync".into()],
+        capabilities: vec!["Sync".into(), "Ssh".into()],
     }))
 }
 

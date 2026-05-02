@@ -35,6 +35,14 @@ base64 = "0.22"
 # UUID parsing for resolving items by ID
 uuid = { version = "1", default-features = false }
 
+# SSH private key parsing — used to detect encrypted keys, decrypt with the
+# entry password, and re-emit an unencrypted OpenSSH PEM that the host
+# rosec-ssh-agent can ingest without further passphrase handling.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "rsa", "p256", "encryption"] }
+
+# UTF-16 → UTF-8 conversion for KeePassXC's KeeAgent.settings XML payloads.
+encoding_rs = "0.8"
+
 # Local patch: keepass-rs's `cfg(target_arch = "wasm32")` is too broad — it
 # pulls in js-sys/wasm-bindgen for ALL wasm32 targets, including
 # wasm32-wasip1 where wasm-bindgen post-processing isn't run and the
