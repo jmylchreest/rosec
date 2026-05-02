@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use rosec_core::config::{Config, PromptConfig};
 
+use crate::lock_policy::LockPolicy;
 use crate::prompt_manager::PromptManager;
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
@@ -108,27 +109,9 @@ pub struct ServiceState {
     /// read from this cache, ensuring they always return results regardless of
     /// provider lock state.
     metadata_cache: Arc<Mutex<HashMap<String, ItemMeta>>>,
-    /// Prevents multiple simultaneous unlock attempts for the same provider.
-    unlock_in_progress: tokio::sync::Mutex<()>,
-    /// Per-provider sync coalescing: ensures at most one active sync per provider.
-    ///
-    /// Keyed by provider ID.  Lazily populated on first sync call.  Callers that
-    /// need the result (D-Bus `SyncProvider`) await the lock; background callers
-    /// (timer, SignalR nudge) use `try_lock` and skip if already in progress.
-    sync_in_progress: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Timestamp of the last client activity (D-Bus method call).
-    last_activity: Mutex<Option<SystemTime>>,
-    /// Timestamp when any provider was first unlocked (for max-unlocked policy).
-    ///
-    /// Legacy global field — kept for the `auto_lock` (lock-all) path.
-    /// Per-provider max-unlocked checks use `unlocked_since_map` instead.
-    unlocked_since: Mutex<Option<SystemTime>>,
-    /// Per-provider unlock timestamps for per-provider max-unlocked checking.
-    ///
-    /// Key: provider ID.  Value: when that provider was unlocked.
-    /// Populated by `mark_provider_unlocked()`, cleared by
-    /// `clear_provider_unlocked()` or bulk `mark_locked()`.
-    unlocked_since_map: Mutex<HashMap<String, SystemTime>>,
+    /// Idle/max-unlocked tracking and unlock/sync mutex registry.  See
+    /// [`LockPolicy`].
+    pub locks: LockPolicy,
     /// Tokio runtime handle.
     ///
     /// zbus dispatches D-Bus method calls on its own `async-io` executor, which
@@ -234,11 +217,7 @@ impl ServiceState {
             registered_items: Arc::new(Mutex::new(HashSet::new())),
             last_sync: Arc::new(Mutex::new(None)),
             conn: RwLock::new(conn),
-            unlock_in_progress: tokio::sync::Mutex::new(()),
-            sync_in_progress: std::sync::Mutex::new(HashMap::new()),
-            last_activity: Mutex::new(None),
-            unlocked_since: Mutex::new(None),
-            unlocked_since_map: Mutex::new(HashMap::new()),
+            locks: LockPolicy::new(),
             tokio_handle,
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             prompts: PromptManager::new(prompt_config),
@@ -660,105 +639,48 @@ impl ServiceState {
 
     /// Record that client activity has occurred (resets idle timer).
     pub fn touch_activity(&self) {
-        if let Ok(mut guard) = self.last_activity.lock() {
-            *guard = Some(SystemTime::now());
-        }
+        self.locks.touch_activity();
     }
 
     /// Record that a provider has been unlocked (starts max-unlocked timer).
-    ///
-    /// Updates both the global `unlocked_since` (for the lock-all path) and the
-    /// per-provider `unlocked_since_map` (for per-provider autolock).
     pub(crate) fn mark_unlocked(&self) {
-        let now = SystemTime::now();
-        if let Ok(mut guard) = self.unlocked_since.lock() {
-            *guard = Some(now);
-        }
+        self.locks.mark_unlocked();
     }
 
     /// Record that a specific provider has been unlocked.
-    ///
-    /// Also updates the global `unlocked_since` timestamp.
     pub(crate) fn mark_provider_unlocked(&self, provider_id: &str) {
-        let now = SystemTime::now();
-        if let Ok(mut guard) = self.unlocked_since.lock() {
-            *guard = Some(now);
-        }
-        if let Ok(mut guard) = self.unlocked_since_map.lock() {
-            guard.insert(provider_id.to_string(), now);
-        }
+        self.locks.mark_provider_unlocked(provider_id);
     }
 
     /// Clear the unlock timestamp for all providers (all locked).
     pub fn mark_locked(&self) {
-        if let Ok(mut guard) = self.unlocked_since.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.unlocked_since_map.lock() {
-            guard.clear();
-        }
+        self.locks.mark_all_locked();
     }
 
     /// Clear the unlock timestamp for a specific provider.
     pub(crate) fn clear_provider_unlocked(&self, provider_id: &str) {
-        if let Ok(mut guard) = self.unlocked_since_map.lock() {
-            guard.remove(provider_id);
-        }
+        self.locks.clear_provider_unlocked(provider_id);
     }
 
     /// Returns `true` if no providers are currently tracked as unlocked.
     pub fn all_providers_locked(&self) -> bool {
-        match self.unlocked_since_map.lock() {
-            Ok(guard) => guard.is_empty(),
-            Err(_) => true,
-        }
+        self.locks.all_providers_locked()
     }
 
-    /// Check if the provider should be auto-locked based on idle timeout.
-    ///
     /// Returns `true` if the provider has been idle longer than `idle_minutes`.
     pub fn is_idle_expired(&self, idle_minutes: u64) -> bool {
-        let guard = match self.last_activity.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        match *guard {
-            Some(last) => {
-                let elapsed = SystemTime::now().duration_since(last).unwrap_or_default();
-                elapsed.as_secs() >= idle_minutes * 60
-            }
-            None => false,
-        }
+        self.locks.is_idle_expired(idle_minutes)
     }
 
-    /// Check if the provider has been unlocked longer than `max_minutes`.
+    /// Returns `true` if the provider has been unlocked longer than `max_minutes`.
     pub fn is_max_unlocked_expired(&self, max_minutes: u64) -> bool {
-        let guard = match self.unlocked_since.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        match *guard {
-            Some(since) => {
-                let elapsed = SystemTime::now().duration_since(since).unwrap_or_default();
-                elapsed.as_secs() >= max_minutes * 60
-            }
-            None => false,
-        }
+        self.locks.is_max_unlocked_expired(max_minutes)
     }
 
-    /// Check if a specific provider has been unlocked longer than `max_minutes`.
+    /// Returns `true` if a specific provider has been unlocked longer than `max_minutes`.
     pub fn is_provider_max_unlocked_expired(&self, provider_id: &str, max_minutes: u64) -> bool {
-        let guard = match self.unlocked_since_map.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        match guard.get(provider_id) {
-            Some(since) => {
-                let elapsed = SystemTime::now().duration_since(*since).unwrap_or_default();
-                elapsed.as_secs() >= max_minutes * 60
-            }
-            None => false,
-        }
+        self.locks
+            .is_provider_max_unlocked_expired(provider_id, max_minutes)
     }
 
     /// Resolve the effective autolock policy for a given provider/vault ID.
@@ -1289,9 +1211,7 @@ impl ServiceState {
         self.mark_all_locked_in_cache();
         // Clear the activity timestamp so the idle check doesn't keep
         // re-firing every poll interval on an already-locked vault.
-        if let Ok(mut guard) = self.last_activity.lock() {
-            *guard = None;
-        }
+        self.locks.clear_activity();
         info!("all providers auto-locked");
         Ok(())
     }
@@ -1335,7 +1255,7 @@ impl ServiceState {
         }
 
         // Acquire the unlock mutex to prevent concurrent prompts.
-        let _guard = self.unlock_in_progress.lock().await;
+        let _guard = self.locks.unlock_guard().await;
 
         // All providers require interactive unlock — return the sentinel for the
         // first locked one so the client can prompt and call AuthProvider.
@@ -1841,13 +1761,7 @@ impl ServiceState {
     /// An `await` caller serialises behind the in-flight sync; a `try_lock`
     /// caller (background timer, SignalR nudge) skips without redundant work.
     fn sync_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self
-            .sync_in_progress
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.entry(provider_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        self.locks.sync_mutex_for(provider_id)
     }
 
     /// Sync a specific provider against the remote server, then rebuild the cache.

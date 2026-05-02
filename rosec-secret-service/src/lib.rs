@@ -3,6 +3,7 @@ pub mod crypto;
 pub mod daemon;
 pub mod error;
 pub mod item;
+pub mod lock_policy;
 pub mod portal;
 pub mod prompt;
 pub mod prompt_manager;
