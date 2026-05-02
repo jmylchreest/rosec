@@ -548,12 +548,7 @@ impl RosecManagement {
         // cancel_prompt() sends SIGTERM to the child and removes it from the registry.
         // We check whether the path existed before calling it.
         let prompt_path = prompt_path.as_str();
-        let existed = self
-            .state
-            .active_prompts
-            .lock()
-            .map(|g| g.contains_key(prompt_path))
-            .unwrap_or(false);
+        let existed = self.state.prompts.contains_path(prompt_path);
         self.state.cancel_prompt(prompt_path);
         Ok(existed)
     }

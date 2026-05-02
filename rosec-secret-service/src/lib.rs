@@ -5,6 +5,7 @@ pub mod error;
 pub mod item;
 pub mod portal;
 pub mod prompt;
+pub mod prompt_manager;
 pub mod server;
 pub mod service;
 pub mod session;

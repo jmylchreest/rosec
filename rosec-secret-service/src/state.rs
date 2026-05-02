@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use rosec_core::config::{Config, PromptConfig};
+
+use crate::prompt_manager::PromptManager;
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
@@ -115,19 +116,6 @@ pub struct ServiceState {
     /// need the result (D-Bus `SyncProvider`) await the lock; background callers
     /// (timer, SignalR nudge) use `try_lock` and skip if already in progress.
     sync_in_progress: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Per-provider prompt serialization: ensures at most one active prompt
-    /// subprocess per provider at a time.
-    ///
-    /// When multiple D-Bus clients race to `Unlock()` the same provider (e.g.
-    /// after sleep/resume), each gets its own `SecretPrompt` object and calls
-    /// `Prompt()`.  The second `run_prompt_task` awaits this lock, and when it
-    /// acquires it, checks whether the provider is still locked.  If the first
-    /// prompt already unlocked it, the second emits `Completed(success)`
-    /// immediately without showing a GUI dialog.
-    ///
-    /// This matches gnome-keyring-daemon's `unlock_prompt_queue` serialization
-    /// approach — only one password dialog is shown at a time per provider.
-    prompt_in_progress: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Timestamp of the last client activity (D-Bus method call).
     last_activity: Mutex<Option<SystemTime>>,
     /// Timestamp when any provider was first unlocked (for max-unlocked policy).
@@ -149,22 +137,9 @@ pub struct ServiceState {
     /// this handle; otherwise `tokio::time::sleep` and friends will panic with
     /// "no reactor running".
     tokio_handle: tokio::runtime::Handle,
-    /// Monotonically increasing counter for unique prompt object paths.
-    prompt_counter: AtomicU32,
-    /// Active prompts: maps prompt D-Bus path → (provider_id, child_pid).
-    ///
-    /// `child_pid` is `Some` while a prompt subprocess is running; `None` for
-    /// prompts that have already completed or been dismissed.
-    pub active_prompts: Mutex<HashMap<String, (String, Option<u32>)>>,
-    /// Deferred operations to execute after a prompt (unlock) succeeds.
-    ///
-    /// Key: prompt D-Bus path.  Populated by `allocate_prompt_with_operation()`
-    /// and consumed by `take_pending_operation()` in `run_prompt_task` after unlock.
-    pending_operations: Mutex<HashMap<String, crate::prompt::PendingOperation>>,
-    /// Prompt program configuration (binary path, theme, etc.).
-    /// Behind a `RwLock` so it can be updated by the config hot-reload watcher
-    /// without restarting the daemon.
-    prompt_config: RwLock<PromptConfig>,
+    /// Prompt registry, deferred ops, per-provider serialization mutex,
+    /// and live `PromptConfig`.  See [`PromptManager`].
+    pub prompts: PromptManager,
     /// The full non-provider configuration, kept live so background tasks always
     /// read the latest values rather than a snapshot taken at startup.
     live_config: Arc<RwLock<Config>>,
@@ -261,16 +236,12 @@ impl ServiceState {
             conn: RwLock::new(conn),
             unlock_in_progress: tokio::sync::Mutex::new(()),
             sync_in_progress: std::sync::Mutex::new(HashMap::new()),
-            prompt_in_progress: std::sync::Mutex::new(HashMap::new()),
             last_activity: Mutex::new(None),
             unlocked_since: Mutex::new(None),
             unlocked_since_map: Mutex::new(HashMap::new()),
             tokio_handle,
-            prompt_counter: AtomicU32::new(0),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
-            active_prompts: Mutex::new(HashMap::new()),
-            pending_operations: Mutex::new(HashMap::new()),
-            prompt_config: RwLock::new(prompt_config),
+            prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
         }
     }
@@ -311,9 +282,7 @@ impl ServiceState {
         if let Ok(mut guard) = self.live_config.write() {
             *guard = new_config.clone();
         }
-        if let Ok(mut guard) = self.prompt_config.write() {
-            *guard = new_config.prompt;
-        }
+        self.prompts.update_config(new_config.prompt);
     }
 
     /// Return a snapshot of the current live config.
@@ -329,10 +298,7 @@ impl ServiceState {
     /// Used by the SSH agent to resolve the `rosec-prompt` binary and theme
     /// for per-key signing confirmation dialogs.
     pub fn prompt_config(&self) -> PromptConfig {
-        self.prompt_config
-            .read()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+        self.prompts.config()
     }
 
     /// Return the `return_attr` patterns for a given provider ID.
@@ -620,99 +586,55 @@ impl ServiceState {
         found
     }
 
-    /// Allocate a unique prompt D-Bus path for the given provider and register
-    /// it in `active_prompts` with no child PID yet (filled in by `Prompt()`).
-    ///
-    /// Returns the path string, e.g. `/org/freedesktop/secrets/prompt/p3`.
+    /// Allocate a unique prompt D-Bus path for the given provider.
     pub fn allocate_prompt(&self, provider_id: &str) -> String {
-        let n = self.prompt_counter.fetch_add(1, Ordering::Relaxed);
-        let path = format!("/org/freedesktop/secrets/prompt/p{n}");
-        if let Ok(mut map) = self.active_prompts.lock() {
-            map.insert(path.clone(), (provider_id.to_string(), None));
-        }
-        path
+        self.prompts.allocate(provider_id)
     }
 
     /// Like [`allocate_prompt`](Self::allocate_prompt) but also stashes a
     /// [`PendingOperation`](crate::prompt::PendingOperation) to execute after the
     /// prompt (unlock) succeeds.
-    ///
-    /// Used by `CreateItem` / `Item.Delete` when the write provider is locked:
-    /// the D-Bus method returns the prompt path, and after the user completes
-    /// the unlock the deferred operation runs automatically.
     pub fn allocate_prompt_with_operation(
         &self,
         provider_id: &str,
         op: crate::prompt::PendingOperation,
     ) -> String {
-        let path = self.allocate_prompt(provider_id);
-        if let Ok(mut map) = self.pending_operations.lock() {
-            map.insert(path.clone(), op);
-        }
-        path
+        self.prompts.allocate_with_operation(provider_id, op)
     }
 
     /// Retrieve and remove the pending operation for a completed prompt.
-    ///
-    /// Returns `None` for plain unlock prompts (no deferred work).
     pub fn take_pending_operation(
         &self,
         prompt_path: &str,
     ) -> Option<crate::prompt::PendingOperation> {
-        self.pending_operations
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(prompt_path))
+        self.prompts.take_pending_operation(prompt_path)
     }
 
-    /// Store the child PID for an active prompt (called once the subprocess starts).
+    /// Store the child PID for an active prompt.
     pub fn set_prompt_pid(&self, prompt_path: &str, pid: u32) {
-        if let Ok(mut map) = self.active_prompts.lock()
-            && let Some(entry) = map.get_mut(prompt_path)
-        {
-            entry.1 = Some(pid);
-        }
+        self.prompts.set_pid(prompt_path, pid);
     }
 
-    /// Kill the active prompt subprocess (if any) and remove it from the registry.
-    ///
-    /// Sends SIGTERM to the child PID. Safe to call even if the child has already
-    /// exited (the signal is silently ignored).  Also deregisters the D-Bus
-    /// object so stale prompt objects do not accumulate.
+    /// Kill the active prompt subprocess (if any) and deregister the D-Bus
+    /// object.  Safe to call after the child has exited.
     pub fn cancel_prompt(&self, prompt_path: &str) {
-        let pid = self
-            .active_prompts
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(prompt_path))
-            .and_then(|(_, pid)| pid);
-
-        if let Some(pid) = pid {
+        if let Some(pid) = self.prompts.remove_and_get_pid(prompt_path) {
             #[cfg(unix)]
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGTERM);
             }
             tracing::debug!(prompt = %prompt_path, pid, "prompt child terminated");
         }
-
         self.deregister_prompt_object(prompt_path);
     }
 
     /// Remove a completed prompt from the registry without killing the child.
-    ///
-    /// Also deregisters the D-Bus object so stale prompt objects do not
-    /// accumulate on the object server.
     pub fn finish_prompt(&self, prompt_path: &str) {
-        if let Ok(mut map) = self.active_prompts.lock() {
-            map.remove(prompt_path);
-        }
+        self.prompts.remove(prompt_path);
         self.deregister_prompt_object(prompt_path);
     }
 
     /// Remove a `SecretPrompt` D-Bus object from the object server.
-    ///
-    /// Safe to call even if no object is registered at the path (returns
-    /// silently).  Uses `spawn_on_tokio` because zbus object removal is async.
     fn deregister_prompt_object(&self, prompt_path: &str) {
         let conn = self.conn();
         let path = prompt_path.to_string();
@@ -732,20 +654,8 @@ impl ServiceState {
     }
 
     /// Get or create a per-provider Tokio mutex for serializing prompt tasks.
-    ///
-    /// Follows the same lazy-init pattern as `sync_mutex_for`.  When multiple
-    /// clients trigger `Unlock()` for the same provider, the second prompt task
-    /// awaits this mutex.  After acquiring it, the task checks whether the
-    /// provider was already unlocked by the first prompt and skips the GUI
-    /// dialog if so.
     pub(crate) fn prompt_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self
-            .prompt_in_progress
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.entry(provider_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        self.prompts.mutex_for(provider_id)
     }
 
     /// Record that client activity has occurred (resets idle timer).
@@ -1140,11 +1050,7 @@ impl ServiceState {
     /// environment via the session bus.  Discovered variables are returned in
     /// `display_env` so callers can inject them into child processes.
     fn resolve_prompt_env(&self) -> PromptEnv {
-        let cfg = self
-            .prompt_config
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let cfg = self.prompts.config();
         let program = match cfg.backend.as_str() {
             "builtin" | "" => resolve_prompt_binary(),
             custom => custom.to_string(),
