@@ -420,6 +420,20 @@ pub struct PluginManifest {
     /// e.g. `"email"` for bitwarden-pm.  If `None`, falls back to the kind.
     #[serde(default)]
     pub id_derivation_key: Option<String>,
+    /// `true` if the plugin is experimental — shown to the user as a warning
+    /// in `rosec provider kinds`, `rosec provider list`, `rosec status`, and
+    /// confirmed via prompt in `rosec provider add`.
+    ///
+    /// Defaults to `false` so existing plugins (without this field) are
+    /// treated as stable.
+    #[serde(default)]
+    pub experimental: bool,
+    /// Names of provider-internal features that are experimental, even when
+    /// the provider itself is stable.  Surfaced when the user enables one of
+    /// these via config.  Unused for now — reserved for future per-feature
+    /// gating.
+    #[serde(default)]
+    pub experimental_features: Vec<String>,
 }
 
 /// Describes a single config option a plugin accepts.

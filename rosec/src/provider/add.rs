@@ -26,6 +26,20 @@ pub async fn run(args: ProviderAddArgs) -> Result<()> {
         bail!("unknown provider kind '{kind}'. Known kinds: {known}");
     }
 
+    if is_discovered
+        && let Some(plugin) = registry.get(kind)
+        && plugin.manifest.experimental
+    {
+        eprintln!(
+            "warning: provider kind '{kind}' is EXPERIMENTAL — interfaces, \
+             on-disk format, and behaviour may change without notice."
+        );
+        let confirm = crate::prompt_field("Continue? (yes/no)", "no", "text").await?;
+        if confirm.as_str() != "yes" {
+            bail!("cancelled");
+        }
+    }
+
     let (mut options, custom_path, collection) =
         parse_option_args(&args.options, args.path, args.collection);
 

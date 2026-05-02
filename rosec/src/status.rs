@@ -67,6 +67,18 @@ pub async fn run() -> Result<()> {
             .unwrap_or_default()
             .as_secs();
 
+        let registry = rosec_wasm::discovery::scan_plugins(
+            rosec_core::WasmPreference::default(),
+            rosec_core::WasmVerify::default(),
+        );
+        let is_experimental_kind = |k: &str| -> bool {
+            registry
+                .get(k)
+                .map(|p| p.manifest.experimental)
+                .unwrap_or(false)
+        };
+        let mut any_experimental = false;
+
         let mut rows: Vec<RowData> = providers
             .iter()
             .map(
@@ -92,10 +104,16 @@ pub async fn run() -> Result<()> {
                         format_relative_time(*last_sync, now_epoch)
                     };
                     let caps = capability_codes(capabilities);
+                    let kind_display = if is_experimental_kind(kind) {
+                        any_experimental = true;
+                        format!("{kind}*")
+                    } else {
+                        kind.clone()
+                    };
                     RowData {
                         id: id.clone(),
                         name: name.clone(),
-                        kind: kind.clone(),
+                        kind: kind_display,
                         caps,
                         state,
                         sync,
@@ -105,10 +123,16 @@ pub async fn run() -> Result<()> {
             .collect();
 
         for entry in &disabled {
+            let kind_display = if is_experimental_kind(&entry.kind) {
+                any_experimental = true;
+                format!("{}*", entry.kind)
+            } else {
+                entry.kind.clone()
+            };
             rows.push(RowData {
                 id: entry.id.clone(),
                 name: entry.id.clone(),
-                kind: entry.kind.clone(),
+                kind: kind_display,
                 caps: String::new(),
                 state: "disabled".to_string(),
                 sync: String::new(),
@@ -223,6 +247,9 @@ pub async fn run() -> Result<()> {
                     trunc(&row.state, state_w),
                 );
             }
+        }
+        if any_experimental {
+            println!("  *: experimental provider — interfaces and behaviour may change");
         }
     }
     println!();

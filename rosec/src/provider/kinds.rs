@@ -39,7 +39,11 @@ pub fn run() {
         let plugin = registry
             .get(kind)
             .expect("kind from registry.kinds() must exist");
-        println!("  {kind}");
+        if plugin.manifest.experimental {
+            println!("  {kind}  [EXPERIMENTAL]");
+        } else {
+            println!("  {kind}");
+        }
         println!("    {}", plugin.manifest.description);
         if !plugin.manifest.required_options.is_empty() {
             println!("    Required:");
