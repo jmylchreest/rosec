@@ -327,6 +327,187 @@ fn cipher_to_wasm_meta(provider_id: &str, dc: &DecryptedCipher) -> WasmItemMeta 
     }
 }
 
+/// One sensitive field on a cipher subtype, used as the source-of-truth for
+/// both `build_item_attributes` (which fields go into `secret_names`) and
+/// `resolve_secret_attr` (how to fetch the bytes for a given name).
+///
+/// Some fields are reachable via the secret API but exposed as public
+/// attributes rather than secret names — `login.username` is the only such
+/// case today, marked `is_secret_name = false`.
+struct CipherField<T> {
+    /// Attribute name exposed via the secret API.
+    name: &'static str,
+    /// Whether this field appears in the `secret_names` list.
+    is_secret_name: bool,
+    /// Accessor for the field on the decrypted struct.
+    getter: fn(&T) -> Option<&Zeroizing<String>>,
+}
+
+const LOGIN_SECRET_FIELDS: &[CipherField<DecryptedLogin>] = &[
+    CipherField {
+        name: "password",
+        is_secret_name: true,
+        getter: |l| l.password.as_ref(),
+    },
+    CipherField {
+        name: "totp",
+        is_secret_name: true,
+        getter: |l| l.totp.as_ref(),
+    },
+    // Username is fetchable via the secret API but exposed as a public
+    // attribute (per attribute-model decision) — not in secret_names.
+    CipherField {
+        name: "username",
+        is_secret_name: false,
+        getter: |l| l.username.as_ref(),
+    },
+];
+
+const CARD_SECRET_FIELDS: &[CipherField<DecryptedCard>] = &[
+    CipherField {
+        name: "cardholder",
+        is_secret_name: true,
+        getter: |c| c.cardholder_name.as_ref(),
+    },
+    CipherField {
+        name: "number",
+        is_secret_name: true,
+        getter: |c| c.number.as_ref(),
+    },
+    CipherField {
+        name: "exp_month",
+        is_secret_name: true,
+        getter: |c| c.exp_month.as_ref(),
+    },
+    CipherField {
+        name: "exp_year",
+        is_secret_name: true,
+        getter: |c| c.exp_year.as_ref(),
+    },
+    CipherField {
+        name: "code",
+        is_secret_name: true,
+        getter: |c| c.code.as_ref(),
+    },
+];
+
+const SSH_KEY_SECRET_FIELDS: &[CipherField<DecryptedSshKey>] = &[CipherField {
+    name: "private_key",
+    is_secret_name: true,
+    getter: |s| s.private_key.as_ref(),
+}];
+
+const IDENTITY_SECRET_FIELDS: &[CipherField<DecryptedIdentity>] = &[
+    CipherField {
+        name: "title",
+        is_secret_name: true,
+        getter: |i| i.title.as_ref(),
+    },
+    CipherField {
+        name: "first_name",
+        is_secret_name: true,
+        getter: |i| i.first_name.as_ref(),
+    },
+    CipherField {
+        name: "middle_name",
+        is_secret_name: true,
+        getter: |i| i.middle_name.as_ref(),
+    },
+    CipherField {
+        name: "last_name",
+        is_secret_name: true,
+        getter: |i| i.last_name.as_ref(),
+    },
+    CipherField {
+        name: "username",
+        is_secret_name: true,
+        getter: |i| i.username.as_ref(),
+    },
+    CipherField {
+        name: "company",
+        is_secret_name: true,
+        getter: |i| i.company.as_ref(),
+    },
+    CipherField {
+        name: "ssn",
+        is_secret_name: true,
+        getter: |i| i.ssn.as_ref(),
+    },
+    CipherField {
+        name: "passport_number",
+        is_secret_name: true,
+        getter: |i| i.passport_number.as_ref(),
+    },
+    CipherField {
+        name: "license_number",
+        is_secret_name: true,
+        getter: |i| i.license_number.as_ref(),
+    },
+    CipherField {
+        name: "email",
+        is_secret_name: true,
+        getter: |i| i.email.as_ref(),
+    },
+    CipherField {
+        name: "phone",
+        is_secret_name: true,
+        getter: |i| i.phone.as_ref(),
+    },
+    CipherField {
+        name: "address1",
+        is_secret_name: true,
+        getter: |i| i.address1.as_ref(),
+    },
+    CipherField {
+        name: "address2",
+        is_secret_name: true,
+        getter: |i| i.address2.as_ref(),
+    },
+    CipherField {
+        name: "address3",
+        is_secret_name: true,
+        getter: |i| i.address3.as_ref(),
+    },
+    CipherField {
+        name: "city",
+        is_secret_name: true,
+        getter: |i| i.city.as_ref(),
+    },
+    CipherField {
+        name: "state",
+        is_secret_name: true,
+        getter: |i| i.state.as_ref(),
+    },
+    CipherField {
+        name: "postal_code",
+        is_secret_name: true,
+        getter: |i| i.postal_code.as_ref(),
+    },
+    CipherField {
+        name: "country",
+        is_secret_name: true,
+        getter: |i| i.country.as_ref(),
+    },
+];
+
+/// Look up `attr` in `table` and return the field's bytes, if any.
+fn resolve_field<T>(table: &[CipherField<T>], obj: &T, attr: &str) -> Option<Vec<u8>> {
+    table
+        .iter()
+        .find(|f| f.name == attr)
+        .and_then(|f| (f.getter)(obj))
+        .map(zeroizing_to_bytes)
+}
+
+/// Append every populated field marked `is_secret_name` to `out`.
+fn append_secret_names<T>(table: &[CipherField<T>], obj: &T, out: &mut Vec<String>) {
+    for f in table {
+        if f.is_secret_name && (f.getter)(obj).is_some() {
+            out.push(f.name.to_string());
+        }
+    }
+}
+
 /// Build item attributes (public + secret names) for a decrypted cipher.
 ///
 /// Port of `BitwardenProvider::build_item_attributes`.
@@ -337,10 +518,8 @@ fn build_item_attributes(
     let mut public = HashMap::new();
     let mut secret_names = Vec::new();
 
-    // Shared public attributes (schema, type, folder, org, login, card, ssh, custom fields)
     populate_public_attrs(&mut public, dc);
 
-    // provider_id is only in ItemAttributes, not ItemMeta
     public.insert("provider_id".to_string(), provider_id.to_string());
 
     // notes — always sensitive
@@ -348,69 +527,17 @@ fn build_item_attributes(
         secret_names.push("notes".to_string());
     }
 
-    // -- Login sensitive --
     if let Some(login) = &dc.login {
-        if login.password.is_some() {
-            secret_names.push("password".to_string());
-        }
-        if login.totp.is_some() {
-            secret_names.push("totp".to_string());
-        }
+        append_secret_names(LOGIN_SECRET_FIELDS, login, &mut secret_names);
     }
-
-    // -- Card sensitive --
     if let Some(card) = &dc.card {
-        if card.cardholder_name.is_some() {
-            secret_names.push("cardholder".to_string());
-        }
-        if card.number.is_some() {
-            secret_names.push("number".to_string());
-        }
-        if card.exp_month.is_some() {
-            secret_names.push("exp_month".to_string());
-        }
-        if card.exp_year.is_some() {
-            secret_names.push("exp_year".to_string());
-        }
-        if card.code.is_some() {
-            secret_names.push("code".to_string());
-        }
+        append_secret_names(CARD_SECRET_FIELDS, card, &mut secret_names);
     }
-
-    // -- SSH Key sensitive --
-    if let Some(ssh_key) = &dc.ssh_key
-        && ssh_key.private_key.is_some()
-    {
-        secret_names.push("private_key".to_string());
+    if let Some(ssh_key) = &dc.ssh_key {
+        append_secret_names(SSH_KEY_SECRET_FIELDS, ssh_key, &mut secret_names);
     }
-
-    // -- Identity (all fields are sensitive PII) --
     if let Some(ident) = &dc.identity {
-        let ident_fields: &[(&str, &Option<Zeroizing<String>>)] = &[
-            ("title", &ident.title),
-            ("first_name", &ident.first_name),
-            ("middle_name", &ident.middle_name),
-            ("last_name", &ident.last_name),
-            ("username", &ident.username),
-            ("company", &ident.company),
-            ("ssn", &ident.ssn),
-            ("passport_number", &ident.passport_number),
-            ("license_number", &ident.license_number),
-            ("email", &ident.email),
-            ("phone", &ident.phone),
-            ("address1", &ident.address1),
-            ("address2", &ident.address2),
-            ("address3", &ident.address3),
-            ("city", &ident.city),
-            ("state", &ident.state),
-            ("postal_code", &ident.postal_code),
-            ("country", &ident.country),
-        ];
-        for (name, value) in ident_fields {
-            if value.is_some() {
-                secret_names.push((*name).to_string());
-            }
-        }
+        append_secret_names(IDENTITY_SECRET_FIELDS, ident, &mut secret_names);
     }
 
     // -- Hidden custom fields are sensitive --
@@ -440,10 +567,10 @@ fn resolve_secret_attr(dc: &DecryptedCipher, attr: &str) -> Option<Vec<u8>> {
         return resolve_custom_field(dc, custom_name);
     }
     match dc.cipher_type {
-        CipherType::Login => resolve_login_attr(dc.login.as_ref()?, attr),
-        CipherType::Card => resolve_card_attr(dc.card.as_ref()?, attr),
-        CipherType::SshKey => resolve_ssh_key_attr(dc.ssh_key.as_ref()?, attr),
-        CipherType::Identity => resolve_identity_attr(dc.identity.as_ref()?, attr),
+        CipherType::Login => resolve_field(LOGIN_SECRET_FIELDS, dc.login.as_ref()?, attr),
+        CipherType::Card => resolve_field(CARD_SECRET_FIELDS, dc.card.as_ref()?, attr),
+        CipherType::SshKey => resolve_field(SSH_KEY_SECRET_FIELDS, dc.ssh_key.as_ref()?, attr),
+        CipherType::Identity => resolve_field(IDENTITY_SECRET_FIELDS, dc.identity.as_ref()?, attr),
         CipherType::SecureNote | CipherType::Unknown(_) => None,
     }
 }
@@ -467,60 +594,6 @@ fn resolve_custom_field(dc: &DecryptedCipher, custom_name: &str) -> Option<Vec<u
         }
     }
     None
-}
-
-fn resolve_login_attr(login: &DecryptedLogin, attr: &str) -> Option<Vec<u8>> {
-    let value = match attr {
-        "password" => login.password.as_ref(),
-        "totp" => login.totp.as_ref(),
-        "username" => login.username.as_ref(),
-        _ => None,
-    };
-    value.map(zeroizing_to_bytes)
-}
-
-fn resolve_card_attr(card: &DecryptedCard, attr: &str) -> Option<Vec<u8>> {
-    let value = match attr {
-        "cardholder" => card.cardholder_name.as_ref(),
-        "number" => card.number.as_ref(),
-        "exp_month" => card.exp_month.as_ref(),
-        "exp_year" => card.exp_year.as_ref(),
-        "code" => card.code.as_ref(),
-        _ => None,
-    };
-    value.map(zeroizing_to_bytes)
-}
-
-fn resolve_ssh_key_attr(ssh: &DecryptedSshKey, attr: &str) -> Option<Vec<u8>> {
-    match attr {
-        "private_key" => ssh.private_key.as_ref().map(zeroizing_to_bytes),
-        _ => None,
-    }
-}
-
-fn resolve_identity_attr(ident: &DecryptedIdentity, attr: &str) -> Option<Vec<u8>> {
-    let value = match attr {
-        "title" => ident.title.as_ref(),
-        "first_name" => ident.first_name.as_ref(),
-        "middle_name" => ident.middle_name.as_ref(),
-        "last_name" => ident.last_name.as_ref(),
-        "username" => ident.username.as_ref(),
-        "company" => ident.company.as_ref(),
-        "ssn" => ident.ssn.as_ref(),
-        "passport_number" => ident.passport_number.as_ref(),
-        "license_number" => ident.license_number.as_ref(),
-        "email" => ident.email.as_ref(),
-        "phone" => ident.phone.as_ref(),
-        "address1" => ident.address1.as_ref(),
-        "address2" => ident.address2.as_ref(),
-        "address3" => ident.address3.as_ref(),
-        "city" => ident.city.as_ref(),
-        "state" => ident.state.as_ref(),
-        "postal_code" => ident.postal_code.as_ref(),
-        "country" => ident.country.as_ref(),
-        _ => None,
-    };
-    value.map(zeroizing_to_bytes)
 }
 
 // ── SSH key helpers ──────────────────────────────────────────────
