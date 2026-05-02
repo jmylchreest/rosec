@@ -21,17 +21,7 @@ totp_fuse = false   # disable the TOTP FUSE mount at $XDG_RUNTIME_DIR/rosec/totp
 
 Both default to `true`. Disabling `ssh_fuse` also disables the generated `config.d/` SSH snippets, since they reference paths inside the mount.
 
-### TOTP FUSE filesystem
-
-Alongside the SSH FUSE mount, `rosecd` mounts a TOTP FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/totp/` (gated by `totp_fuse = true`):
-
-```
-totp/
-├── by-name/<item-label>.code    # current TOTP code + newline
-└── by-id/<hex-id>.code          # same, addressed by item hex ID
-```
-
-Each `.code` file generates the current code dynamically on every `read()`. Files disappear when the provider is locked. See [cli.md](cli.md#totp) for `rosec totp` command usage.
+> **TOTP** has its own FUSE mount and CLI surface — see [TOTP](./totp).
 
 ## FUSE Filesystem Layout
 
