@@ -159,7 +159,23 @@ pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
 fn open_database(path: &str, key_file: Option<&str>, password: &str) -> Result<Database, String> {
     let bytes = host_file::read(path).map_err(|e| format!("read '{path}': {e}"))?;
 
-    let mut key = DatabaseKey::new().with_password(password);
+    if password.is_empty() && key_file.is_none() {
+        return Err("master password or key file required".into());
+    }
+
+    // KeePassXC supports three auth modes:
+    //   1. Password only         → with_password(pw)
+    //   2. Password + key file   → with_password(pw).with_keyfile(...)
+    //   3. Key file only         → with_keyfile(...)         (no password call)
+    //
+    // `with_password("")` does NOT mean "no password" — it derives a key from
+    // the empty string, which is a different composite key than "no password
+    // factor at all".  So we must skip with_password entirely when the user
+    // didn't supply one.
+    let mut key = DatabaseKey::new();
+    if !password.is_empty() {
+        key = key.with_password(password);
+    }
     if let Some(kf_path) = key_file {
         let kf_bytes =
             host_file::read(kf_path).map_err(|e| format!("read key file '{kf_path}': {e}"))?;
@@ -168,11 +184,7 @@ fn open_database(path: &str, key_file: Option<&str>, password: &str) -> Result<D
             .map_err(|e| format!("invalid key file '{kf_path}': {e}"))?;
     }
 
-    Database::open(&mut Cursor::new(bytes), key).map_err(|e| {
-        // Convert the keepass-rs error into a flat string.  The most common
-        // case is wrong password / corrupt header — surface the type.
-        format!("kdbx open failed: {e}")
-    })
+    Database::open(&mut Cursor::new(bytes), key).map_err(|e| format!("kdbx open failed: {e}"))
 }
 
 fn now_epoch_secs() -> u64 {
@@ -468,12 +480,25 @@ pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
 
 #[plugin_fn]
 pub fn auth_fields(_: ()) -> FnResult<Json<AuthFieldsResponse>> {
+    // When a key file is configured the master password becomes optional
+    // (KeePassXC permits key-file-only authentication).  When no key file
+    // is configured the password is the sole factor and is required.
+    let has_key_file = STATE
+        .lock()
+        .as_ref()
+        .map(|s| s.config.key_file.is_some())
+        .unwrap_or(false);
+
     Ok(Json(AuthFieldsResponse {
         fields: vec![WasmAuthField {
             id: "password".into(),
-            label: "Master password".into(),
+            label: if has_key_file {
+                "Master password (leave empty if key file is the sole factor)".into()
+            } else {
+                "Master password".into()
+            },
             placeholder: String::new(),
-            required: true,
+            required: !has_key_file,
             kind: "password".into(),
         }],
     }))
