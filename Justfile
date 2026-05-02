@@ -102,6 +102,7 @@ build-wasm:
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-bitwarden-pm/Cargo.toml
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-bitwarden-sm/Cargo.toml
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-gnome-keyring/Cargo.toml
+  cargo build --target wasm32-wasip1 --release --manifest-path rosec-keepassxc-file/Cargo.toml
 
 # Run all tests
 test:
