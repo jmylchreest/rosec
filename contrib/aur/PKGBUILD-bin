@@ -28,6 +28,7 @@ optdepends+=(
     'rosec-provider-bitwarden-pm-bin: Bitwarden Password Manager provider (sync, SSH keys)'
     'rosec-provider-bitwarden-sm-bin: Bitwarden Secrets Manager provider (sync)'
     'rosec-provider-gnome-keyring-bin: GNOME Keyring read-only provider'
+    'rosec-provider-keepassxc-file-bin: KeePassXC (.kdbx file) read-only provider (experimental)'
 )
 provides=('rosec' 'org.freedesktop.secrets')
 conflicts=('rosec')

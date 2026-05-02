@@ -284,6 +284,7 @@ jobs:
             rosec-bitwarden-pm
             rosec-bitwarden-sm
             rosec-gnome-keyring
+            rosec-keepassxc-file
 
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
@@ -295,6 +296,10 @@ jobs:
 
       - name: Build gnome-keyring provider
         working-directory: rosec-gnome-keyring
+        run: cargo build --target wasm32-wasip1 --release
+
+      - name: Build keepassxc-file provider
+        working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
 
       - name: Copy WASM providers
@@ -312,6 +317,10 @@ jobs:
           # gnome-keyring
           cp rosec-gnome-keyring/target/wasm32-wasip1/release/rosec_gnome_keyring.wasm \
              dist/providers/rosec_gnome_keyring.wasm
+
+          # keepassxc-file
+          cp rosec-keepassxc-file/target/wasm32-wasip1/release/rosec_keepassxc_file.wasm \
+             dist/providers/rosec_keepassxc_file.wasm
 
       - name: Sign WASM providers
         env:
@@ -345,6 +354,11 @@ jobs:
           # gnome-keyring
           ARCHIVE="rosec-provider-gnome-keyring-${VERSION}.wasm.tar.gz"
           tar -czf "${ARCHIVE}" -C dist/providers rosec_gnome_keyring.wasm rosec_gnome_keyring.wasm.minisig
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+
+          # keepassxc-file (experimental)
+          ARCHIVE="rosec-provider-keepassxc-file-${VERSION}.wasm.tar.gz"
+          tar -czf "${ARCHIVE}" -C dist/providers rosec_keepassxc_file.wasm rosec_keepassxc_file.wasm.minisig
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
       - name: Upload artifact
@@ -567,6 +581,9 @@ jobs:
           - provider: gnome-keyring
             pkgbuild: contrib/aur/PKGBUILD-provider-gnome-keyring-bin
             aur_name: rosec-provider-gnome-keyring-bin
+          - provider: keepassxc-file
+            pkgbuild: contrib/aur/PKGBUILD-provider-keepassxc-file-bin
+            aur_name: rosec-provider-keepassxc-file-bin
     steps:
       - name: Checkout
         uses: actions/checkout@v6

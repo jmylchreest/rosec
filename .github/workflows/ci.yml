@@ -93,6 +93,8 @@ jobs:
           workspaces: |
             rosec-bitwarden-pm
             rosec-bitwarden-sm
+            rosec-gnome-keyring
+            rosec-keepassxc-file
 
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
@@ -100,4 +102,12 @@ jobs:
 
       - name: Build bitwarden-sm provider
         working-directory: rosec-bitwarden-sm
+        run: cargo build --target wasm32-wasip1 --release
+
+      - name: Build gnome-keyring provider
+        working-directory: rosec-gnome-keyring
+        run: cargo build --target wasm32-wasip1 --release
+
+      - name: Build keepassxc-file provider
+        working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
