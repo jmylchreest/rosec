@@ -32,8 +32,10 @@ pub async fn run() -> Result<()> {
                 let provider_id = detail.as_str().strip_prefix("locked::").unwrap_or("");
                 eprintln!(" locked");
                 let tty_fd = open_tty_owned_fd()?;
+                // force=false: don't re-register if creds already stored;
+                // sync's lazy unlock just wants normal auth.
                 let _: () = proxy
-                    .call("AuthProviderWithTty", &(provider_id, tty_fd))
+                    .call("AuthProviderWithTty", &(provider_id, tty_fd, false))
                     .await?;
                 eprint!("Syncing '{id}' (retrying)...");
                 match proxy.call::<_, _, u32>("SyncProvider", &(id,)).await {
