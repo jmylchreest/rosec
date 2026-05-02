@@ -1,0 +1,305 @@
+/**
+ * rosec documentation theme.
+ *
+ * Inspired by the aide-web dashboard: monospace-everywhere, dim chrome,
+ * teal accent.  See aide-web/web/tailwind.config.ts for the colour
+ * palette this is ported from.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* ===== Light mode (kept tonally close to dark for consistent feel) ===== */
+:root {
+  --ifm-color-primary: #0891b2;          /* aide-accent-dark */
+  --ifm-color-primary-dark: #0e7490;
+  --ifm-color-primary-darker: #155e75;
+  --ifm-color-primary-darkest: #164e63;
+  --ifm-color-primary-light: #06b6d4;
+  --ifm-color-primary-lighter: #22d3ee;
+  --ifm-color-primary-lightest: #67e8f9;
+
+  --ifm-font-family-base: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  --ifm-code-font-size: 0.85rem;
+  --ifm-font-size-base: 0.9rem;
+  --ifm-line-height-base: 1.55;
+  --ifm-heading-font-weight: 600;
+
+  --ifm-spacing-horizontal: 1.5rem;
+  --ifm-global-radius: 0.375rem;
+
+  --ifm-background-color: #fafafa;
+  --ifm-background-surface-color: #ffffff;
+  --ifm-navbar-background-color: #ffffff;
+  --ifm-footer-background-color: #f4f4f5;
+  --ifm-toc-border-color: #e4e4e7;
+
+  --docusaurus-highlighted-code-line-bg: rgba(8, 145, 178, 0.1);
+}
+
+/* ===== Dark mode (the canonical aide-web look) ===== */
+[data-theme='dark'] {
+  --ifm-color-primary: #22d3ee;          /* aide-accent */
+  --ifm-color-primary-dark: #06b6d4;
+  --ifm-color-primary-darker: #0891b2;
+  --ifm-color-primary-darkest: #0e7490;
+  --ifm-color-primary-light: #67e8f9;
+  --ifm-color-primary-lighter: #a5f3fc;
+  --ifm-color-primary-lightest: #cffafe;
+
+  --ifm-background-color: #0a0a0a;       /* aide-bg */
+  --ifm-background-surface-color: #141414;  /* aide-surface */
+  --ifm-navbar-background-color: rgba(10, 10, 10, 0.95);
+  --ifm-footer-background-color: #0a0a0a;
+  --ifm-toc-border-color: #262626;       /* aide-border */
+
+  --ifm-color-emphasis-100: #141414;
+  --ifm-color-emphasis-200: #1a1a1a;
+  --ifm-color-emphasis-300: #262626;
+  --ifm-color-emphasis-700: #a3a3a3;     /* aide-text-muted */
+  --ifm-color-emphasis-800: #d4d4d4;
+  --ifm-color-emphasis-900: #e5e5e5;     /* aide-text */
+
+  --docusaurus-highlighted-code-line-bg: rgba(34, 211, 238, 0.15);
+}
+
+/* ===== Base ===== */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--ifm-font-family-base);
+}
+
+a {
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Headings stay monospace too — that's the aide-web signature look. */
+h1, h2, h3, h4, h5, h6,
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 {
+  font-family: var(--ifm-font-family-monospace);
+  letter-spacing: -0.01em;
+}
+
+/* ===== Navbar — frosted, dim, with subtle border ===== */
+.navbar {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+  box-shadow: none;
+  height: 56px;
+}
+
+.navbar__title {
+  font-family: var(--ifm-font-family-monospace);
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.navbar__link {
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.navbar__link:hover,
+.navbar__link--active {
+  color: var(--ifm-color-primary);
+}
+
+/* ===== Sidebar — dim, with active item carrying the accent ===== */
+.menu {
+  font-size: 0.85rem;
+}
+
+.menu__list-item-collapsible,
+.menu__link {
+  font-weight: 400;
+  border-radius: 0.25rem;
+}
+
+.menu__link:hover {
+  background-color: rgba(34, 211, 238, 0.06);
+}
+
+.menu__link--active {
+  font-weight: 600;
+  color: var(--ifm-color-primary);
+  background-color: rgba(34, 211, 238, 0.1);
+}
+
+.menu__list-item--collapsed > .menu__link--sublist::after,
+.menu__caret::before {
+  opacity: 0.5;
+}
+
+/* ===== Inline + block code ===== */
+code {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 0.25rem;
+}
+
+[data-theme='dark'] code {
+  background-color: rgba(34, 211, 238, 0.08);
+  color: #a5f3fc;
+  border: 1px solid rgba(34, 211, 238, 0.15);
+}
+
+.theme-code-block {
+  border-radius: var(--ifm-global-radius);
+  border: 1px solid var(--ifm-toc-border-color);
+  font-size: 0.825rem;
+}
+
+[data-theme='dark'] .theme-code-block {
+  background-color: #0d0d0d !important;
+}
+
+[data-theme='dark'] pre code {
+  background-color: transparent;
+  border: 0;
+  color: var(--ifm-color-emphasis-900);
+}
+
+/* ===== Tables — flat, monospace, dim borders ===== */
+table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: var(--ifm-global-radius);
+  overflow: hidden;
+  font-size: 0.825rem;
+}
+
+table th {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+  color: var(--ifm-color-emphasis-700);
+  background-color: var(--ifm-background-surface-color);
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+table td {
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ===== Admonitions ===== */
+.admonition {
+  border-radius: var(--ifm-global-radius);
+  border-width: 1px;
+  border-left-width: 3px;
+}
+
+/* ===== Footer ===== */
+.footer {
+  border-top: 1px solid var(--ifm-toc-border-color);
+  font-size: 0.825rem;
+}
+
+.footer--dark {
+  --ifm-footer-background-color: #0a0a0a;
+}
+
+.footer__title {
+  font-family: var(--ifm-font-family-monospace);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+/* ===== Search box ===== */
+.navbar__search-input {
+  background-color: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 0.25rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.85rem;
+}
+
+.navbar__search-input:focus {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.2);
+}
+
+/* ===== Markdown content tweaks ===== */
+.markdown {
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.markdown h1 {
+  font-size: 1.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.markdown h2 {
+  font-size: 1.25rem;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+.markdown h3 {
+  font-size: 1rem;
+  margin-top: 1.75rem;
+}
+
+.markdown blockquote {
+  border-left-color: var(--ifm-color-primary);
+  background-color: rgba(34, 211, 238, 0.04);
+  font-size: 0.9em;
+}
+
+/* ===== TOC ===== */
+.table-of-contents {
+  font-size: 0.8rem;
+  font-family: var(--ifm-font-family-monospace);
+}
+
+.table-of-contents__link--active {
+  color: var(--ifm-color-primary);
+  font-weight: 500;
+}
+
+/* ===== Scrollbar (dark mode) ===== */
+[data-theme='dark'] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: #0d0d0d;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+/* ===== DocCard ===== */
+.card {
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  transition: border-color 0.15s ease;
+}
+
+.card:hover {
+  border-color: var(--ifm-color-primary);
+}
