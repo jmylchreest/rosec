@@ -3831,20 +3831,14 @@ fn config_get_value(cfg: &Config, key: &str) -> Result<String> {
 /// rather than silently writing a value the daemon will reject on reload.
 fn validate_config_value(key: &str, value: &str) -> Result<()> {
     match key {
-        "service.dedup_strategy" => {
-            if !matches!(value, "newest" | "priority") {
-                anyhow::bail!("invalid value '{value}': must be 'newest' or 'priority'");
-            }
+        "service.dedup_strategy" if !matches!(value, "newest" | "priority") => {
+            anyhow::bail!("invalid value '{value}': must be 'newest' or 'priority'");
         }
-        "service.dedup_time_fallback" => {
-            if !matches!(value, "created" | "none") {
-                anyhow::bail!("invalid value '{value}': must be 'created' or 'none'");
-            }
+        "service.dedup_time_fallback" if !matches!(value, "created" | "none") => {
+            anyhow::bail!("invalid value '{value}': must be 'created' or 'none'");
         }
-        "autolock.on_logout" | "autolock.on_session_lock" => {
-            if !matches!(value, "true" | "false") {
-                anyhow::bail!("invalid value '{value}': must be 'true' or 'false'");
-            }
+        "autolock.on_logout" | "autolock.on_session_lock" if !matches!(value, "true" | "false") => {
+            anyhow::bail!("invalid value '{value}': must be 'true' or 'false'");
         }
         "service.refresh_interval_secs"
         | "autolock.idle_timeout_minutes"
