@@ -450,7 +450,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create snapshot release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "Development Snapshot"
           tag_name: snapshot
@@ -498,7 +498,7 @@ jobs:
           ls -lh release/
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "rosec ${{ needs.prepare.outputs.version_tag }}"
           tag_name: ${{ needs.prepare.outputs.version_tag }}
@@ -546,7 +546,7 @@ jobs:
             contrib/aur/PKGBUILD-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
         with:
           pkgname: rosec-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -611,7 +611,7 @@ jobs:
             ${{ matrix.pkgbuild }} > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
         with:
           pkgname: ${{ matrix.aur_name }}
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -646,7 +646,7 @@ jobs:
             contrib/aur/PKGBUILD-git > "$GITHUB_WORKSPACE/PKGBUILD-git-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
         with:
           pkgname: rosec-git
           pkgbuild: ${{ github.workspace }}/PKGBUILD-git-rendered
