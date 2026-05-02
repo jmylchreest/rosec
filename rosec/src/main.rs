@@ -3,26 +3,25 @@ use std::io::{self, BufRead, Read};
 use std::path::PathBuf;
 
 use clap::Parser;
-use sha2::{Digest, Sha256};
 
 use anyhow::{Result, bail};
 use zbus::Connection;
 use zeroize::Zeroizing;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
-use rosec_core::WasmPreference;
 use rosec_core::config::Config;
 use rosec_core::config_edit;
 
 mod cli;
 mod enable;
+mod provider;
 
 use cli::*;
 
 /// D-Bus wire type for `org.rosec.Daemon.ProviderList` entries.
 ///
 /// Fields: `(id, name, kind, locked, cached, offline_cache, last_cache_write_epoch, last_sync_epoch, capabilities)`.
-type ProviderEntry = (
+pub(crate) type ProviderEntry = (
     String,
     String,
     String,
@@ -46,7 +45,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Provider { action } => cmd_provider(action).await,
+        Commands::Provider { action } => provider::dispatch(action).await,
         Commands::Config { action } => cmd_config(action),
         Commands::Status => cmd_status().await,
         Commands::Sync => cmd_sync().await,
@@ -66,63 +65,7 @@ async fn main() -> Result<()> {
 // Command implementations
 // ───────────────────────────────────────────────────────────────────────────
 
-fn cmd_provider_kinds() {
-    println!("Available provider kinds:\n");
-    println!("  local");
-    println!("    A local encrypted vault file on disk.");
-    println!("    Options: --id <id>, --path <path>, --collection <name>");
-    println!();
-    for kind in config_edit::KNOWN_KINDS {
-        // "local" is already printed above with its custom description.
-        if *kind == "local" {
-            continue;
-        }
-        let required = config_edit::required_options_for_kind(kind);
-        let optional = config_edit::optional_options_for_kind(kind);
-        println!("  {kind}");
-        if !required.is_empty() {
-            println!("    Required:");
-            for (key, desc) in required {
-                println!("      {key:<20}  {desc}");
-            }
-        }
-        if !optional.is_empty() {
-            println!("    Optional:");
-            for (key, desc) in optional {
-                println!("      {key:<20}  {desc}");
-            }
-        }
-        println!();
-    }
-
-    // List dynamically discovered WASM plugin kinds.
-    let registry = rosec_wasm::discovery::scan_plugins(
-        WasmPreference::default(),
-        rosec_core::WasmVerify::default(),
-    );
-    for kind in registry.kinds() {
-        let plugin = registry
-            .get(kind)
-            .expect("kind from registry.kinds() must exist");
-        println!("  {kind}");
-        println!("    {}", plugin.manifest.description);
-        if !plugin.manifest.required_options.is_empty() {
-            println!("    Required:");
-            for opt in &plugin.manifest.required_options {
-                println!("      {:<20}  {}", opt.key, opt.description);
-            }
-        }
-        if !plugin.manifest.optional_options.is_empty() {
-            println!("    Optional:");
-            for opt in &plugin.manifest.optional_options {
-                println!("      {:<20}  {}", opt.key, opt.description);
-            }
-        }
-        println!();
-    }
-}
-
-async fn conn() -> Result<Connection> {
+pub(crate) async fn conn() -> Result<Connection> {
     // 1. Explicit override via ROSEC_SOCKET env var.
     if let Ok(socket) = std::env::var("ROSEC_SOCKET") {
         let addr = format!("unix:path={socket}");
@@ -150,60 +93,8 @@ async fn conn() -> Result<Connection> {
     ))
 }
 
-/// Poll rosecd's `ProviderList` until `id` appears (max 3 s, 200 ms intervals).
-///
-/// Returns `Some(proxy)` if the daemon is running and the provider appeared,
-/// `None` if the daemon isn't running or the provider didn't appear in time.
-async fn wait_for_daemon_reload(id: &str) -> Option<zbus::Proxy<'static>> {
-    let conn = conn().await.ok()?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .ok()?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        if let Ok(entries) = proxy
-            .call::<_, _, Vec<ProviderEntry>>("ProviderList", &())
-            .await
-            && entries.iter().any(|(bid, ..)| bid == id)
-        {
-            return Some(proxy);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-}
-
-/// Generate a default password label: `user@hostname`.
-fn default_password_label() -> String {
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".into());
-
-    let host = {
-        let mut buf = [0u8; 256];
-        // SAFETY: gethostname writes into a fixed-size buffer we own.
-        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-        if rc == 0 {
-            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            String::from_utf8_lossy(&buf[..len]).into_owned()
-        } else {
-            "localhost".into()
-        }
-    };
-
-    format!("{user}@{host}")
-}
-
 /// Resolve the config file path from `--config <path>` flag or XDG default.
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     for i in 0..args.len().saturating_sub(1) {
         if args[i] == "--config" || args[i] == "-c" {
@@ -224,7 +115,7 @@ fn default_config_path() -> PathBuf {
     base.join("rosec").join("config.toml")
 }
 
-fn load_config() -> Config {
+pub(crate) fn load_config() -> Config {
     let path = config_path();
     if !path.exists() {
         return Config::default();
@@ -406,7 +297,7 @@ async fn trigger_unlock(conn: &Connection) -> Result<()> {
 /// The returned `OwnedFd` can be passed directly to `UnlockWithTty` /
 /// `AuthProviderWithTty`.  `dbus-monitor` sees only the fd number, never the
 /// terminal contents.
-fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
+pub(crate) fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
     use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -425,7 +316,7 @@ fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
 /// The write end is closed after the password is written so the daemon sees
 /// EOF when it reads.  The password bytes are never visible in any D-Bus
 /// message payload — only the fd number travels over the bus.
-fn password_to_pipe_fd(password: &[u8]) -> Result<zvariant::OwnedFd> {
+pub(crate) fn password_to_pipe_fd(password: &[u8]) -> Result<zvariant::OwnedFd> {
     use std::io::Write as _;
     use std::os::unix::io::FromRawFd as _;
 
@@ -630,7 +521,11 @@ mod tty_signal {
 /// All blocking I/O runs on a dedicated `spawn_blocking` thread so the tokio
 /// executor is not stalled.  Returns `Zeroizing<String>` so the value is
 /// scrubbed on drop.
-async fn prompt_field(label: &str, placeholder: &str, kind: &str) -> Result<Zeroizing<String>> {
+pub(crate) async fn prompt_field(
+    label: &str,
+    placeholder: &str,
+    kind: &str,
+) -> Result<Zeroizing<String>> {
     let prompt_str = if placeholder.is_empty() {
         format!("{label}: ")
     } else {
@@ -682,834 +577,7 @@ async fn prompt_field(label: &str, placeholder: &str, kind: &str) -> Result<Zero
     Ok(value)
 }
 
-// ---------------------------------------------------------------------------
-// provider / providers subcommand tree
-// ---------------------------------------------------------------------------
-
-async fn cmd_provider(action: Option<ProviderCommands>) -> Result<()> {
-    let action = action.unwrap_or(ProviderCommands::List);
-    match action {
-        ProviderCommands::List => cmd_provider_list().await,
-        ProviderCommands::Kinds => {
-            cmd_provider_kinds();
-            Ok(())
-        }
-        ProviderCommands::Auth(args) => cmd_provider_auth(&args).await,
-        ProviderCommands::Add(args) => cmd_provider_add(args).await,
-        ProviderCommands::Remove(args) => cmd_provider_remove(&args.id).await,
-        ProviderCommands::Enable(args) => cmd_provider_set_enabled(&args.id, true).await,
-        ProviderCommands::Disable(args) => cmd_provider_set_enabled(&args.id, false).await,
-        ProviderCommands::Attach(args) => cmd_provider_attach(args).await,
-        ProviderCommands::Detach(args) => cmd_provider_detach(&args.id).await,
-        ProviderCommands::AddPassword(args) => cmd_provider_add_password(args).await,
-        ProviderCommands::RemovePassword(args) => cmd_provider_remove_password(&args).await,
-        ProviderCommands::ListPasswords(args) => cmd_provider_list_passwords(&args.id).await,
-        ProviderCommands::ChangePassword(args) => cmd_provider_change_password(&args.id).await,
-    }
-}
-
-/// `rosec provider list` — show all configured providers with lock state.
-async fn cmd_provider_list() -> Result<()> {
-    // Load config to detect disabled providers.
-    let cfg = load_config();
-    if cfg.provider.is_empty() {
-        println!("No providers configured. Run `rosec provider add <kind>` to add one.");
-        return Ok(());
-    }
-
-    // Collect disabled entries from config (they won't appear in D-Bus).
-    let disabled: Vec<&rosec_core::config::ProviderEntry> =
-        cfg.provider.iter().filter(|p| !p.enabled).collect();
-
-    // Try D-Bus first for live state.
-    if let Ok(conn) = conn().await
-        && let Ok(proxy) = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.secrets",
-            "/org/rosec/Daemon",
-            "org.rosec.Daemon",
-        )
-        .await
-        && let Ok(entries) = proxy
-            .call::<_, _, Vec<ProviderEntry>>("ProviderList", &())
-            .await
-    {
-        if entries.is_empty() && disabled.is_empty() {
-            println!("No providers configured. Run `rosec provider add <kind>` to add one.");
-            return Ok(());
-        }
-
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Build row data with sync strings for column width measurement.
-        struct RowData {
-            id: String,
-            name: String,
-            kind: String,
-            state: String,
-            caps: String,
-            sync: String,
-        }
-
-        let mut rows: Vec<RowData> = entries
-            .iter()
-            .map(
-                |(id, name, kind, locked, cached, _, _, last_sync, capabilities)| {
-                    let state = match (*locked, *cached) {
-                        (true, _) => "locked".to_string(),
-                        (false, true) => "unlocked (cached)".to_string(),
-                        (false, false) => "unlocked".to_string(),
-                    };
-                    let sync = if *locked {
-                        String::new()
-                    } else {
-                        format_relative_time(*last_sync, now_epoch)
-                    };
-                    let caps = capability_codes(capabilities);
-                    RowData {
-                        id: id.clone(),
-                        name: name.clone(),
-                        kind: kind.clone(),
-                        state,
-                        caps,
-                        sync,
-                    }
-                },
-            )
-            .collect();
-
-        for entry in &disabled {
-            rows.push(RowData {
-                id: entry.id.clone(),
-                name: entry.id.clone(),
-                kind: entry.kind.clone(),
-                state: "disabled".to_string(),
-                caps: String::new(),
-                sync: String::new(),
-            });
-        }
-
-        let id_w = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
-        let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
-        let kind_w = rows.iter().map(|r| r.kind.len()).max().unwrap_or(4).max(4);
-        let caps_w = rows
-            .iter()
-            .map(|r| r.caps.len())
-            .max()
-            .unwrap_or(0)
-            .max("CAPS".len());
-        let state_w = rows.iter().map(|r| r.state.len()).max().unwrap_or(5).max(5);
-        let sync_w = rows.iter().map(|r| r.sync.len()).max().unwrap_or(0).max(
-            if rows.iter().any(|r| !r.sync.is_empty()) {
-                "LAST SYNC".len()
-            } else {
-                0
-            },
-        );
-
-        let has_sync_col = sync_w > 0;
-
-        // Priority: ID > NAME > KIND > CAPS > STATE > SYNC (fit to terminal).
-        let mut cols = vec![
-            ColSpec {
-                natural: id_w,
-                min: 2,
-                allocated: 0,
-            },
-            ColSpec {
-                natural: name_w,
-                min: 4,
-                allocated: 0,
-            },
-            ColSpec {
-                natural: kind_w,
-                min: 4,
-                allocated: 0,
-            },
-            ColSpec {
-                natural: caps_w,
-                min: "CAPS".len(),
-                allocated: 0,
-            },
-            ColSpec {
-                natural: state_w,
-                min: 5,
-                allocated: 0,
-            },
-        ];
-        if has_sync_col {
-            cols.push(ColSpec {
-                natural: sync_w,
-                min: "SYNC".len(),
-                allocated: 0,
-            });
-        }
-
-        fit_columns(&mut cols, 2, terminal_width());
-        let id_w = cols[0].allocated;
-        let name_w = cols[1].allocated;
-        let kind_w = cols[2].allocated;
-        let caps_w = cols[3].allocated;
-        let state_w = cols[4].allocated;
-        let sync_w = if has_sync_col { cols[5].allocated } else { 0 };
-
-        if has_sync_col {
-            println!(
-                "{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {:<state_w$}  LAST SYNC",
-                "ID", "NAME", "KIND", "CAPS", "STATE",
-            );
-        } else {
-            println!(
-                "{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  STATE",
-                "ID", "NAME", "KIND", "CAPS",
-            );
-        }
-        let sep_w = id_w
-            + 2
-            + name_w
-            + 2
-            + kind_w
-            + 2
-            + caps_w
-            + 2
-            + state_w
-            + if has_sync_col { 2 + sync_w } else { 0 };
-        println!("{}", "\u{2500}".repeat(sep_w));
-
-        for row in &rows {
-            if has_sync_col {
-                println!(
-                    "{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {:<state_w$}  {}",
-                    trunc(&row.id, id_w),
-                    trunc(&row.name, name_w),
-                    trunc(&row.kind, kind_w),
-                    trunc(&row.caps, caps_w),
-                    trunc(&row.state, state_w),
-                    trunc(&row.sync, sync_w),
-                );
-            } else {
-                println!(
-                    "{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {}",
-                    trunc(&row.id, id_w),
-                    trunc(&row.name, name_w),
-                    trunc(&row.kind, kind_w),
-                    trunc(&row.caps, caps_w),
-                    trunc(&row.state, state_w),
-                );
-            }
-        }
-        println!(
-            "\nCAPS: S=Sync W=Write s=Ssh K=KeyWrapping P=PasswordChange C=Cache N=Notifications"
-        );
-        return Ok(());
-    }
-
-    // Fallback: read config directly (daemon not running).
-    let nat_id = cfg
-        .provider
-        .iter()
-        .map(|p| p.id.len())
-        .max()
-        .unwrap_or(2)
-        .max(2);
-    let nat_kind = cfg
-        .provider
-        .iter()
-        .map(|p| p.kind.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let state_w = "(daemon not running)".len().max("STATE".len());
-
-    let mut cols = [
-        ColSpec {
-            natural: nat_id,
-            min: 2,
-            allocated: 0,
-        },
-        ColSpec {
-            natural: nat_kind,
-            min: 4,
-            allocated: 0,
-        },
-        ColSpec {
-            natural: state_w,
-            min: "STATE".len(),
-            allocated: 0,
-        },
-    ];
-    fit_columns(&mut cols, 2, terminal_width());
-    let id_w = cols[0].allocated;
-    let kind_w = cols[1].allocated;
-
-    println!("{:<id_w$}  {:<kind_w$}  STATE", "ID", "KIND");
-    let sep_w = id_w + 2 + kind_w + 2 + state_w;
-    println!("{}", "\u{2500}".repeat(sep_w));
-    for entry in &cfg.provider {
-        let state = if entry.enabled {
-            "(daemon not running)"
-        } else {
-            "disabled"
-        };
-        println!(
-            "{:<id_w$}  {:<kind_w$}  {state}",
-            trunc(&entry.id, id_w),
-            trunc(&entry.kind, kind_w),
-        );
-    }
-    Ok(())
-}
-
-/// `rosec provider auth <id>` — interactively authenticate a provider.
-///
-/// Opens `/dev/tty` and passes the fd to `rosecd` via D-Bus fd-passing.
-/// All credential prompting happens inside the daemon — credentials never
-/// appear in any D-Bus message payload.
-async fn cmd_provider_auth(args: &ProviderAuthArgs) -> Result<()> {
-    let provider_id = args.id.as_str();
-    let force = args.force;
-
-    let conn = conn().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await?;
-
-    let tty_fd = open_tty_owned_fd()?;
-    let _: () = proxy
-        .call("AuthProviderWithTty", &(provider_id, tty_fd, force))
-        .await?;
-
-    println!("Provider '{provider_id}' authenticated.");
-    Ok(())
-}
-
-/// `rosec provider add <kind> [--id <id>] [key=value ...]`
-async fn cmd_provider_add(args: ProviderAddArgs) -> Result<()> {
-    let registry = rosec_wasm::discovery::scan_plugins(
-        WasmPreference::default(),
-        rosec_core::WasmVerify::default(),
-    );
-
-    let kind = &args.kind;
-    let is_builtin = config_edit::KNOWN_KINDS.contains(&kind.as_str());
-    let is_discovered = registry.contains_kind(kind);
-    if !is_builtin && !is_discovered {
-        let known = known_kinds_display(&registry);
-        bail!("unknown provider kind '{kind}'. Known kinds: {known}");
-    }
-
-    let (mut options, custom_path, collection) =
-        parse_option_args(&args.options, args.path, args.collection);
-
-    let mut supplied: std::collections::HashSet<String> =
-        options.iter().map(|(k, _)| k.clone()).collect();
-    let required = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Required);
-    prompt_and_collect(&required, &supplied, &mut options).await?;
-
-    let id = match args.id {
-        Some(id) => id,
-        None => derive_provider_id(kind, &options, &registry),
-    };
-
-    supplied.extend(options.iter().map(|(k, _)| k.clone()));
-    let optional = collect_option_prompts(kind, &registry, is_discovered, OptionScope::Optional);
-    prompt_and_collect(&optional, &supplied, &mut options).await?;
-
-    if let Some(p) = &custom_path {
-        options.push(("path".to_string(), p.clone()));
-    }
-    if let Some(c) = &collection {
-        options.push(("collection".to_string(), c.clone()));
-    }
-
-    if kind == "local" {
-        ensure_local_vault_path(&id, &mut options, custom_path.is_none())?;
-    }
-
-    let cfg_data = load_config();
-    if cfg_data.provider.iter().any(|p| p.id == id) {
-        bail!("provider '{id}' already exists. Use --id to choose a different name.");
-    }
-
-    let cfg = config_path();
-    config_edit::add_provider(&cfg, &id, kind, &options)?;
-    println!("Added provider '{id}' (kind: {kind}) to {}", cfg.display());
-
-    if let Some(proxy) = wait_for_daemon_reload(&id).await {
-        println!("rosecd picked up the new provider — starting authentication.");
-        let tty_fd = open_tty_owned_fd()?;
-        let _: () = proxy
-            .call("AuthProviderWithTty", &(id.as_str(), tty_fd, false))
-            .await?;
-        println!("Provider '{id}' authenticated.");
-    } else {
-        println!("rosecd will hot-reload the config automatically if it is running.");
-        println!("Run `rosec provider auth {id}` to authenticate.");
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum OptionScope {
-    Required,
-    Optional,
-}
-
-struct OptionPrompt {
-    key: String,
-    description: String,
-    field_kind: String,
-}
-
-fn known_kinds_display(registry: &rosec_wasm::PluginRegistry) -> String {
-    let mut v: Vec<String> = config_edit::KNOWN_KINDS
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    for kind in registry.kinds() {
-        if !v.iter().any(|k| k == kind) {
-            v.push(kind.to_string());
-        }
-    }
-    v.join(", ")
-}
-
-fn parse_option_args(
-    raw: &[String],
-    initial_path: Option<String>,
-    initial_collection: Option<String>,
-) -> (Vec<(String, String)>, Option<String>, Option<String>) {
-    let mut options = Vec::new();
-    let mut path = initial_path;
-    let mut collection = initial_collection;
-    for opt in raw {
-        if let Some((k, v)) = opt.split_once('=') {
-            match k {
-                "path" => path = Some(v.to_string()),
-                "collection" => collection = Some(v.to_string()),
-                _ => options.push((k.to_string(), v.to_string())),
-            }
-        }
-    }
-    (options, path, collection)
-}
-
-fn collect_option_prompts(
-    kind: &str,
-    registry: &rosec_wasm::PluginRegistry,
-    is_discovered: bool,
-    scope: OptionScope,
-) -> Vec<OptionPrompt> {
-    let suffix = match scope {
-        OptionScope::Required => "",
-        OptionScope::Optional => " (optional, Enter to skip)",
-    };
-
-    if is_discovered {
-        let opts = match scope {
-            OptionScope::Required => rosec_wasm::discovery::required_options(registry, kind),
-            OptionScope::Optional => rosec_wasm::discovery::optional_options(registry, kind),
-        };
-        return opts
-            .unwrap_or_default()
-            .into_iter()
-            .map(|opt| OptionPrompt {
-                description: format!("{}{suffix}", opt.description),
-                key: opt.key,
-                field_kind: opt.kind,
-            })
-            .collect();
-    }
-
-    let builtin = match scope {
-        OptionScope::Required => config_edit::required_options_for_kind(kind),
-        OptionScope::Optional => config_edit::optional_options_for_kind(kind),
-    };
-    builtin
-        .iter()
-        .map(|(key, description)| OptionPrompt {
-            key: (*key).to_string(),
-            description: format!("{description}{suffix}"),
-            field_kind: builtin_field_kind(key, scope).to_string(),
-        })
-        .collect()
-}
-
-fn builtin_field_kind(key: &str, scope: OptionScope) -> &'static str {
-    match scope {
-        OptionScope::Required if key.contains("secret") || key.contains("password") => "secret",
-        _ => "text",
-    }
-}
-
-async fn prompt_and_collect(
-    prompts: &[OptionPrompt],
-    supplied: &std::collections::HashSet<String>,
-    out: &mut Vec<(String, String)>,
-) -> Result<()> {
-    for p in prompts {
-        if supplied.contains(&p.key) {
-            continue;
-        }
-        let v = prompt_field(&p.description, "", &p.field_kind).await?;
-        let s = v.as_str().to_string();
-        if !s.is_empty() {
-            out.push((p.key.clone(), s));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_local_vault_path(
-    id: &str,
-    options: &mut Vec<(String, String)>,
-    derive_default: bool,
-) -> Result<()> {
-    if derive_default {
-        options.push(("path".to_string(), default_vault_path(id)));
-    }
-    let path_value = options
-        .iter()
-        .find(|(k, _)| k == "path")
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
-    let resolved = expand_tilde(path_value);
-    if std::path::Path::new(&resolved).exists() {
-        bail!(
-            "a vault file already exists at {resolved}\n\
-             Use `rosec provider attach --path {resolved}` to attach an existing vault."
-        );
-    }
-    Ok(())
-}
-
-/// Derive a short, stable provider ID from the credential that identifies the account.
-///
-/// Format: `{kind}-{first8hexchars of sha256(credential)}`
-///
-/// - `bitwarden-sm`: hashes the organization_id
-/// - anything else: falls back to the kind string itself
-fn derive_provider_id(
-    kind: &str,
-    options: &[(String, String)],
-    registry: &rosec_wasm::PluginRegistry,
-) -> String {
-    // For built-in kinds, use hardcoded credential keys.
-    // For discovered kinds, use the manifest's id_derivation_key.
-    let discovered_key = rosec_wasm::discovery::id_derivation_key(registry, kind);
-
-    let credential_key = match kind {
-        "bitwarden-sm" => "organization_id",
-        _ => match discovered_key.as_deref() {
-            Some(k) => k,
-            None => return kind.to_string(),
-        },
-    };
-
-    let value = options
-        .iter()
-        .find(|(k, _)| k == credential_key)
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
-
-    if value.is_empty() {
-        return kind.to_string();
-    }
-
-    let hash = Sha256::digest(value.as_bytes());
-    // Use the first 4 bytes (8 hex chars) — low collision probability for personal use
-    let short = format!(
-        "{:08x}",
-        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-    );
-    format!("{kind}-{short}")
-}
-
-/// `rosec provider remove <id>`
-///
-/// For external providers, removes the config entry.
-/// For local vaults, also offers to delete the vault file from disk.
-async fn cmd_provider_remove(id: &str) -> Result<()> {
-    let cfg = config_path();
-
-    // Check if this is a local vault with a path — if so, offer to delete the file.
-    let cfg_data = load_config();
-    let vault_path = cfg_data
-        .provider
-        .iter()
-        .find(|p| p.id == *id && p.kind == "local")
-        .and_then(|p| p.path.as_deref())
-        .map(expand_tilde);
-
-    config_edit::remove_provider(&cfg, id)?;
-    println!("Removed provider '{id}' from {}", cfg.display());
-
-    if let Some(ref path) = vault_path
-        && std::path::Path::new(path).exists()
-    {
-        let confirm = prompt_field(
-            &format!("Also delete the vault file at {path}? (yes/no)"),
-            "no",
-            "text",
-        )
-        .await?;
-        if confirm.as_str() == "yes" {
-            match std::fs::remove_file(path) {
-                Ok(()) => println!("Deleted vault file: {path}"),
-                Err(e) => eprintln!("warning: could not delete vault file {path}: {e}"),
-            }
-        } else {
-            println!("Vault file kept at {path}.");
-            println!("Use `rosec provider attach --path {path}` to re-attach later.");
-        }
-    }
-
-    println!("rosecd will hot-reload the config automatically if it is running.");
-    Ok(())
-}
-
-/// `rosec provider enable <id>` / `rosec provider disable <id>`
-async fn cmd_provider_set_enabled(id: &str, enabled: bool) -> Result<()> {
-    let cfg = config_path();
-    config_edit::set_provider_enabled(&cfg, id, enabled)?;
-
-    if enabled {
-        println!("Provider '{id}' enabled.");
-    } else {
-        println!("Provider '{id}' disabled.");
-    }
-    println!("rosecd will hot-reload the config automatically if it is running.");
-    Ok(())
-}
-
-/// `rosec provider attach --path <file> [--id <id>] [--collection <c>]`
-///
-/// Adds an existing vault file to the config without creating it.
-async fn cmd_provider_attach(args: ProviderAttachArgs) -> Result<()> {
-    let vault_path = args.path;
-    let collection = args.collection;
-
-    // Derive ID from filename if not specified.
-    let id = match args.id {
-        Some(id) => id,
-        None => derive_vault_id_from_path(&vault_path),
-    };
-
-    let cfg = config_path();
-    config_edit::add_local_provider(&cfg, &id, &vault_path, collection.as_deref())?;
-
-    println!("Attached vault '{id}' ({vault_path}) to {}", cfg.display());
-    println!("rosecd will hot-reload the config automatically if it is running.");
-    println!("Run `rosec provider auth {id}` to authenticate.");
-    Ok(())
-}
-
-/// `rosec provider detach <id>`
-///
-/// Removes the vault from the config file but leaves the vault file on disk.
-async fn cmd_provider_detach(id: &str) -> Result<()> {
-    let cfg = config_path();
-    config_edit::remove_provider(&cfg, id)?;
-    println!("Detached vault '{id}' from {}", cfg.display());
-    println!(
-        "The vault file was NOT deleted. Use `rosec provider remove` to also delete the file."
-    );
-    println!("rosecd will hot-reload the config automatically if it is running.");
-    Ok(())
-}
-
-/// `rosec provider add-password <id> [--label <label>]`
-///
-/// Add a new unlock password to a vault. The vault must be unlocked (running in
-/// rosecd).
-async fn cmd_provider_add_password(args: ProviderAddPasswordArgs) -> Result<()> {
-    let vault_id = args.id.as_str();
-
-    // Default label: user@hostname
-    let label = args.label.unwrap_or_else(default_password_label);
-
-    // Prompt for the new password.
-    let pw = prompt_field("New password", "", "password").await?;
-    if pw.is_empty() {
-        bail!("password cannot be empty");
-    }
-    let pw_confirm = prompt_field("Confirm password", "", "password").await?;
-    if pw.as_str() != pw_confirm.as_str() {
-        bail!("passwords do not match");
-    }
-
-    let conn = conn().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await?;
-
-    let entry_id: String = proxy
-        .call("AddPassword", &(vault_id, pw.as_bytes().to_vec(), &label))
-        .await?;
-
-    println!("Added password entry {entry_id} (label: {label}) to vault '{vault_id}'.");
-    Ok(())
-}
-
-/// `rosec provider list-passwords <vault-id>`
-///
-/// List the wrapping entries (unlock passwords) for a vault. The vault must be
-/// unlocked. Shows the entry ID and label for each password.
-async fn cmd_provider_list_passwords(vault_id: &str) -> Result<()> {
-    let conn = conn().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await?;
-
-    let entries: Vec<(String, String)> = proxy.call("ListPasswords", &(vault_id,)).await?;
-
-    if entries.is_empty() {
-        println!("No password entries found for vault '{vault_id}'.");
-        return Ok(());
-    }
-
-    println!("Password entries for vault '{vault_id}':\n");
-    println!("  {:<40} LABEL", "ENTRY ID");
-    println!("  {:<40} -----", "--------");
-    for (id, label) in &entries {
-        let display_label = if label.is_empty() { "(none)" } else { label };
-        println!("  {:<40} {}", id, display_label);
-    }
-
-    Ok(())
-}
-
-/// `rosec provider change-password <vault-id>`
-///
-/// Change the unlock password for a vault.  Prompts for the current password,
-/// new password, and confirmation.  The wrapping entry matched by the old
-/// password is atomically replaced with a new one for the new password.
-async fn cmd_provider_change_password(vault_id: &str) -> Result<()> {
-    let old_pw = prompt_field("Current password", "", "password").await?;
-    if old_pw.is_empty() {
-        bail!("current password cannot be empty");
-    }
-
-    let new_pw = prompt_field("New password", "", "password").await?;
-    if new_pw.is_empty() {
-        bail!("new password cannot be empty");
-    }
-
-    let confirm_pw = prompt_field("Confirm new password", "", "password").await?;
-    if new_pw.as_str() != confirm_pw.as_str() {
-        bail!("passwords do not match");
-    }
-
-    let old_fd = password_to_pipe_fd(old_pw.as_bytes())?;
-    let new_fd = password_to_pipe_fd(new_pw.as_bytes())?;
-
-    let conn = conn().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await?;
-
-    let _: () = proxy
-        .call("ChangeProviderPassword", &(vault_id, old_fd, new_fd))
-        .await?;
-
-    println!("Password changed for vault '{vault_id}'.");
-    Ok(())
-}
-
-/// `rosec provider remove-password <vault-id> <entry-id>`
-///
-/// Remove an unlock password from a vault. The vault must be unlocked and must
-/// have at least 2 passwords.
-async fn cmd_provider_remove_password(args: &ProviderRemovePasswordArgs) -> Result<()> {
-    let vault_id = args.id.as_str();
-    let entry_id = args.entry_id.as_str();
-
-    let conn = conn().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await?;
-
-    // First list passwords to show the user what they're removing.
-    let entries: Vec<(String, String)> = proxy.call("ListPasswords", &(vault_id,)).await?;
-
-    let target = entries
-        .iter()
-        .find(|(id, _)| id == entry_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("password entry '{entry_id}' not found in vault '{vault_id}'")
-        })?;
-
-    let label_display = if target.1.is_empty() {
-        "(no label)".to_string()
-    } else {
-        target.1.clone()
-    };
-
-    println!("Removing password entry: {entry_id} {label_display}");
-
-    let _: () = proxy.call("RemovePassword", &(vault_id, entry_id)).await?;
-
-    println!("Removed password entry '{entry_id}' from vault '{vault_id}'.");
-    Ok(())
-}
-
-/// Default vault file path: `$XDG_DATA_HOME/rosec/vaults/<id>.vault`.
-fn default_vault_path(id: &str) -> String {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("rosec")
-        .join("vaults")
-        .join(format!("{id}.vault"))
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Derive a vault ID from a file path.
-///
-/// Takes the filename stem (e.g. `/mnt/shared/team.vault` → `team`).
-fn derive_vault_id_from_path(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("vault")
-        .to_string()
-}
-
-/// Expand `~` to `$HOME` in a path string.
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return format!("{}/{rest}", home.to_string_lossy());
-    }
-    path.to_string()
-}
+// (provider subcommand tree moved to rosec/src/provider/)
 
 // ---------------------------------------------------------------------------
 // Top-level commands
@@ -2312,7 +1380,7 @@ async fn fetch_item_data(conn: &zbus::Connection, path: &str, locked: bool) -> R
 /// Format an epoch timestamp as a human-readable relative time string.
 ///
 /// Returns "never" for 0, otherwise "Xs ago", "Xm ago", "Xh ago", or "Xd ago".
-fn format_relative_time(epoch_secs: u64, now_epoch: u64) -> String {
+pub(crate) fn format_relative_time(epoch_secs: u64, now_epoch: u64) -> String {
     if epoch_secs == 0 {
         return "never".to_string();
     }
@@ -2333,7 +1401,7 @@ fn format_relative_time(epoch_secs: u64, now_epoch: u64) -> String {
 /// Each capability maps to a single character:
 ///   S = Sync, W = Write, s = Ssh, K = KeyWrapping,
 ///   P = PasswordChange, C = OfflineCache, N = Notifications
-fn capability_codes(caps: &[String]) -> String {
+pub(crate) fn capability_codes(caps: &[String]) -> String {
     let mut out = String::new();
     for (name, code) in [
         ("Sync", 'S'),
@@ -2351,7 +1419,7 @@ fn capability_codes(caps: &[String]) -> String {
     out
 }
 
-fn trunc(s: &str, max: usize) -> String {
+pub(crate) fn trunc(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
@@ -2365,7 +1433,7 @@ fn trunc(s: &str, max: usize) -> String {
 }
 
 /// Detect the terminal width via `TIOCGWINSZ` ioctl, falling back to 120.
-fn terminal_width() -> usize {
+pub(crate) fn terminal_width() -> usize {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: ioctl with TIOCGWINSZ on stdout is a standard POSIX operation
     // that writes into a stack-allocated winsize struct.
@@ -2378,13 +1446,13 @@ fn terminal_width() -> usize {
 }
 
 /// Column descriptor for adaptive table layout.
-struct ColSpec {
+pub(crate) struct ColSpec {
     /// Natural width: max(content_width, header_width).
-    natural: usize,
+    pub(crate) natural: usize,
     /// Minimum width the column can be shrunk to (header width).
-    min: usize,
+    pub(crate) min: usize,
     /// Allocated width after fitting to terminal.
-    allocated: usize,
+    pub(crate) allocated: usize,
 }
 
 /// Fit columns into `avail` characters.
@@ -2395,7 +1463,7 @@ struct ColSpec {
 /// (last-to-shrink) columns first.
 ///
 /// Returns `true` if everything fit without any truncation.
-fn fit_columns(cols: &mut [ColSpec], gap: usize, avail: usize) -> bool {
+pub(crate) fn fit_columns(cols: &mut [ColSpec], gap: usize, avail: usize) -> bool {
     let gaps_total = gap * cols.len().saturating_sub(1);
 
     // Start with natural widths.
