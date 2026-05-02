@@ -26,6 +26,11 @@ use std::sync::{Arc, Mutex};
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use serde::Serialize;
 
+/// Namespace where the guest-side `#[host_fn] extern "ExtismHost"` import
+/// declarations are looked up.  Matches the default used by `extism-pdk`
+/// when no explicit namespace is given on the `extern` block.
+const HOST_USER_MODULE: &str = "extism:host/user";
+
 /// State shared by `file_read` and `file_stat` — the canonicalised allow-list.
 ///
 /// `allowed` holds canonicalised paths.  Paths that fail canonicalisation
@@ -55,14 +60,16 @@ pub(crate) fn build_file_host_functions(allowed_files: &[PathBuf]) -> Vec<Functi
             [ValType::I64],
             user_data.clone(),
             file_read_impl,
-        ),
+        )
+        .with_namespace(HOST_USER_MODULE),
         Function::new(
             "file_stat",
             [ValType::I64],
             [ValType::I64],
             user_data,
             file_stat_impl,
-        ),
+        )
+        .with_namespace(HOST_USER_MODULE),
     ]
 }
 

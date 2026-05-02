@@ -406,9 +406,17 @@ fn probe_plugin(wasm_path: &Path) -> Result<PluginManifest, anyhow::Error> {
     // No allowed hosts for probing — plugin_manifest must not make HTTP requests.
     let manifest = Manifest::new([wasm]);
 
+    // Register the host_file functions with an empty allow-list so plugins
+    // that import them (e.g. keepassxc-file) link successfully during the
+    // probe phase.  `plugin_manifest` is metadata-only and should never
+    // actually call file_read/file_stat — if it does, the empty allow-list
+    // returns an error and the probe fails cleanly.
+    let host_fns = crate::host_file::build_file_host_functions(&[]);
+
     let mut plugin = PluginBuilder::new(manifest)
         .with_wasi(true)
         .with_fuel_limit(PROBE_FUEL_LIMIT)
+        .with_functions(host_fns)
         .build()
         .map_err(|e| {
             anyhow::anyhow!("failed to load WASM plugin '{}': {e}", wasm_path.display())

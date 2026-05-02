@@ -95,7 +95,11 @@ build:
 
 # Build release binaries (native only)
 build-release:
-  cargo build --release --locked --bin rosecd --bin rosec
+  cargo build --release --locked \
+    --bin rosec \
+    --bin rosecd \
+    --bin rosec-prompt \
+    --bin rosec-pam-unlock
 
 # Build WASM provider plugins (requires wasm32-wasip1 target)
 build-wasm:
@@ -107,6 +111,87 @@ build-wasm:
 # Run all tests
 test:
   cargo test --workspace --locked
+
+# ---------------------------------------------------------------------------
+# User-local install (no sudo)
+#
+# Layout:
+#   binaries → $XDG_BIN_HOME (default ~/.local/bin)
+#   plugins  → $XDG_DATA_HOME/rosec/providers/  (default ~/.local/share/...)
+#
+# Recipes:
+#   just install         build everything + install binaries + plugins
+#   just install-bin     just the native binaries
+#   just install-wasm    just the WASM plugin .wasm files
+#   just uninstall       remove everything we'd install
+# ---------------------------------------------------------------------------
+
+# Resolved install directories.
+_bin_dir := env_var_or_default("XDG_BIN_HOME", env_var_or_default("HOME", "") + "/.local/bin")
+_data_dir := env_var_or_default("XDG_DATA_HOME", env_var_or_default("HOME", "") + "/.local/share")
+_plugin_dir := _data_dir + "/rosec/providers"
+
+# Native binaries we ship.  rosec-pam-unlock comes from the rosec-pam crate.
+_bins := "rosec rosecd rosec-prompt rosec-pam-unlock"
+
+# WASM plugins (manifest-path, lowercase artifact stem).  Kept in lockstep
+# with build-wasm.
+_wasm_crates := "rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file"
+
+# Full install: binaries + plugins.  Builds first if artifacts are stale.
+install: build-release build-wasm install-bin install-wasm
+  @echo ""
+  @echo "Installed to:"
+  @echo "  binaries: {{ _bin_dir }}"
+  @echo "  plugins:  {{ _plugin_dir }}"
+  @echo ""
+  @echo "Make sure $HOME/.local/bin is on your PATH."
+
+# Install just the native binaries.
+install-bin:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  install -d -m 755 "{{ _bin_dir }}"
+  for bin in {{ _bins }}; do
+    src="target/release/${bin}"
+    if [[ ! -x "$src" ]]; then
+      echo "error: ${src} not found — run 'just build-release' first" >&2
+      exit 1
+    fi
+    install -m 755 "$src" "{{ _bin_dir }}/${bin}"
+    echo "installed: {{ _bin_dir }}/${bin}"
+  done
+
+# Install just the WASM plugin .wasm files.
+install-wasm:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  install -d -m 755 "{{ _plugin_dir }}"
+  for crate in {{ _wasm_crates }}; do
+    stem="${crate//-/_}"
+    src="${crate}/target/wasm32-wasip1/release/${stem}.wasm"
+    if [[ ! -f "$src" ]]; then
+      echo "error: ${src} not found — run 'just build-wasm' first" >&2
+      exit 1
+    fi
+    install -m 644 "$src" "{{ _plugin_dir }}/${stem}.wasm"
+    echo "installed: {{ _plugin_dir }}/${stem}.wasm"
+  done
+
+# Remove everything install would have placed.
+uninstall:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  for bin in {{ _bins }}; do
+    f="{{ _bin_dir }}/${bin}"
+    if [[ -e "$f" ]]; then rm -v -- "$f"; fi
+  done
+  for crate in {{ _wasm_crates }}; do
+    stem="${crate//-/_}"
+    f="{{ _plugin_dir }}/${stem}.wasm"
+    if [[ -e "$f" ]]; then rm -v -- "$f"; fi
+  done
+  echo "done — config in \$XDG_CONFIG_HOME/rosec/ left untouched"
 
 # Run clippy (warnings as errors) + fmt check
 lint:

@@ -34,3 +34,13 @@ base64 = "0.22"
 
 # UUID parsing for resolving items by ID
 uuid = { version = "1", default-features = false }
+
+# Local patch: keepass-rs's `cfg(target_arch = "wasm32")` is too broad — it
+# pulls in js-sys/wasm-bindgen for ALL wasm32 targets, including
+# wasm32-wasip1 where wasm-bindgen post-processing isn't run and the
+# placeholder imports remain unresolved.  Our fork narrows the cfg to
+# `cfg(all(target_arch = "wasm32", target_os = "unknown"))` (browser only).
+# PR: https://github.com/sseemayer/keepass-rs/pull/318
+# Drop this `[patch.crates-io]` once that PR is merged + a release is cut.
+[patch.crates-io]
+keepass = { git = "https://github.com/jmylchreest/keepass-rs", branch = "local-version-bump" }
