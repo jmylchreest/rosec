@@ -1,604 +1,120 @@
 # rosec
 
-A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/) daemon for Linux. Any application that uses `libsecret` (GNOME Keyring, KWallet API) reads secrets from your configured providers transparently — no code changes required.
+A [`org.freedesktop.secrets`](https://specifications.freedesktop.org/secret-service/latest/) daemon for Linux — a multi-provider replacement for GNOME Keyring's Secret Service implementation. Any application that uses `libsecret`, `secret-tool`, or talks directly to `org.freedesktop.secrets` reads secrets from your configured providers transparently. No code changes required.
 
-**Providers:** local encrypted vaults, Bitwarden Password Manager, Bitwarden Secrets Manager (more via WASM plugins)
+📖 **Documentation:** [jmylchreest.github.io/rosec](https://jmylchreest.github.io/rosec)
 
-**SSH agent:** SSH keys stored in any provider are exposed via a built-in SSH agent and optional FUSE mount with auto-generated `~/.ssh/config` snippets. Per-key confirmation prompts supported.
+## What it does
 
-**TOTP:** Retrieve time-based one-time passwords from vault items via `rosec totp`, the TOTP FUSE filesystem (`$XDG_RUNTIME_DIR/rosec/totp/`), or the `GetTotpCode` D-Bus method. Add seeds interactively or by scanning a QR code.
-
-**XDG Desktop Portal:** Sandboxed apps (Flatpak, Snap) get per-application secrets via the `org.freedesktop.impl.portal.Secret` backend.
-
-**PAM unlock:** Log in once; your vaults unlock automatically.
-
----
+| | |
+|---|---|
+| **Multi-provider** | Local encrypted vault, Bitwarden Password Manager, Bitwarden Secrets Manager, KeePassXC `.kdbx` files, read-only GNOME Keyring (for migration). All visible as one unified collection on the bus. |
+| **SSH agent** | SSH keys stored in any provider auto-populate a built-in agent at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock` — no manual `ssh-add`. Optional FUSE filesystem exposes public keys + an auto-generated `~/.ssh/config` snippet. |
+| **TOTP** | Items with a TOTP seed appear as live files under `$XDG_RUNTIME_DIR/rosec/totp/`. `cat` for the current code. |
+| **PAM unlock** | Log in once, vaults unlock automatically using your login password. |
+| **XDG Portal** | Sandboxed apps (Flatpak, Snap) get per-app secrets via the `org.freedesktop.impl.portal.Secret` backend. |
+| **Sandboxed plugins** | Non-built-in providers run as Extism WASM guests with per-file allow-listing. The plugin can't read anything you didn't authorise. |
 
 ## Install
 
 ### Arch Linux (AUR)
 
-**Build from source (recommended):**
+```bash
+yay -S rosec-bin                              # daemon, CLI, PAM helper
+yay -S rosec-provider-bitwarden-pm-bin        # optional providers — install only what you need
+yay -S rosec-provider-bitwarden-sm-bin
+yay -S rosec-provider-gnome-keyring-bin
+yay -S rosec-provider-keepassxc-file-bin      # experimental
+```
+
+### Build from source
 
 ```bash
-git clone https://aur.archlinux.org/rosec.git
+git clone https://github.com/jmylchreest/rosec
 cd rosec
-makepkg -si
+just install        # builds + installs to ~/.local/bin and ~/.local/share/rosec/providers
 ```
 
-This installs a split package: `rosec` (daemon + CLI + PAM helper) plus optional
-`rosec-provider-bitwarden-pm` and `rosec-provider-bitwarden-sm` WASM plugins.
+(`just build-release` and `just build-wasm` are available individually.)
 
-**Pre-built binary:**
+### Enable as the Secret Service daemon
 
 ```bash
-git clone https://aur.archlinux.org/rosec-bin.git
-cd rosec-bin
-makepkg -si
+rosec enable        # writes systemd / D-Bus activation files, masks gnome-keyring-daemon
+systemctl --user start rosecd
 ```
 
-### From source
+Full installation guide, including PAM and display-manager setup, lives at the [docs site](https://jmylchreest.github.io/rosec/docs/installation).
+
+## How it feels in practice
 
 ```bash
-cargo build --release --workspace
-sudo install -m755 target/release/rosecd              /usr/local/bin/
-sudo install -m755 target/release/rosec               /usr/local/bin/
-sudo install -m755 target/release/rosec-pam-unlock    /usr/lib/rosec/rosec-pam-unlock
-sudo install -m755 target/release/rosec-prompt        /usr/local/bin/
-```
-
-### systemd + D-Bus activation
-
-The recommended way to enable rosecd as a persistent user service with D-Bus
-activation is the `rosec enable` command, which installs the systemd unit and
-D-Bus service files into your user directories automatically:
-
-```bash
-rosec enable
-```
-
-This writes:
-- `~/.config/systemd/user/rosecd.service` — systemd user service
-- `~/.config/systemd/user/rosecd.socket` — systemd socket activation
-- `~/.local/share/dbus-1/services/org.freedesktop.secrets.service` — D-Bus activation
-- `~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.rosec.service` — XDG portal D-Bus activation
-- `~/.local/share/xdg-desktop-portal/portals/rosec.portal` — portal descriptor
-
-With `--mask`, also writes (when the corresponding system entries exist):
-- `~/.local/share/dbus-1/services/org.gnome.keyring.service` — mask (Exec=/bin/false)
-- `~/.config/autostart/gnome-keyring-secrets.desktop` — disable autostart
-- `~/.config/autostart/gnome-keyring-ssh.desktop` — disable autostart
-
-...then reloads the systemd user daemon and enables the service.  To undo:
-
-```bash
-rosec disable
-```
-
-All service files (systemd units, D-Bus activation, gnome-keyring mask) are
-generated by `rosec enable` with the correct binary paths. Use `rosec enable --force`
-to regenerate after upgrading.
-
-> If `gnome-keyring-daemon` keeps stealing `org.freedesktop.secrets`, see the [FAQ](#faq).
-
----
-
-## Quick Start
-
-### 1. Create a local vault
-
-```bash
+# Add a provider, unlock it
 rosec provider add local
+rosec unlock
+
+# Use it from any libsecret-aware tool
+rosec item add --provider local --label "GitHub" --attr username=alice --secret 'hunter2'
+secret-tool lookup label "GitHub"             # → hunter2
 ```
 
-`rosecd` detects the new provider and prompts for a master password. Since the vault file doesn't exist yet, you'll be asked to confirm it:
+### SSH agent
 
-```
-Unlocking local  (Local Vault)
-
-Master Password [Enter your master password]: ••••
-
-This vault does not exist yet. It will be created with the password you provided.
-
-Please confirm your password (it has not been verified yet):
-
-Confirm Master Password: ••••
-Provider 'local' authenticated.
-```
-
-### 2. Set up PAM auto-unlock
-
-Add a second unlock password that matches your login password, so the vault unlocks automatically at login:
+Any SSH key in any provider — first-class SSH-key items, PEM blobs in notes, KeePassXC's KeeAgent attachment integration — gets registered automatically:
 
 ```bash
-rosec provider add-password local --label pam
-# Enter your login (PAM) password — NOT your vault master password
+$ export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/ssh/agent.sock"
+$ ssh-add -l
+256 SHA256:zBO1FdFfWhPfGfAJJMEPS2aog5C1b/06o7h0m2t1W/o rosec-kpxc-test (ED25519)
+3072 SHA256:GDyUpSY2eyXYHCkUeADBhoWn/LWLvM3GI8cO8DQBI7k jmylchreest-github (RSA)
+
+$ ssh git@github.com         # signs with the matching key, no `ssh-add` needed
 ```
 
-Then add rosec to your local login PAM config (`/etc/pam.d/system-local-login`):
+Public keys + a generated SSH config are also exposed via FUSE so you can drop the agent socket into existing tooling:
 
+```text
+$XDG_RUNTIME_DIR/rosec/ssh/
+├── agent.sock                    # SSH agent socket — point SSH_AUTH_SOCK here
+├── keys/
+│   ├── by-name/<item>.pub        # public key per vault item
+│   ├── by-fingerprint/<sha256>.pub
+│   └── by-host/<host>.pub        # one per ssh_host attribute
+└── config.d/<provider>-<item>.conf  # ssh config snippet — `Host <pattern>` blocks pointing at agent.sock
 ```
-auth      include   rosec
-session   include   rosec
-password  include   rosec
-```
 
-From your next login, the vault unlocks automatically. See [PAM auto-unlock](#pam-auto-unlock) for display manager setup and troubleshooting.
+Add `Include $XDG_RUNTIME_DIR/rosec/ssh/config.d/*` near the top of your `~/.ssh/config` and any item with an `ssh_host` attribute auto-routes through rosec.
 
-### 3. Use it
+### TOTP
 
 ```bash
-# Check status
-rosec status
+$ ls "$XDG_RUNTIME_DIR/rosec/totp/by-name/"
+github  gitlab  github_signing
 
-# Search and retrieve
-rosec search type=login
-rosec get name="My API Key"
-
-# Create, edit, export items (see Item management below)
-rosec item add --type=login
-rosec item export <id> > backup.toml
+$ cat "$XDG_RUNTIME_DIR/rosec/totp/by-name/github"
+384295        # ← live, recomputed on every read
 ```
 
----
-
-## Providers
-
-rosec supports multiple providers simultaneously. Each is independently locked and unlocked; all contribute items to a unified namespace on the D-Bus Secret Service.
-
-| Kind | Description | Docs |
-|---|---|---|
-| `local` | Local encrypted vault (AES-256, PBKDF2, key wrapping) | [docs/providers/local.md](docs/providers/local.md) |
-| `bitwarden` | Bitwarden Password Manager | [docs/providers/bitwarden.md](docs/providers/bitwarden.md) |
-| `bitwarden-sm` | Bitwarden Secrets Manager | [docs/providers/bitwarden-sm.md](docs/providers/bitwarden-sm.md) |
-| `gnome-keyring` | Read-only access to existing GNOME Keyring files (WASM plugin) | [Migrating from GNOME Keyring](#migrating-from-gnome-keyring) |
-| `keepassxc-file` *(experimental)* | Read a KeePassXC `.kdbx` database directly. SSH keys + TOTP supported, hot-reload on save. | [docs/providers/keepassxc-file.md](docs/providers/keepassxc-file.md) |
-
-### Managing providers
-
-```bash
-# List all providers and their lock state
-rosec provider list
-
-# Add a provider (prompts for config and credentials)
-rosec provider add local
-rosec provider add bitwarden
-rosec provider add bitwarden-sm
-
-# Authenticate / unlock a provider manually
-rosec provider auth <id>
-
-# Remove a provider
-rosec provider remove <id>
-
-# List available provider kinds (includes installed WASM plugins)
-rosec provider kinds
-```
-
-### Local vault commands
-
-```bash
-# Add a second unlock password (e.g. for PAM, or a second machine)
-rosec provider add-password <id> [--label <label>]
-
-# List wrapping entries
-rosec provider list-passwords <id>
-
-# Remove a wrapping entry
-rosec provider remove-password <id> <entry-id>
-
-# Change the password for a wrapping entry
-rosec provider change-password <id>
-
-# Attach an existing vault file (e.g. shared via Syncthing)
-rosec provider attach --path /path/to/file.vault [--id <id>]
-
-# Detach from config without deleting the file
-rosec provider detach <id>
-```
-
----
-
-## Item management
-
-`rosec item` provides CRUD operations for items in any write-capable provider. Items are edited as TOML documents in `$EDITOR`.
-
-### Creating items
-
-```bash
-# Create a generic item (opens $EDITOR with a template)
-rosec item add
-
-# Create a login in a specific provider
-rosec item add --type=login --provider=local
-
-# Generate an ed25519 SSH key pair and store it
-rosec item add --generate-ssh-key
-```
-
-### Editing and deleting
-
-```bash
-# Edit by item ID (16-char hex)
-rosec item edit a1b2c3d4e5f60718
-
-# Edit by attribute match
-rosec item edit name=My\ Login
-
-# Delete with confirmation
-rosec item delete a1b2c3d4e5f60718
-
-# Delete without confirmation
-rosec item delete -y a1b2c3d4e5f60718
-```
-
-### Export and import
-
-Items can be exported as TOML and imported into any write-capable provider. This enables backups, cross-provider transfers, and scripted workflows.
-
-```bash
-# Export an item to stdout
-rosec item export a1b2c3d4e5f60718
-
-# Export to a file
-rosec item export a1b2c3d4e5f60718 > backup.toml
-
-# Import from a file
-rosec item import < backup.toml
-
-# Import into a specific provider
-rosec item import --provider=local < backup.toml
-
-# Copy an item between providers (e.g. Bitwarden → local vault)
-rosec item export a1b2c3d4e5f60718 | rosec item import --provider=local
-```
-
-The TOML format uses three sections — `[item]`, `[attributes]`, `[secrets]` — and is the same format used by the editor workflow:
-
-```toml
-[item]
-label = "My SSH Key"
-type = "ssh-key"
-
-[attributes]
-public_key = "ssh-ed25519 AAAA..."
-fingerprint = "SHA256:..."
-
-[secrets]
-private_key = """
------BEGIN OPENSSH PRIVATE KEY-----
-...
------END OPENSSH PRIVATE KEY-----
-"""
-```
-
-### Listing items
-
-```bash
-# List all items
-rosec item list
-
-# Filter by provider or type
-rosec item list --provider=local
-rosec item list --type=ssh-key
-
-# Combine filters with attribute queries
-rosec item list --type=login username=alice
-
-# JSON output
-rosec item list --format=json
-```
-
----
-
-## PAM auto-unlock
-
-rosec ships a native PAM module (`pam_rosec.so`) that unlocks your providers
-automatically at login and screen unlock — just like gnome-keyring. Password
-changes are also handled automatically.
-
-```
-# /etc/pam.d/system-local-login — add at the end:
-auth      include   rosec
-session   include   rosec
-password  include   rosec
-```
-
-If your login password differs from your vault master password, add it as a wrapping entry first:
-
-```bash
-rosec provider add-password <vault-id> --label pam
-```
-
-Login is never blocked — `pam_rosec.so` always returns `PAM_SUCCESS` on failure. Passwords are sent via pipe fd-passing and never appear on the D-Bus wire.
-
-See [docs/pam.md](docs/pam.md) for screen locker configs, `pam_exec` fallback, and security details.
-
----
-
-## SSH agent
-
-SSH keys stored in any provider are loaded automatically:
-
-```bash
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock"
-ssh-add -l
-```
-
-Tag items with a `custom.ssh_host` attribute to generate `~/.ssh/config` snippets automatically:
-
-```
-Include /run/user/1000/rosec/ssh/config.d/*
-```
-
-Set `custom.ssh_confirm = "true"` on a vault item to require interactive confirmation (GUI prompt or TTY) before that key is used for signing.
-
-See [docs/ssh-agent.md](docs/ssh-agent.md) for full details.
-
----
-
-## TOTP
-
-Vault items with TOTP seeds generate time-based one-time passwords on-the-fly:
-
-```bash
-# Show a TOTP code (GUI pin-box display with countdown, or plain text in TTY)
-rosec totp my-service
-
-# Print code to stdout (for scripting / piping to clipboard)
-rosec totp my-service --stdout
-```
-
-### Adding TOTP seeds
-
-```bash
-# Enter a seed or otpauth:// URI interactively
-rosec totp add my-service
-
-# Scan a QR code from the screen (requires xdg-desktop-portal)
-rosec totp add my-service --qr
-```
-
-### FUSE filesystem
-
-TOTP codes are also available as virtual files, refreshed each period:
-
-```bash
-cat "$XDG_RUNTIME_DIR/rosec/totp/by-name/My Service.code"
-# 482019
-
-# Watch codes refresh
-watch cat "$XDG_RUNTIME_DIR/rosec/totp/by-name/My Service.code"
-```
-
-### D-Bus method
-
-Programmatic access via the `org.rosec.Secrets` interface:
-
-```bash
-busctl --user call org.freedesktop.secrets /org/rosec/Secrets \
-  org.rosec.Secrets GetTotpCode o /org/freedesktop/secrets/collection/.../item
-# Returns (code, seconds_remaining)
-```
-
----
-
-## XDG Desktop Portal
-
-rosec implements the `org.freedesktop.impl.portal.Secret` interface, which provides sandboxed applications (Flatpak, Snap) with stable per-application secrets. This is the same mechanism used by gnome-keyring, oo7-portal, and KWallet.
-
-When a sandboxed app calls `org.freedesktop.portal.Secret.RetrieveSecret()`:
-
-1. The portal daemon (`xdg-desktop-portal`) routes the request to rosec
-2. rosec looks up an existing secret for that `app_id`, or generates a new 64-byte random secret and stores it in the first write-capable provider
-3. The secret is written to the caller's file descriptor
-
-The portal descriptor and D-Bus activation file are installed automatically by `rosec enable`. However, you must also tell `xdg-desktop-portal` to route Secret requests to rosec — see the [FAQ](#sandboxed-flatpak-apps-cant-find-their-secrets-or-fail-to-authenticate) if sandboxed apps aren't picking up the portal.
-
----
-
-## Configuration
-
-`~/.config/rosec/config.toml`
-
-```toml
-[service]
-# refresh_interval_secs = 60   # optional background sync interval
-
-[autolock]
-on_logout        = true
-on_session_lock  = false
-# idle_timeout_minutes = 15
-
-[prompt]
-backend = "builtin"   # or path to rosec-prompt binary
-
-[[provider]]
-id   = "local"
-kind = "local"
-
-[[provider]]
-id   = "bitwarden"
-kind = "bitwarden"
-
-[provider.options]
-email = "user@example.com"
-```
-
-Full reference: [docs/configuration.md](docs/configuration.md)
-
----
-
-## Migrating from GNOME Keyring
-
-rosec includes a read-only `gnome-keyring` provider (WASM plugin) that reads
-your existing `~/.local/share/keyrings/*.keyring` files directly.  This lets
-you run rosec as the Secret Service daemon while still accessing your old
-GNOME Keyring items — no export/import needed.
-
-**1.** Stop gnome-keyring-daemon and enable rosec (see [Install](#install)):
-
-```bash
-systemctl --user mask gnome-keyring-daemon.service gnome-keyring-daemon.socket
-rosec enable
-```
-
-**2.** Add the `gnome-keyring` provider to your config:
-
-```toml
-# ~/.config/rosec/config.toml
-[[provider]]
-kind = "gnome-keyring"
-id   = "gnome-keyring"
-name = "GNOME Keyring"
-```
-
-**3.** Unlock it (you will be prompted for your GNOME Keyring password —
-usually your login password):
-
-```bash
-rosec provider auth gnome-keyring
-```
-
-Your existing GNOME Keyring items are now accessible via `org.freedesktop.secrets`
-alongside any other rosec providers.
-
-> **Note:** the `gnome-keyring` provider is **read-only**.  Items created by
-> applications while rosec is running are stored in whichever rosec provider
-> is designated as the write target (typically your `local` vault).  Once you
-> have migrated, you can remove the `gnome-keyring` provider from your config.
-
----
+Or via the CLI: `rosec totp get github`.
 
 ## FAQ
 
-**`gnome-keyring-daemon` keeps stealing `org.freedesktop.secrets`**
+A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.github.io/rosec/docs/faq) has the full set.
 
-```bash
-systemctl --user mask gnome-keyring-daemon.service gnome-keyring-daemon.socket
-rosec enable
-```
+**Is this a drop-in for GNOME Keyring?** For the Secret Service API, yes. PKCS#11 and the gnome-keyring SSH agent are not implemented; if you depend on those keep gnome-keyring around alongside.
 
-User-level D-Bus service files in `~/.local/share/dbus-1/services/` (written
-by `rosec enable`) take precedence over system files per the D-Bus spec.
+**Does the daemon sync between machines?** No — rosec is a local daemon. Sync happens within individual providers (Bitwarden API, KeePassXC kdbx via Syncthing, etc.).
 
-**How do I update my Bitwarden master password?**
+**How is the master password stored?** It isn't — only a wrapped key. PBKDF2-SHA256 with a per-vault salt, AES-256 wrap. Unlocking re-derives in memory; locking zeroes it.
 
-The master password is never stored. After changing it in the Bitwarden web vault, run `rosec provider auth <id>` and enter the new password.
+**Can I write a custom provider?** Yes — providers other than `local` are Extism WASM guests. See `notes/internal/wasm-provider-guide.md` in this repo.
 
-**How do I rotate a Bitwarden Secrets Manager access token?**
+**`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/docs/troubleshooting).
 
-Run `rosec provider auth <id> --force` and paste the new token when prompted.
+## Status
 
-**SSH agent or TOTP FUSE fails with "Transport endpoint is not connected"**
+Active development. The `local`, `bitwarden`, `bitwarden-sm`, and `gnome-keyring` providers are stable. The `keepassxc-file` provider is **experimental** — interfaces and on-disk caching may change between releases.
 
-`rosecd` cleans up stale FUSE mounts on startup — restart it. If that fails:
+## Licence
 
-```bash
-fusermount3 -uz "$XDG_RUNTIME_DIR/rosec/ssh"
-fusermount3 -uz "$XDG_RUNTIME_DIR/rosec/totp"
-```
-
-**Sandboxed (Flatpak) apps can't find their secrets or fail to authenticate**
-
-`rosec enable` installs the portal descriptor (`rosec.portal`) and D-Bus activation file, but `xdg-desktop-portal` also needs a routing entry in your portal configuration to know that rosec handles the Secret interface. Without this, sandboxed apps won't see `org.freedesktop.portal.Secret` as available and may fail to persist credentials, complete OAuth flows, or access their encrypted storage.
-
-Most desktop environment portal sets (Hyprland, GTK, KDE) don't implement Secret themselves, so the routing entry is required.
-
-**Fix — add a routing entry to your portal config:**
-
-*Hyprland:*
-
-```ini
-# ~/.config/xdg-desktop-portal/hyprland-portals.conf
-[preferred]
-default = hyprland;gtk
-org.freedesktop.impl.portal.Secret = rosec
-```
-
-*GNOME:*
-
-```ini
-# ~/.config/xdg-desktop-portal/portals.conf
-[preferred]
-default = gnome
-org.freedesktop.impl.portal.Secret = rosec
-```
-
-*KDE:*
-
-```ini
-# ~/.config/xdg-desktop-portal/portals.conf
-[preferred]
-default = kde
-org.freedesktop.impl.portal.Secret = rosec
-```
-
-*Sway:*
-
-```ini
-# ~/.config/xdg-desktop-portal/sway-portals.conf
-[preferred]
-default = wlr;gtk
-org.freedesktop.impl.portal.Secret = rosec
-```
-
-Then restart xdg-desktop-portal to pick up the change:
-
-```bash
-systemctl --user restart xdg-desktop-portal
-```
-
-Verify with:
-
-```bash
-busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop | grep -i secret
-```
-
-You should see `org.freedesktop.portal.Secret` in the output.
-
-**Chrome / Vivaldi / Chromium shows "Encrypted keystore changed or is now unavailable"**
-
-Usually caused by cross-provider duplication — the same Chrome Safe Storage key exists in two providers with different values. See [docs/troubleshooting.md](docs/troubleshooting.md#chrome--vivaldi--chromium--encrypted-keystore-changed-or-is-now-unavailable) for diagnosis and fix.
-
-**Self-signed certificate / Vaultwarden with private CA**
-
-Set `tls_mode = "system"` on the provider to use the OS trust store instead of the bundled Mozilla roots. See [docs/troubleshooting.md](docs/troubleshooting.md#self-signed-certificates--vaultwarden-with-private-ca) for details and CA setup.
-
----
-
-## Shell integration
-
-A zsh plugin is included for fetching secrets and exporting them as environment variables.
-
-```
-# ~/.zsh_plugins.txt (antidote)
-jmylchreest/rosec path:contrib/zsh kind:defer
-```
-
-Provides `get-key` (print a secret) and `rosec-env` (fetch + export). See [contrib/zsh/README.md](contrib/zsh/README.md) for full documentation.
-
----
-
-## Development
-
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-cargo fmt --all
-```
-
-A `Justfile` is provided (`just build`, `just test`, `just lint`, `just release-patch`, etc.).
-
----
-
-## Prior art
-
-- [`secretsd`](https://github.com/grawity/secretsd) — Generic Secret Service backend
-- [`oo7`](https://github.com/bilelmoussaoui/oo7) — Pure Rust Secret Service client
-- [`pass-secret-service`](https://github.com/mdellweg/pass_secret_service) — Secret Service backed by pass
-
-## License
-
-MIT
+[MIT](LICENSE).
