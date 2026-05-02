@@ -560,6 +560,10 @@ only.  If only `fido2` methods are available, it returns an error:
   `Provider::unlock_passkey()` method.
 - Deferred until WebAuthn 2FA works, since the FIDO2 infrastructure is a
   prerequisite.
+- Note: this is *consuming* a passkey to unlock a Bitwarden vault,
+  distinct from *serving* passkeys to other apps via WebAuthn.  The
+  latter is covered separately in
+  [credentialsd integration](#credentialsd-integration--rosec-as-a-passkey-provider).
 
 #### Platform considerations
 
@@ -590,6 +594,190 @@ Currently, only Duo passcode (plain text) is supported.
 - Guest challenge extraction: **not started**
 - Host FIDO2 client: **not started**
 - Duo browser redirect: **not started**
+
+---
+
+## credentialsd integration — rosec as a passkey provider
+
+### Background
+
+[credentialsd](https://github.com/linux-credentials/credentialsd) is an
+emerging Linux Credential Manager API that defines a D-Bus surface for
+WebAuthn ceremonies on the desktop.  It is the missing equivalent of
+macOS's Authentication Services / Windows Hello — a system-level entry
+point that browsers and native apps can call to perform
+`navigator.credentials.create()` and `navigator.credentials.get()`,
+delegating actual credential handling to a separate daemon and UI.
+
+The project explicitly intends to be standardised as an XDG portal:
+
+> "I intend to convert the API into a portal spec, making it fit normal
+> D-Bus/portal patterns." (GOALS.md)
+
+And it explicitly carves out space for password/passkey managers to
+plug in:
+
+> "Provide a uniform interface for third-party credential providers
+> (password/passkey managers like GNOME Secrets, Bitwarden, Keepass,
+> LastPass, etc.) to hook into." (GOALS.md)
+
+That hook is where rosec belongs.
+
+### D-Bus surface (current shape)
+
+`xyz.iinuwa.credentialsd.Credentials1` exposes three methods:
+
+| Method | Signature | WebAuthn equivalent |
+|---|---|---|
+| `CreateCredential` | `((s, a{sv})) → a{sv}` | `navigator.credentials.create()` |
+| `GetCredential` | `((s, a{sv})) → a{sv}` | `navigator.credentials.get()` |
+| `GetClientCapabilities` | `() → a{sv}` | capability discovery |
+
+The `(s, a{sv})` request shape carries `(origin, options)` where
+`options` is the WebAuthn options dict serialised to D-Bus variants.
+This is a thin transport for the existing W3C spec — not a new
+protocol.
+
+### Architecture
+
+credentialsd splits the work across three processes:
+
+- **credentialsd daemon** (Gateway + Flow Controller) — receives the
+  request, drives the ceremony, calls authenticator backends.
+- **credentialsd-ui** — separate UI process subscribed to flow events.
+  GTK4 reference; replaceable per desktop environment.
+- **Browser web extension** — overrides `navigator.credentials.*` and
+  forwards to D-Bus.
+
+Authenticator I/O is delegated to
+[`libwebauthn`](https://github.com/linux-credentials/libwebauthn)
+(USB + hybrid/QR transports today).  Resident-credential storage is
+not yet specified — that is the gap rosec would fill.
+
+### Why rosec should integrate
+
+- **Right-shaped interface**: passkey private keys belong in a vault,
+  not in `org.freedesktop.secrets.GetSecret()`.  WebAuthn is a signing
+  ceremony, not an extractable secret.  credentialsd's interface is
+  challenge-in / assertion-out, which matches what the vault should
+  expose.
+- **Reuses rosec's existing storage**: a local rosec vault already has
+  PBKDF2 + AES-256-CBC + HMAC-SHA256 wrapping, autolock, multi-password
+  unlock, and atomic on-disk persistence.  These are exactly the
+  primitives a passkey store needs.
+- **Multi-provider fan-out**: rosec already routes lookups across
+  several backends (Bitwarden, local vault, others).  When credentialsd
+  asks "do you have a credential for `rpId=example.com`?", rosec can
+  answer across every backend that holds passkeys, not just one.
+- **No browser-extension churn**: the browser side talks to
+  credentialsd; rosec only needs to implement the
+  third-party-provider hook on the daemon side.
+
+### Implementation sketch
+
+#### Phase 1: Track upstream
+
+The third-party-provider interface is not stable yet.  No protocol
+implementation work makes sense until credentialsd publishes a draft
+provider API.  Until then:
+
+- Watch the credentialsd repo for a `provider.rs` / `xml`
+  introspection file in the `doc/` tree.
+- Engage on the spec discussion (open issue / RFC threads) so rosec's
+  storage shape (multi-vault, lazy unlock, autolock, key-wrapping)
+  gets considered when the provider API is designed.
+
+#### Phase 2: Passkey storage in rosec-vault
+
+Add a new item type `passkey` to `LocalVault`:
+
+```rust
+// rosec-core/src/lib.rs (ItemType variant)
+ItemType::Passkey
+
+// rosec-vault stores per-passkey:
+//   - rpId (plaintext attribute)
+//   - userId, userHandle (plaintext attributes)
+//   - credentialId (plaintext attribute, used as lookup key)
+//   - publicKey (plaintext, served back during create)
+//   - privateKey (encrypted via vault master key, never returned)
+//   - signCounter (encrypted, incremented per assertion)
+```
+
+The private key never leaves the vault: signing happens inside
+`rosec-vault` and only the assertion bytes flow back out.  This is the
+same shape `Provider::sign_ssh()` already follows for SSH keys.
+
+#### Phase 3: Implement the credentialsd provider hook
+
+Once credentialsd's third-party-provider API stabilises, add a small
+`rosec-credentialsd` binary (or rosecd module behind a cargo feature)
+that:
+
+1. Registers as a credentialsd provider over D-Bus.
+2. On `CreateCredential`: receives the rpId and PublicKeyCredentialCreationOptions,
+   asks the user (via rosec-prompt) which backend should host the new
+   passkey, generates a keypair inside `rosec-vault`, and returns the
+   public key + credentialId.
+3. On `GetCredential`: receives the rpId and a list of allowed
+   credentialIds, looks up matching passkeys across backends, asks the
+   user to confirm (rosec-prompt with rpId + user label), and returns
+   the signed assertion.
+4. On lock / autolock: the passkeys are inaccessible until the vault
+   is re-unlocked.  credentialsd already understands "authenticator
+   unavailable" responses, so this maps cleanly.
+
+#### Phase 4: Browser ergonomics
+
+credentialsd's browser web extension handles
+`navigator.credentials.*` interception, so no per-browser work is
+needed.  rosec just needs to ensure its prompt UI surfaces enough
+context (rpId, requesting app name) for the user to make a sensible
+allow/deny decision.
+
+### What this is *not*
+
+- **Not a Secret Service `org.freedesktop.secrets` extension.**  Items
+  with extractable secrets via `GetSecret()` are the wrong shape for
+  passkeys.  Adding a `type=passkey` item that returns the private
+  key bytes would break the WebAuthn security model.
+- **Not a wrapper around `passkeyd`**.  credentialsd's scope is
+  broader (full ceremony, hybrid transport, browser shim, portal
+  spec); passkeyd is a simpler passkey daemon with no spec ambitions.
+  If rosec adopts credentialsd's provider hook, passkeyd is
+  unnecessary as a dependency.
+- **Not the same thing as `Bitwarden passkey-based unlock`**.  The
+  WebAuthn 2FA section above covers using a passkey to unlock a
+  *Bitwarden vault*.  This section covers serving passkeys from
+  rosec's own vault to *other apps* via credentialsd.  The two share
+  no code paths — one consumes WebAuthn, the other produces it.
+
+### Effort estimate
+
+- Phase 1 (track + engage): ongoing, low effort, mostly issue
+  participation.
+- Phase 2 (vault storage): ~1–2 weeks.  Requires `ItemType::Passkey`,
+  wrapping the existing storage primitives, exposing a sign-with-key
+  interface on the `Provider` trait, and tests.
+- Phase 3 (provider hook): unknown until credentialsd's API
+  stabilises, but the actual ceremony orchestration is a few hundred
+  lines on top of phase 2.
+- Phase 4: minimal — UI polish in `rosec-prompt`.
+
+### Status
+
+- credentialsd third-party-provider API: **draft / not yet stable** upstream
+- rosec-vault passkey storage: **not started**
+- rosec-credentialsd integration: **blocked on upstream**
+- Tracking issue: TBD (open one once Phase 1 begins)
+
+### Reference
+
+- Upstream repo: <https://github.com/linux-credentials/credentialsd>
+- libwebauthn (authenticator I/O): <https://github.com/linux-credentials/libwebauthn>
+- D-Bus introspection: `doc/xyz.iinuwa.credentialsd.Credentials.xml`
+  in the credentialsd repo
+- ARCHITECTURE.md and GOALS.md in the credentialsd repo
 
 ---
 
