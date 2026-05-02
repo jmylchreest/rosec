@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "rosec"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64",
@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-core"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "aes",
  "anyhow",
@@ -4199,7 +4199,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-fuse"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "fuser",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-pam"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "libc",
  "tokio",
@@ -4226,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-prompt"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4247,7 +4247,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-secret-service"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "aes",
  "anyhow",
@@ -4275,7 +4275,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-ssh-agent"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "libc",
@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-vault"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "aes",
  "anyhow",
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-wasm"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "aes",
  "anyhow",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "rosecd"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "busd",
