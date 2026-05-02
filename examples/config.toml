@@ -40,13 +40,29 @@ font_size = 14                  # alias: size
 # cancel_background = ""        # alias: nbg  (empty = use background)
 # cancel_text = ""              # alias: nt   (empty = use foreground)
 
-# Backend configuration
-[[backend]]
-id = "bitwarden"
-type = "bitwarden"
+# Provider configuration — see docs/configuration.md and docs/providers/.
+
+# Local encrypted vault (offline, fully writable).
+[[provider]]
+id   = "local"
+kind = "local"
+path = "~/.local/share/rosec/vaults/local.vault"
+
+# Bitwarden Personal Vault (read-only sync from the Bitwarden API).
+[[provider]]
+id   = "bitwarden"
+kind = "bitwarden"
 # unlock_timeout_secs = 30  # max seconds for unlock (probes + auth); default: 30
 
-[backend.options]
+[provider.options]
 email = "user@example.com"
 # base_url = "https://vault.bitwarden.com"  # omit for official US cloud
 # base_url = "https://your-vaultwarden.example.com"  # for self-hosted
+
+# KeePassXC kdbx (read-only, experimental).
+# [[provider]]
+# id   = "kp-personal"
+# kind = "keepassxc-file"
+# path = "~/Passwords.kdbx"
+# [provider.options]
+# key_file = "~/Passwords.keyx"
