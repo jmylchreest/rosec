@@ -58,6 +58,17 @@ pub struct WasmProviderConfig {
     /// Prefix the host path with `ro:` for read-only access (recommended).
     /// Example: `("ro:/home/user/.local/share/keyrings", "/home/user/.local/share/keyrings")`
     pub allowed_paths: Vec<(String, std::path::PathBuf)>,
+    /// Specific files the plugin may read via the `host_file` host functions.
+    ///
+    /// Unlike `allowed_paths` (WASI directory pre-opens), this is per-file
+    /// scoping enforced by the host: only paths in this exact list are
+    /// readable, and only via the dedicated `file_read` / `file_stat`
+    /// host imports.  Used by providers like `keepassxc-file` that need
+    /// access to a single, user-configured database file.
+    ///
+    /// Paths are canonicalised before comparison, so `..` and symlinks can't
+    /// escape.
+    pub allowed_files: Vec<std::path::PathBuf>,
     /// Opaque key-value options forwarded to the guest `init` function.
     pub options: HashMap<String, serde_json::Value>,
     /// Host-side gate for offline caching.  When `false`, cache export and
@@ -189,7 +200,10 @@ impl WasmProvider {
         // Clone the manifest before consuming it so we can recreate the
         // plugin after a WASM trap (which corrupts the instance).
         let manifest = manifest;
-        let host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        let mut host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        host_fns.extend(crate::host_file::build_file_host_functions(
+            &config.allowed_files,
+        ));
         let mut plugin = Plugin::new(&manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to load WASM plugin '{}': {e}",
@@ -251,7 +265,10 @@ impl WasmProvider {
         manifest: &Manifest,
         config: &WasmProviderConfig,
     ) -> Result<Plugin, ProviderError> {
-        let host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        let mut host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
+        host_fns.extend(crate::host_file::build_file_host_functions(
+            &config.allowed_files,
+        ));
         let mut plugin = Plugin::new(manifest, host_fns, true).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
                 "failed to recreate WASM plugin '{}': {e}",

@@ -1768,6 +1768,9 @@ async fn build_single_provider(
             // Compute WASI filesystem paths to pre-open for the sandbox.
             let allowed_paths = compute_wasi_allowed_paths(kind, &guest_options);
 
+            // Per-file scoped reads via host_file (used by keepassxc-file).
+            let allowed_files = compute_allowed_files(kind, &guest_options);
+
             let wasm_config = rosec_wasm::WasmProviderConfig {
                 id: entry.id.clone(),
                 name,
@@ -1775,6 +1778,7 @@ async fn build_single_provider(
                 wasm_path: discovered.wasm_path.display().to_string(),
                 allowed_hosts,
                 allowed_paths,
+                allowed_files,
                 options: guest_options,
                 offline_cache: entry.offline_cache,
                 tls_mode: entry.tls_mode.clone(),
@@ -1840,6 +1844,29 @@ fn compute_wasi_allowed_paths(
     }
 
     paths
+}
+
+/// Compute per-file scoped paths for the `host_file` host imports.
+///
+/// Currently only `keepassxc-file` uses this — its `path` option points to
+/// the user's `.kdbx` database, which is the only file the guest can read.
+fn compute_allowed_files(
+    kind: &str,
+    options: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    if kind == "keepassxc-file"
+        && let Some(p) = options.get("path").and_then(|v| v.as_str())
+    {
+        files.push(PathBuf::from(p));
+        // Optional key file used as a second factor.
+        if let Some(k) = options.get("key_file").and_then(|v| v.as_str()) {
+            files.push(PathBuf::from(k));
+        }
+    }
+
+    files
 }
 
 /// Parse `--config <path>` from CLI args, falling back to XDG default.
