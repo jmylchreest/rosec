@@ -44,7 +44,7 @@ rosec enable        # writes systemd / D-Bus activation files, masks gnome-keyri
 systemctl --user start rosecd
 ```
 
-Full installation guide, including PAM and display-manager setup, lives at the [docs site](https://jmylchreest.github.io/rosec/docs/installation).
+Full installation guide, including PAM and display-manager setup, lives at the [docs site](https://jmylchreest.github.io/rosec/installation).
 
 ## How it feels in practice
 
@@ -99,7 +99,7 @@ Or via the CLI: `rosec totp get github`.
 
 ## FAQ
 
-A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.github.io/rosec/docs/faq) has the full set.
+A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.github.io/rosec/faq) has the full set.
 
 **Is this a drop-in for GNOME Keyring?** For the Secret Service API, yes. PKCS#11 and the gnome-keyring SSH agent are not implemented; if you depend on those keep gnome-keyring around alongside.
 
@@ -109,7 +109,7 @@ A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.gi
 
 **Can I write a custom provider?** Yes — providers other than `local` are Extism WASM guests. See `notes/internal/wasm-provider-guide.md` in this repo.
 
-**`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/docs/troubleshooting).
+**`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
 
 ## Status
 

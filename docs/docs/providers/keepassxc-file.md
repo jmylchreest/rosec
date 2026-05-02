@@ -95,7 +95,7 @@ Worked example:
 | Title    | github            |
 | Username | git               |
 | Password | *(empty unless your key has a passphrase)* |
-| `ssh_host` | `github.com`<br>`gist.github.com` |
+| `ssh_host` | `github.com`<br />`gist.github.com` |
 | `ssh_user` | `git` *(optional — Username already covers this)* |
 
 After save, rosec will write a config snippet at `$XDG_RUNTIME_DIR/rosec/ssh/config.d/<provider>-<item>.conf` with `Host github.com gist.github.com` blocks pointing at the rosec agent socket.

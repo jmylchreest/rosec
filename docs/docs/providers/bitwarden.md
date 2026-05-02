@@ -46,7 +46,7 @@ email    = "user@example.com"
 > the CA is installed in your OS trust store. A bare self-signed certificate
 > will not work — you need a proper CA that signs a leaf server certificate
 > (otherwise TLS verification fails with `CaUsedAsEndEntity`). See the
-> [FAQ](../../README.md#faq) for details and certificate generation instructions.
+> [FAQ](../faq.md) for details and certificate generation instructions.
 
 ## Authenticating
 

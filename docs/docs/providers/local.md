@@ -78,7 +78,7 @@ rosec provider add-password local --label pam
 # Enter your LOGIN password (not the vault master password)
 ```
 
-Then configure PAM — see the [PAM auto-unlock section in the README](../../README.md#pam-auto-unlock).
+Then configure PAM — see [PAM auto-unlock](../pam.md).
 
 If your login password and vault master password are the same, no extra wrapping entry is needed.
 

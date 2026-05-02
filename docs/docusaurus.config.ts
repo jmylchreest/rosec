@@ -37,6 +37,9 @@ const config: Config = {
         docs: {
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/jmylchreest/rosec/tree/main/docs/',
+          // Serve docs at the site root (/rosec/) rather than /rosec/docs/.
+          // intro.md has `slug: /` so the landing page is the introduction.
+          routeBasePath: '/',
           includeCurrentVersion: true,
           ...(hasReleasedVersions ? {
             versions: {
@@ -105,18 +108,18 @@ const config: Config = {
         {
           title: 'Documentation',
           items: [
-            {label: 'Quickstart', to: '/docs/quickstart'},
-            {label: 'Configuration', to: '/docs/configuration'},
-            {label: 'CLI', to: '/docs/cli'},
-            {label: 'FAQ', to: '/docs/faq'},
+            {label: 'Quickstart', to: '/quickstart'},
+            {label: 'Configuration', to: '/configuration'},
+            {label: 'CLI', to: '/cli'},
+            {label: 'FAQ', to: '/faq'},
           ],
         },
         {
           title: 'Providers',
           items: [
-            {label: 'Local vault', to: '/docs/providers/local'},
-            {label: 'Bitwarden', to: '/docs/providers/bitwarden'},
-            {label: 'KeePassXC', to: '/docs/providers/keepassxc-file'},
+            {label: 'Local vault', to: '/providers/local'},
+            {label: 'Bitwarden', to: '/providers/bitwarden'},
+            {label: 'KeePassXC', to: '/providers/keepassxc-file'},
           ],
         },
         {
