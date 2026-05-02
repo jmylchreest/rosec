@@ -63,6 +63,10 @@ rosec discovers SSH keys from any vault item regardless of type.  Two sources ar
 
 Vault backends that have a first-class SSH key type (e.g. Bitwarden's native SSH Key item) expose the key directly.  rosec uses the `private_key` field for signing and derives the public key automatically.
 
+### KeePassXC SSH Agent integration
+
+The `keepassxc-file` provider parses entries that have KeePassXC's built-in SSH Agent integration enabled — i.e. a `KeeAgent.settings` field plus a binary attachment containing an OpenSSH private key file. Encrypted keys are decrypted using the entry's *Password* field; the unencrypted PEM is then handed to the SSH agent. See [providers/keepassxc-file.md](providers/keepassxc-file.md#ssh-keys) for the per-entry setup.
+
 ### PEM keys in notes, passwords, or hidden custom fields
 
 rosec scans the `notes`, `password`, and hidden `custom.*` fields of **all** vault items for PEM-encoded private keys.  The following headers are recognised:

@@ -86,3 +86,20 @@ Machine-to-machine provider for CI/CD and server use cases. Syncs secrets from a
 | Totp | -- |
 
 Read-only access to existing `~/.local/share/keyrings/*.keyring` files. No optional capabilities — items are loaded once at unlock time. Intended as a migration bridge: access old GNOME Keyring items while running rosec as the Secret Service daemon.
+
+### KeePassXC (file) (`keepassxc-file`) — *experimental*
+
+**Codes:** `Ss`
+
+| Capability | Supported |
+|---|:---:|
+| Sync | yes |
+| Write | -- |
+| Ssh | yes |
+| KeyWrapping | -- |
+| PasswordChange | -- |
+| OfflineCache | -- |
+| Notifications | -- |
+| Totp | yes |
+
+Reads a KeePassXC `.kdbx` database directly from disk (KDBX 4). Decrypts in-memory; never writes back. The host's filesystem watcher (`host_watch`) re-decrypts automatically when KeePassXC saves the file. SSH keys stored via KeePassXC's built-in SSH-agent integration (binary attachment + `KeeAgent.settings`) are surfaced to the rosec SSH agent and FUSE — see [keepassxc-file.md](keepassxc-file.md) for setup. TOTP seeds in KeePassXC's standard `otp` field are surfaced via `rosec totp`.

@@ -289,6 +289,34 @@ For deployments on network mounts, a TCP probe for the file server (port
 2049 for NFSv4, port 445 for CIFS) would prevent the blocking entirely by
 failing fast at the readiness check stage.
 
+### Path-scoped host imports (`host_file`, `host_watch`)
+
+WASI's pre-open mechanism is directory-scoped, which is too broad for
+providers that need a single user-configured file (e.g. a `.kdbx` database).
+Two host imports give per-file scoping instead, registered in the
+`extism:host/user` namespace:
+
+| Import           | Args                | Returns                        | Purpose |
+|------------------|---------------------|--------------------------------|---------|
+| `file_read`      | `path: string`      | `bytes`                        | Read the entire file. Path must be in the per-provider allow-list. |
+| `file_stat`      | `path: string`      | `{ mtime_secs, size }` JSON    | Stat without reading. Used for cheap mtime-poll cache invalidation. |
+| `register_watch` | `path: string`      | `()`                           | Subscribe to inotify-style change events. Path must be in the same allow-list. |
+
+The host populates the allow-list from the provider's config (e.g.
+`path = "..."` and `key_file = "..."` for `keepassxc-file`); paths are
+canonicalised, so symlinks and `..` traversal can't escape.
+
+`register_watch` is asynchronous: the host runs a `notify::RecommendedWatcher`
+per provider and dispatches change events back to the guest by calling its
+`on_path_changed(WatchEvent)` plugin export. Events are coalesced inside a
+500 ms quiet window so a single editor save (which often fires Modify +
+Create + Chmod) only produces one guest call. The guest's handler should be
+idempotent — typically just invalidate any cached state and let the next
+`sync()` re-read.
+
+The reference implementation is [`rosec-keepassxc-file`](../rosec-keepassxc-file)
+(see [providers/keepassxc-file.md](providers/keepassxc-file.md)).
+
 ## Plugin lifecycle and recreation
 
 ### What happens after a trap

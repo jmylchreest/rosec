@@ -152,6 +152,7 @@ rosec supports multiple providers simultaneously. Each is independently locked a
 | `bitwarden` | Bitwarden Password Manager | [docs/providers/bitwarden.md](docs/providers/bitwarden.md) |
 | `bitwarden-sm` | Bitwarden Secrets Manager | [docs/providers/bitwarden-sm.md](docs/providers/bitwarden-sm.md) |
 | `gnome-keyring` | Read-only access to existing GNOME Keyring files (WASM plugin) | [Migrating from GNOME Keyring](#migrating-from-gnome-keyring) |
+| `keepassxc-file` *(experimental)* | Read a KeePassXC `.kdbx` database directly. SSH keys + TOTP supported, hot-reload on save. | [docs/providers/keepassxc-file.md](docs/providers/keepassxc-file.md) |
 
 ### Managing providers
 
