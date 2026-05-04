@@ -326,8 +326,7 @@ fn resolve_prompt_binary() -> String {
 /// `get_config` is called at prompt time (not at construction) so it picks up
 /// hot-reloaded prompt config changes.
 ///
-/// Fallback behaviour when no GUI/TTY is available: the sign is **allowed**
-/// with a warning log, matching the pre-confirmation headless behaviour.
+/// Fail when ssh_confirm=true, but no GUI/TTY can be spawned to ask for confimation
 pub fn build_confirm_callback(
     get_config: impl Fn() -> PromptConfig + Send + Sync + 'static,
 ) -> ConfirmCallback {
@@ -349,9 +348,9 @@ pub fn build_confirm_callback(
                 warn!(
                     fingerprint = %fingerprint,
                     item = %item_name,
-                    "no display or TTY available for sign confirmation, allowing"
+                    "no display or TTY available for sign confirmation, denying"
                 );
-                return true;
+                return false;
             }
 
             let request_json = serde_json::json!({
@@ -389,9 +388,9 @@ pub fn build_confirm_callback(
                     warn!(
                         program = %program,
                         error = %e,
-                        "failed to spawn rosec-prompt for sign confirmation, allowing"
+                        "failed to spawn rosec-prompt for sign confirmation, denying"
                     );
-                    return true;
+                    return false;
                 }
             };
 
@@ -399,8 +398,10 @@ pub fn build_confirm_callback(
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
                 if let Err(e) = stdin.write_all(request_json.to_string().as_bytes()) {
-                    warn!("rosec-prompt stdin write error: {e}, allowing sign");
-                    return true;
+                    warn!("rosec-prompt stdin write error: {e}, denying sign");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
                 }
                 // stdin dropped here → EOF sent to child
             }
@@ -421,8 +422,8 @@ pub fn build_confirm_callback(
                     }
                 }
                 Err(e) => {
-                    warn!("rosec-prompt wait error: {e}, allowing sign");
-                    true
+                    warn!("rosec-prompt wait error: {e}, denying sign");
+                    false
                 }
             }
         })

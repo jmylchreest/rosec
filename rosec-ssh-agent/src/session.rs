@@ -142,8 +142,11 @@ impl Session for SshAgent {
                 warn!(
                     fingerprint = %fingerprint,
                     item = %item_name,
-                    "sign request for key with ssh_confirm=true but no confirmation callback set, allowing"
+                    "sign request for key with ssh_confirm=true but no confirmation callback set, denying"
                 );
+                return Err(other_err(
+                    "sign request denied: no confirmation callback configured",
+                ));
             }
         }
 
