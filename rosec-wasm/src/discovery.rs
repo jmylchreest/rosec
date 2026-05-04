@@ -324,7 +324,11 @@ fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> VerifyOutcome {
 
     if !sig_path.exists() {
         return VerifyOutcome::Rejected {
-            reason: format!("signature file '{}' not found", sig_path.display()),
+            reason: format!(
+                "signature file '{}' not found (set wasm_verify = \"disabled\" \
+                 to load unsigned plugins for local development)",
+                sig_path.display(),
+            ),
         };
     }
 
