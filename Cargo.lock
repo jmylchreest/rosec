@@ -4217,6 +4217,7 @@ dependencies = [
 name = "rosec-pam"
 version = "0.0.27"
 dependencies = [
+ "anyhow",
  "libc",
  "tokio",
  "zbus",

@@ -46,6 +46,7 @@
 use std::io::Read as _;
 use std::os::unix::io::FromRawFd as _;
 
+use anyhow::{Context as _, Result, anyhow, bail};
 use zeroize::Zeroizing;
 
 /// Exit codes for pam_exec. PAM_SUCCESS = 0, PAM_IGNORE = 25.
@@ -114,32 +115,28 @@ fn main() -> ! {
     };
 
     debug_log("helper started");
-    let code = match mode {
-        Mode::Unlock => match run() {
-            Ok(()) => {
-                debug_log("helper exiting PAM_SUCCESS");
-                PAM_SUCCESS
-            }
-            Err(()) => {
-                debug_log("helper exiting PAM_IGNORE");
-                PAM_IGNORE
-            }
-        },
-        Mode::Chauthtok => match run_chauthtok() {
-            Ok(()) => {
-                debug_log("chauthtok helper exiting PAM_SUCCESS");
-                PAM_SUCCESS
-            }
-            Err(()) => {
-                debug_log("chauthtok helper exiting PAM_IGNORE");
-                PAM_IGNORE
-            }
-        },
+    let (label, result) = match mode {
+        Mode::Unlock => ("helper", run()),
+        Mode::Chauthtok => ("chauthtok helper", run_chauthtok()),
+    };
+    let code = match result {
+        Ok(()) => {
+            debug_log(&format!("{label} exiting PAM_SUCCESS"));
+            PAM_SUCCESS
+        }
+        Err(e) => {
+            // Log the full error chain at the FFI boundary so an operator
+            // debugging a 3 AM incident has the actual root cause and not
+            // a stripped Result<_, ()>. PAM_IGNORE keeps the optional
+            // module non-blocking — login is never gated on this helper.
+            debug_log(&format!("{label} exiting PAM_IGNORE: {e:#}"));
+            PAM_IGNORE
+        }
     };
     std::process::exit(code);
 }
 
-fn run() -> Result<(), ()> {
+fn run() -> Result<()> {
     // Log environment for debugging D-Bus connectivity.
     // TEMPORARY — remove before release.
     let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default();
@@ -154,12 +151,9 @@ fn run() -> Result<(), ()> {
     // need them to reach the user's session bus.
     ensure_session_bus_env();
 
-    let password = read_password_from_stdin().map_err(|e| {
-        debug_log(&format!("failed to read password from stdin: {e:?}"));
-    })?;
+    let password = read_password_from_stdin().context("read password from stdin")?;
     if password.is_empty() {
-        debug_log("password is empty");
-        return Err(());
+        bail!("password is empty");
     }
 
     debug_log(&format!("read {} bytes from stdin", password.len()));
@@ -257,12 +251,14 @@ fn username_to_uid(name: &str) -> Option<u32> {
 ///
 /// pam_exec sends the password null-terminated on stdin. We read until EOF
 /// or the first null byte, whichever comes first.
-fn read_password_from_stdin() -> Result<Zeroizing<Vec<u8>>, ()> {
+fn read_password_from_stdin() -> Result<Zeroizing<Vec<u8>>> {
     let mut buf = Zeroizing::new(Vec::with_capacity(256));
 
     // Read all available stdin. pam_exec closes the write end after
     // sending the password, so read_to_end will return once done.
-    std::io::stdin().read_to_end(&mut buf).map_err(|_| ())?;
+    std::io::stdin()
+        .read_to_end(&mut buf)
+        .context("read_to_end on stdin")?;
 
     // Strip trailing null byte if present (pam_exec null-terminates).
     if buf.last() == Some(&0) {
@@ -282,13 +278,13 @@ fn read_password_from_stdin() -> Result<Zeroizing<Vec<u8>>, ()> {
 ///
 /// The password travels through kernel pipe buffers only — never through
 /// the D-Bus message payload.
-fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd, ()> {
+fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd> {
     let mut fds = [0_i32; 2];
 
     // SAFETY: pipe() writes exactly two fds into the array.
     let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if ret != 0 {
-        return Err(());
+        return Err(std::io::Error::last_os_error()).context("pipe(2) for password fd");
     }
 
     let read_fd = fds[0];
@@ -301,10 +297,10 @@ fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd, ()> {
         use std::io::Write as _;
         let write_result = write_file.write_all(data);
         // write_file is dropped here → write end closed, signalling EOF to reader.
-        if write_result.is_err() {
+        if let Err(e) = write_result {
             // Close the read end too on failure.
             unsafe { libc::close(read_fd) };
-            return Err(());
+            return Err(anyhow::Error::from(e)).context("write password to pipe");
         }
     }
 
@@ -315,18 +311,18 @@ fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd, ()> {
 }
 
 /// Connect to the D-Bus session bus and attempt to unlock all locked vaults.
-fn unlock_vaults(password: &[u8]) -> Result<(), ()> {
+fn unlock_vaults(password: &[u8]) -> Result<()> {
     // Build a minimal tokio runtime for the async D-Bus calls.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| ())?;
+        .context("build tokio runtime")?;
 
     rt.block_on(unlock_vaults_async(password))
 }
 
 /// Connect to rosecd, trying the session bus first, then the private bus socket.
-async fn pam_connect() -> Result<zbus::Connection, ()> {
+async fn pam_connect() -> Result<zbus::Connection> {
     debug_log("attempting connection to rosecd");
 
     // Try session bus first.
@@ -341,24 +337,19 @@ async fn pam_connect() -> Result<zbus::Connection, ()> {
         if std::path::Path::new(&socket).exists() {
             let addr = format!("unix:path={socket}");
             debug_log(&format!("trying private bus at {addr}"));
-            match zbus::connection::Builder::address(&*addr) {
-                Ok(builder) => match builder.build().await {
-                    Ok(conn) => {
-                        debug_log("connected via private bus");
-                        return Ok(conn);
-                    }
-                    Err(e) => debug_log(&format!("private bus connect failed: {e}")),
-                },
-                Err(e) => debug_log(&format!("private bus address parse failed: {e}")),
-            }
+            let builder = zbus::connection::Builder::address(&*addr)
+                .with_context(|| format!("parse private bus address {addr}"))?;
+            return builder
+                .build()
+                .await
+                .with_context(|| format!("connect to private bus at {addr}"));
         }
     }
 
-    debug_log("no connection to rosecd available");
-    Err(())
+    bail!("no connection to rosecd available (session bus failed, no private bus socket)");
 }
 
-async fn unlock_vaults_async(password: &[u8]) -> Result<(), ()> {
+async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
     let conn = pam_connect().await?;
 
     let proxy = zbus::Proxy::new(
@@ -368,15 +359,14 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<(), ()> {
         "org.rosec.Daemon",
     )
     .await
-    .map_err(|e| {
-        debug_log(&format!("proxy creation failed: {e}"));
-    })?;
+    .context("create org.rosec.Daemon proxy")?;
 
     // ProviderList returns Vec<ProviderEntry>.
     debug_log("calling ProviderList");
-    let providers: Vec<ProviderEntry> = proxy.call("ProviderList", &()).await.map_err(|e| {
-        debug_log(&format!("ProviderList call failed: {e}"));
-    })?;
+    let providers: Vec<ProviderEntry> = proxy
+        .call("ProviderList", &())
+        .await
+        .context("ProviderList call")?;
 
     debug_log(&format!("found {} providers", providers.len()));
 
@@ -396,9 +386,7 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<(), ()> {
     // and D-Bus call — the daemon handles them in parallel.
     let mut handles = Vec::with_capacity(locked.len());
     for (id, name, _kind, ..) in &locked {
-        let pipe_fd = make_password_pipe(password).map_err(|_| {
-            debug_log("failed to create password pipe");
-        })?;
+        let pipe_fd = make_password_pipe(password).context("create password pipe")?;
 
         let proxy = proxy.clone();
         let id = id.clone();
@@ -437,8 +425,7 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<(), ()> {
         debug_log("at least one provider unlocked");
         Ok(())
     } else {
-        debug_log("no providers were unlocked");
-        Err(())
+        bail!("no providers were unlocked");
     }
 }
 
@@ -451,15 +438,29 @@ type ZeroVec = Zeroizing<Vec<u8>>;
 /// Read two NUL-terminated password strings from stdin.
 ///
 /// Protocol: `<old_password>\0<new_password>\0<EOF>`.
-fn read_two_passwords_from_stdin() -> Result<(ZeroVec, ZeroVec), ()> {
+fn read_two_passwords_from_stdin() -> Result<(ZeroVec, ZeroVec)> {
     use std::io::Read as _;
+    // Cap the read so a misconfigured or malicious caller cannot drive us
+    // into unbounded allocation by holding stdin open. PAM_MAX_RESP_SIZE
+    // is 512; 4 KiB covers two passwords with NUL separators and headroom.
+    const MAX_LEN: u64 = 4096;
     // Zeroizing wraps the combined buffer so the concatenated passwords are
     // scrubbed on drop — the sliced-out copies below get their own Zeroizing.
     let mut buf = Zeroizing::new(Vec::with_capacity(512));
-    std::io::stdin().read_to_end(&mut buf).map_err(|_| ())?;
+    let stdin = std::io::stdin();
+    let mut limited = stdin.lock().take(MAX_LEN + 1);
+    limited
+        .read_to_end(&mut buf)
+        .context("read chauthtok payload from stdin")?;
+    if buf.len() as u64 > MAX_LEN {
+        bail!("chauthtok payload exceeds {MAX_LEN} bytes");
+    }
 
     // Find the first NUL separator.
-    let sep = buf.iter().position(|&b| b == 0).ok_or(())?;
+    let sep = buf
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| anyhow!("chauthtok payload missing NUL separator between old and new"))?;
     let mut old_pw = Zeroizing::new(buf[..sep].to_vec());
 
     // Everything after the first NUL is the new password (strip trailing NUL).
@@ -479,18 +480,16 @@ fn read_two_passwords_from_stdin() -> Result<(ZeroVec, ZeroVec), ()> {
     }
 
     if old_pw.is_empty() || new_pw.is_empty() {
-        return Err(());
+        bail!("chauthtok: empty old or new password");
     }
 
     Ok((old_pw, new_pw))
 }
 
-fn run_chauthtok() -> Result<(), ()> {
+fn run_chauthtok() -> Result<()> {
     ensure_session_bus_env();
 
-    let (old_pw, new_pw) = read_two_passwords_from_stdin().map_err(|()| {
-        debug_log("failed to read old/new passwords from stdin");
-    })?;
+    let (old_pw, new_pw) = read_two_passwords_from_stdin().context("read old/new passwords")?;
 
     debug_log(&format!(
         "read old={} bytes, new={} bytes from stdin",
@@ -502,16 +501,16 @@ fn run_chauthtok() -> Result<(), ()> {
     change_vault_passwords(&old_pw, &new_pw)
 }
 
-fn change_vault_passwords(old_password: &[u8], new_password: &[u8]) -> Result<(), ()> {
+fn change_vault_passwords(old_password: &[u8], new_password: &[u8]) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| ())?;
+        .context("build tokio runtime")?;
 
     rt.block_on(change_vault_passwords_async(old_password, new_password))
 }
 
-async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) -> Result<(), ()> {
+async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) -> Result<()> {
     let conn = pam_connect().await?;
 
     let proxy = zbus::Proxy::new(
@@ -521,14 +520,13 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
         "org.rosec.Daemon",
     )
     .await
-    .map_err(|e| {
-        debug_log(&format!("proxy creation failed: {e}"));
-    })?;
+    .context("create org.rosec.Daemon proxy")?;
 
     debug_log("calling ProviderList");
-    let providers: Vec<ProviderEntry> = proxy.call("ProviderList", &()).await.map_err(|e| {
-        debug_log(&format!("ProviderList call failed: {e}"));
-    })?;
+    let providers: Vec<ProviderEntry> = proxy
+        .call("ProviderList", &())
+        .await
+        .context("ProviderList call")?;
 
     // Only attempt password change on unlocked local vault providers.
     // Locked providers can't have their password changed (they need to
@@ -550,12 +548,8 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
 
     let mut any_changed = false;
     for (id, name, ..) in &targets {
-        let old_pipe = make_password_pipe(old_password).map_err(|_| {
-            debug_log("failed to create old password pipe");
-        })?;
-        let new_pipe = make_password_pipe(new_password).map_err(|_| {
-            debug_log("failed to create new password pipe");
-        })?;
+        let old_pipe = make_password_pipe(old_password).context("create old password pipe")?;
+        let new_pipe = make_password_pipe(new_password).context("create new password pipe")?;
 
         debug_log(&format!("changing password for provider {name} ({id})"));
         let result: Result<(), zbus::Error> = proxy

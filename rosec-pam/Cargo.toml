@@ -11,6 +11,7 @@ name = "rosec-pam-unlock"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 zbus = { workspace = true }
 zvariant = { workspace = true }
 zeroize = { workspace = true }
