@@ -7,6 +7,7 @@ pub mod item_cache;
 pub mod lock_policy;
 pub mod portal;
 pub mod prompt;
+pub mod prompt_env;
 pub mod prompt_manager;
 pub mod provider_registry;
 pub mod server;

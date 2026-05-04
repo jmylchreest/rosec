@@ -805,87 +805,11 @@ impl ServiceState {
     /// Snapshot the prompt configuration and resolve the binary path and
     /// display environment in one place.
     ///
-    /// When `WAYLAND_DISPLAY` / `DISPLAY` are absent from the daemon's own
-    /// process environment (common when running as a D-Bus-activated systemd
-    /// service), attempts to discover them from the systemd user manager's
-    /// environment via the session bus.  Discovered variables are returned in
-    /// `display_env` so callers can inject them into child processes.
+    /// Thin wrapper around [`crate::prompt_env::resolve_prompt_env`]; kept
+    /// as a method so that future seams (mock dispatcher in tests, alternate
+    /// resolver per-collection, etc.) only need to override one entrypoint.
     fn resolve_prompt_env(&self) -> PromptEnv {
-        let cfg = self.prompts.config();
-        // For "builtin", refuse to fall back to a $PATH lookup — the daemon
-        // is long-lived and a $PATH that was attacker-controlled at spawn
-        // time would let the wrong rosec-prompt be executed silently. If
-        // the sibling binary is missing we suppress has_display/has_tty so
-        // the caller takes its "no way to prompt" branch.
-        let (program, builtin_missing) = match cfg.backend.as_str() {
-            "builtin" | "" => match resolve_prompt_binary() {
-                Some(p) => (p, false),
-                None => {
-                    tracing::error!(
-                        "rosec-prompt not found alongside daemon binary; \
-                         refusing $PATH fallback. Prompt-based unlock is unavailable."
-                    );
-                    (String::new(), true)
-                }
-            },
-            custom => (custom.to_string(), false),
-        };
-
-        let mut has_display =
-            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
-
-        // If the daemon's own environment lacks display vars (e.g. started by
-        // systemd before the compositor imported them), try to discover them
-        // from the systemd user manager's environment over D-Bus.
-        //
-        // Log at info the first time we fail to find display vars (so the
-        // admin sees it at startup), but only at debug on subsequent calls
-        // (to avoid spamming when clients repeatedly trigger prompts).
-        static LOGGED_NO_DISPLAY: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-
-        let mut display_env: Vec<(String, String)> = Vec::new();
-        if !has_display {
-            display_env = discover_display_env_from_systemd(&self.tokio_handle, &self.conn());
-            if !display_env.is_empty() {
-                tracing::debug!(
-                    vars = ?display_env,
-                    "discovered display environment from systemd user manager"
-                );
-                has_display = true;
-            } else if !LOGGED_NO_DISPLAY.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::info!(
-                    "no display environment found (process env or systemd user manager) — \
-                     GUI prompts will not be available until a compositor imports \
-                     WAYLAND_DISPLAY or DISPLAY"
-                );
-            }
-        }
-
-        // Actually try to open /dev/tty — the path exists even inside
-        // systemd services, but open() fails with ENXIO when there is no
-        // controlling terminal.
-        let has_tty = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .is_ok();
-        // If the builtin prompt binary is missing, suppress display/tty
-        // so callers fall through to their "no way to prompt" branch
-        // rather than spawning Command::new("") and getting a confusing
-        // ENOENT at runtime. The actual reason was already logged above.
-        let (has_display, has_tty) = if builtin_missing {
-            (false, false)
-        } else {
-            (has_display, has_tty)
-        };
-        PromptEnv {
-            cfg,
-            program,
-            has_display,
-            has_tty,
-            display_env,
-        }
+        crate::prompt_env::resolve_prompt_env(&self.prompts, &self.tokio_handle, &self.conn())
     }
 
     /// Launch `rosec-prompt` (or SSH_ASKPASS / built-in TTY) with arbitrary
@@ -1998,85 +1922,11 @@ pub struct CallerInfo {
     pub path: String,
 }
 
-/// Resolved prompt environment: config snapshot, binary path, display state.
-struct PromptEnv {
-    cfg: PromptConfig,
-    program: String,
-    has_display: bool,
-    has_tty: bool,
-    /// Display environment variables discovered from the systemd user manager
-    /// when they are absent from the daemon's own process environment.
-    /// Must be injected into child processes that need a display server.
-    display_env: Vec<(String, String)>,
-}
-
-/// Find the `rosec-prompt` binary next to the current executable.
-///
-/// Returns `None` if no sibling exists. The daemon must not fall back to a
-/// `$PATH` lookup — `$PATH` is attacker-influenceable in some launch
-/// contexts and a silent fallback would let an attacker substitute their
-/// own `rosec-prompt`.
-fn resolve_prompt_binary() -> Option<String> {
-    rosec_core::prompt::resolve_sibling_binary("rosec-prompt")
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-/// Discover `WAYLAND_DISPLAY` / `DISPLAY` from the systemd user manager's
-/// environment via the session D-Bus bus.
-///
-/// The compositor (sway, Hyprland, GNOME Shell, …) typically calls
-/// `systemctl --user import-environment WAYLAND_DISPLAY DISPLAY` during
-/// startup.  When rosecd is D-Bus-activated before those vars are in its
-/// own process environment, this function retrieves them so they can be
-/// injected into child processes (e.g. `rosec-prompt`).
-///
-/// Returns an empty vec on any error (not on the session bus, systemd not
-/// reachable, vars not present).  This is intentionally best-effort.
-fn discover_display_env_from_systemd(
-    handle: &tokio::runtime::Handle,
-    conn: &zbus::Connection,
-) -> Vec<(String, String)> {
-    /// Display-related variable names to look for.
-    const DISPLAY_VARS: &[&str] = &["WAYLAND_DISPLAY", "DISPLAY"];
-
-    let conn = conn.clone();
-    let result = handle.block_on(async {
-        let reply = conn
-            .call_method(
-                Some("org.freedesktop.systemd1"),
-                "/org/freedesktop/systemd1",
-                Some("org.freedesktop.DBus.Properties"),
-                "Get",
-                &("org.freedesktop.systemd1.Manager", "Environment"),
-            )
-            .await?;
-        // The reply body is a VARIANT wrapping an array of strings (as).
-        let body = reply.body();
-        let variant: zbus::zvariant::OwnedValue = body.deserialize()?;
-        let env_strings: Vec<String> = variant.try_into().unwrap_or_default();
-        Ok::<Vec<String>, zbus::Error>(env_strings)
-    });
-
-    let env_strings = match result {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!("failed to query systemd user manager environment: {e}");
-            return Vec::new();
-        }
-    };
-
-    env_strings
-        .iter()
-        .filter_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            if DISPLAY_VARS.contains(&key) {
-                Some((key.to_string(), value.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
+// PromptEnv, resolve_prompt_binary, and discover_display_env_from_systemd
+// have been extracted into `crate::prompt_env`. The method
+// `ServiceState::resolve_prompt_env` is the only remaining caller of any
+// of them and now delegates to the new module.
+use crate::prompt_env::PromptEnv;
 
 /// Build the JSON request payload that `rosec-prompt` expects on stdin.
 ///
