@@ -63,6 +63,8 @@ fn machine_key_path() -> Result<PathBuf, String> {
     Ok(base.join("rosec").join("machine-key"))
 }
 
+/// Write `data` to `path` with mode `0o600` on Unix (open-time, no chmod
+/// race). Falls back to default permissions on non-Unix targets.
 fn write_secret(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
 

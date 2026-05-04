@@ -701,7 +701,6 @@ impl ServiceState {
                     let pid = child.id();
                     self.set_prompt_pid(&prompt_path, pid);
 
-                    // Send JSON on stdin then close it.
                     if let Some(mut stdin) = child.stdin.take() {
                         use std::io::Write as _;
                         stdin.write_all(json.as_bytes()).map_err(|e| {
