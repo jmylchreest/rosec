@@ -272,7 +272,6 @@ async fn run_prompt_task(
 
         match unlock_result {
             Ok(()) => {
-                // Unlock succeeded — finish prompt and proceed.
                 on_unlock_success(
                     &state,
                     &prompt_path,

@@ -454,7 +454,6 @@ async fn auth_provider_with_tty_inner(
         // Credentials already collected by the sweep — skip prompting.
         existing
     } else {
-        // Print unlock header.
         print_on_fd(tty_fd, "\n");
         let b = state
             .provider_by_id(provider_id)
@@ -562,7 +561,6 @@ async fn auth_provider_with_tty_inner(
 
         print_on_fd(tty_fd, &format!("\n{}\n", chosen.label));
 
-        // Collect the 2FA token from the user.
         let token_field = vec![TtyField {
             id: "__2fa_token".to_string(),
             label: "Code".to_string(),
@@ -571,7 +569,8 @@ async fn auth_provider_with_tty_inner(
         }];
         let token_map = collect_tty_on_fd(tty_fd, &token_field, cancel_fd).await?;
 
-        // Add the 2FA fields to cred_map and retry.
+        // Inject the chosen method + token into cred_map and loop back to
+        // try_auth, which will resend the credentials with the 2FA fields.
         cred_map.insert(
             "__2fa_method_id".to_string(),
             Zeroizing::new(chosen.id.clone()),
