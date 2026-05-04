@@ -307,7 +307,7 @@ fn should_replace(
 enum VerifyOutcome {
     /// Signature present and verified.
     Verified,
-    /// Verification was not performed (disabled or sig absent under `IfPresent`).
+    /// Verification was not performed (disabled).
     /// The plugin may still be loaded.
     NotVerified { reason: &'static str },
     /// Plugin should NOT be loaded (e.g. unsigned under `Required`).
@@ -315,10 +315,6 @@ enum VerifyOutcome {
 }
 
 /// Check the signature of a `.wasm` file according to the configured policy.
-///
-/// Returns `Ok(Verified)` if the signature is present and valid,
-/// `Ok(Skipped)` if verification is disabled or the sig is absent under
-/// `IfPresent`, or `Err` if the signature is present but invalid.
 fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> VerifyOutcome {
     if verify == WasmVerify::Disabled {
         return VerifyOutcome::NotVerified { reason: "disabled" };
@@ -327,17 +323,8 @@ fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> VerifyOutcome {
     let sig_path = wasm_path.with_extension("wasm.minisig");
 
     if !sig_path.exists() {
-        return match verify {
-            WasmVerify::IfPresent => VerifyOutcome::NotVerified {
-                reason: "sig-not-present",
-            },
-            WasmVerify::Required => VerifyOutcome::Rejected {
-                reason: format!(
-                    "signature file '{}' not found (wasm_verify = required)",
-                    sig_path.display(),
-                ),
-            },
-            WasmVerify::Disabled => unreachable!(),
+        return VerifyOutcome::Rejected {
+            reason: format!("signature file '{}' not found", sig_path.display()),
         };
     }
 

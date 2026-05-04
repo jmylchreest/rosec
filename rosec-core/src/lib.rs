@@ -1184,12 +1184,10 @@ pub enum WasmPreference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WasmVerify {
-    /// Verify signature if a `.wasm.sig` file exists; warn and skip if absent.
-    /// Unverified plugins (missing or invalid sig) are never loaded.
-    #[default]
-    IfPresent,
     /// Signature is required.  Plugins without a valid `.wasm.sig` are
     /// rejected and never loaded.
+    #[default]
+    #[serde(alias = "if-present")]
     Required,
     /// Signature verification is disabled.  All plugins are loaded regardless.
     /// Only use for local development builds.
