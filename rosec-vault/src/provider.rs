@@ -1318,26 +1318,22 @@ mod tests {
     async fn add_password_enables_second_unlock() {
         let (provider, _temp) = create_test_provider();
 
-        // Create vault with master password
         provider
             .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
             .await
             .unwrap();
 
-        // Add a second password
         let entry_id = provider
             .add_password(b"login-password", "login".to_string())
             .await
             .unwrap();
         assert!(!entry_id.is_empty());
 
-        // Verify we have 2 wrapping entries
         let entries = provider.list_passwords().await.unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].1.as_deref(), Some("master"));
         assert_eq!(entries[1].1.as_deref(), Some("login"));
 
-        // Lock and unlock with the second password
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new(
@@ -1363,13 +1359,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Add second password
         let entry_id = provider
             .add_password(b"second", "second".to_string())
             .await
             .unwrap();
 
-        // Remove the second password
         provider.remove_password(&entry_id).await.unwrap();
 
         let entries = provider.list_passwords().await.unwrap();
@@ -1427,7 +1421,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Add a password with label "login"
         provider
             .add_password(b"login-pw", "login".to_string())
             .await
@@ -1448,14 +1441,12 @@ mod tests {
     async fn wrong_password_fails_to_unlock() {
         let (provider, _temp) = create_test_provider();
 
-        // Create vault
         provider
             .unlock(UnlockInput::Password(Zeroizing::new("correct".to_string())))
             .await
             .unwrap();
         provider.lock().await.unwrap();
 
-        // Try wrong password
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new("wrong".to_string())))
             .await;
@@ -1484,7 +1475,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Lock and unlock with new password.
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new(
@@ -1576,13 +1566,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Add a second password.
         provider
             .add_password(b"second-pw", "login".to_string())
             .await
             .unwrap();
 
-        // Change only the master password.
         provider
             .change_password(
                 Zeroizing::new("master-pw".to_string()),
