@@ -98,7 +98,6 @@ enum Mode {
 }
 
 fn main() -> ! {
-    // Handle --version before anything else.
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         eprintln!(
             "rosec-pam-unlock {} ({})",
@@ -194,7 +193,6 @@ fn ensure_session_bus_env() {
 
     if !has_dbus {
         let bus_path = format!("unix:path={runtime_dir}/bus");
-        // Only set if the socket actually exists.
         let socket_path = format!("{runtime_dir}/bus");
         if std::path::Path::new(&socket_path).exists() {
             debug_log(&format!("setting DBUS_SESSION_BUS_ADDRESS={bus_path}"));
@@ -214,7 +212,6 @@ fn ensure_session_bus_env() {
 ///    with the user's real UID)
 /// 3. Effective UID as last resort
 fn get_target_uid() -> u32 {
-    // Try PAM_USER first.
     if let Ok(user) = std::env::var("PAM_USER")
         && let Some(uid) = username_to_uid(&user)
     {
@@ -290,7 +287,6 @@ fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd> {
     let read_fd = fds[0];
     let write_fd = fds[1];
 
-    // Write the password to the write end.
     {
         // SAFETY: write_fd is a valid fd from pipe().
         let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
@@ -325,7 +321,6 @@ fn unlock_vaults(password: &[u8]) -> Result<()> {
 async fn pam_connect() -> Result<zbus::Connection> {
     debug_log("attempting connection to rosecd");
 
-    // Try session bus first.
     if let Ok(conn) = zbus::Connection::session().await {
         debug_log("connected via session bus");
         return Ok(conn);
@@ -361,7 +356,6 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
     .await
     .context("create org.rosec.Daemon proxy")?;
 
-    // ProviderList returns Vec<ProviderEntry>.
     debug_log("calling ProviderList");
     let providers: Vec<ProviderEntry> = proxy
         .call("ProviderList", &())
@@ -413,7 +407,6 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
         }));
     }
 
-    // Wait for all unlock attempts to complete.
     let mut any_unlocked = false;
     for handle in handles {
         if let Ok(true) = handle.await {
