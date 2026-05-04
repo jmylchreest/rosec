@@ -298,7 +298,6 @@ pub struct AuthFieldsResponse {
     pub fields: Vec<WasmAuthField>,
 }
 
-/// An auth field descriptor.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WasmAuthField {
     pub id: String,
