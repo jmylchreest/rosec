@@ -82,16 +82,20 @@ pub async fn establish_connection(config: &BusConfig) -> Result<(Connection, Bus
 
 /// Spawn an embedded `busd` broker on `socket_path` and return a client
 /// connection to it.
+///
+/// Holds umask 0o077 across the bind so the socket and its parent dir
+/// are created at 0o600/0o700 atomically. Scope is deliberately tight:
+/// umask is process-global on Linux (not thread-local), so any other
+/// tokio task creating files while we hold this picks up the restrictive
+/// mode. Don't widen the bracket without auditing concurrent fs work.
 async fn spawn_private_bus(socket_path: &Path) -> Result<Connection> {
-    // Set umask to 0o077 so both the directory and the socket file are
-    // created with tight permissions atomically — no TOCTOU window.
+    // SAFETY: umask(2) takes no pointers and has no preconditions; the
+    // hazard is the process-global state noted above, not memory safety.
     let old_umask = unsafe { libc::umask(0o077) };
-
     let setup_result = spawn_private_bus_inner(socket_path).await;
-
-    // Restore the original umask regardless of success/failure.
+    // Restore even on error — a stuck 0o077 would silently affect every
+    // later fs creation in the daemon (logs, state files, etc.).
     unsafe { libc::umask(old_umask) };
-
     setup_result
 }
 
