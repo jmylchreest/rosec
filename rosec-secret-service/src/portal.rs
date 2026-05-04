@@ -81,11 +81,10 @@ impl PortalSecret {
             return Ok((2, HashMap::new()));
         }
 
-        // Try to find an existing portal secret for this app_id.
-        // Note: concurrent calls for the same app_id can race here — both see
-        // None and both generate.  The second create_item(replace=true) wins,
-        // which is acceptable: the first caller already wrote its secret to
-        // its fd before the overwrite, and subsequent calls converge.
+        // Concurrent calls for the same app_id can race here: both see None
+        // and both generate. The second create_item(replace=true) wins, which
+        // is acceptable — the first caller already wrote its secret to its
+        // fd before the overwrite, and subsequent calls converge.
         let existing = self.find_portal_secret(app_id).await?;
 
         let secret = match existing {
@@ -106,7 +105,6 @@ impl PortalSecret {
             }
         };
 
-        // Write the secret to the file descriptor.
         if let Err(e) = self.write_to_fd(fd, &secret) {
             tracing::warn!(app_id, "portal: fd write failed: {e}");
             return Ok((2, HashMap::new()));
@@ -272,17 +270,15 @@ impl PortalSecret {
             ));
         }
 
-        // Generate 64 bytes of random data.
         let mut secret_bytes = Zeroizing::new(vec![0u8; SECRET_SIZE]);
         rand::rng().fill_bytes(&mut secret_bytes);
 
-        // Build attributes.
         let mut attributes = HashMap::new();
         attributes.insert(PORTAL_ATTR_APP_ID.to_string(), app_id.to_string());
         attributes.insert(PORTAL_ATTR_SCHEMA.to_string(), PORTAL_SCHEMA.to_string());
 
-        // Build secrets map — clone into SecretBytes via from_zeroizing to
-        // avoid an intermediate plain Vec that wouldn't be zeroized on drop.
+        // Wrap via from_zeroizing rather than the plain bytes constructor so
+        // the secret never lives in a non-zeroizing Vec on the way in.
         let mut secrets = HashMap::new();
         secrets.insert(
             "secret".to_string(),
@@ -296,7 +292,6 @@ impl PortalSecret {
             secrets,
         };
 
-        // Store the item.
         let item_path = self
             .state
             .run_on_tokio({
@@ -446,7 +441,6 @@ mod tests {
             let id = format!("portal-{counter}");
             *counter += 1;
 
-            // Store the secret bytes.
             if let Some(secret) = item.secrets.get("secret") {
                 self.secrets
                     .lock()
@@ -454,7 +448,6 @@ mod tests {
                     .insert(id.clone(), secret.as_slice().to_vec());
             }
 
-            // Add to items list.
             let meta = ItemMeta {
                 id: id.clone(),
                 provider_id: "writable-mock".to_string(),
