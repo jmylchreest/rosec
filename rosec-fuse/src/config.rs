@@ -59,7 +59,6 @@ pub fn build_config_snippets(
         }
     }
 
-    // Build snippets
     let mut snippets = Vec::new();
 
     for entry in entries {

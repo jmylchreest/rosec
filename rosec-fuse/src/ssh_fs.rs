@@ -514,7 +514,6 @@ impl Drop for MountHandle {
             .args(["-u", self.mountpoint.to_string_lossy().as_ref()])
             .output();
 
-        // Remove the agent socket.
         if self.agent_sock.exists() {
             let _ = std::fs::remove_file(&self.agent_sock);
         }

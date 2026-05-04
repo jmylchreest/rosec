@@ -28,7 +28,6 @@ pub fn normalise_item_name(name: &str) -> String {
         if ch.is_alphanumeric() || ch == '-' {
             result.push(ch);
         } else {
-            // Replace any separator/punctuation with underscore
             result.push('_');
         }
     }
