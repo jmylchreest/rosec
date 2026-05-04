@@ -58,10 +58,6 @@ use zeroize::Zeroizing;
 /// Stable ID for the first text input field so we can auto-focus it on startup.
 static FIRST_FIELD_ID: LazyLock<text_input::Id> = LazyLock::new(text_input::Id::unique);
 
-// ---------------------------------------------------------------------------
-// Field descriptor
-// ---------------------------------------------------------------------------
-
 /// The kind of a prompt field — mirrors `rosec_core::AuthFieldKind`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -84,10 +80,6 @@ struct FieldSpec {
     placeholder: String,
 }
 
-// ---------------------------------------------------------------------------
-// TOTP display request
-// ---------------------------------------------------------------------------
-
 /// When present in a `PromptRequest`, the prompt shows a TOTP code display
 /// instead of the normal input fields.
 #[derive(Debug, Clone, Deserialize)]
@@ -109,10 +101,6 @@ struct TotpDisplayRequest {
     #[serde(default)]
     seed: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Request / theme types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 struct PromptRequest {
@@ -175,10 +163,6 @@ impl PromptRequest {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Theme
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 struct ThemeConfig {
@@ -266,10 +250,6 @@ fn default_font_size() -> f32 {
     PromptTheme::default().font_size as f32
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 fn main() -> Result<()> {
     // Internal screenshot helper — runs in a subprocess to avoid portal
     // D-Bus session reuse issues.  Not user-facing.
@@ -330,10 +310,6 @@ fn main() -> Result<()> {
         run_tty(request)
     }
 }
-
-// ---------------------------------------------------------------------------
-// TTY mode
-// ---------------------------------------------------------------------------
 
 /// Collect credentials from a TTY using rpassword (hidden) or plain readline (text).
 ///
@@ -433,10 +409,6 @@ fn run_tty(request: PromptRequest) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// GUI mode
-// ---------------------------------------------------------------------------
-
 fn run_gui(request: PromptRequest) -> Result<()> {
     use iced::window::settings::PlatformSpecific;
 
@@ -463,7 +435,8 @@ fn run_gui(request: PromptRequest) -> Result<()> {
     // outer padding), so the border does not further reduce content width.
     let content_w = 420.0 - (4.0 + 14.0) * 2.0;
 
-    // --- Exact text measurement via cosmic-text (same shaping engine as iced) ---
+    // Use cosmic-text directly (same shaping engine iced uses) for exact
+    // glyph metrics — iced's own measurement API isn't exposed.
     let mut font_system = cosmic_text::FontSystem::new();
     let font_family = cosmic_font_family(&request.theme.font_family);
 
@@ -576,10 +549,6 @@ fn run_gui(request: PromptRequest) -> Result<()> {
         })?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// GUI state & logic
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -759,7 +728,6 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
 
     let font_size = state.theme.font_size as u16;
 
-    // Title (with tooltip for hint if present)
     let title_widget: Element<'_, Message> = {
         let bold_font = iced::Font {
             weight: iced::font::Weight::Bold,
@@ -798,7 +766,6 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
         }
     };
 
-    // One label + input_box per field
     let field_widgets: Vec<Element<'_, Message>> = state
         .fields
         .iter()
@@ -939,10 +906,6 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
         })
         .into()
 }
-
-// ---------------------------------------------------------------------------
-// TOTP display GUI
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct TotpApp {
@@ -1284,10 +1247,6 @@ fn totp_view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
         })
         .into()
 }
-
-// ---------------------------------------------------------------------------
-// QR scan GUI
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 enum QrMessage {
@@ -1652,10 +1611,6 @@ fn qr_view(state: &QrApp) -> iced::Element<'_, QrMessage> {
         .into()
 }
 
-// ---------------------------------------------------------------------------
-// Colour / font helpers
-// ---------------------------------------------------------------------------
-
 /// Measure the pixel height of `text` rendered at `font_size` within a given
 /// `wrap_width`, using cosmic-text (the same shaping engine iced uses) for
 /// exact glyph measurement and word-wrap.
@@ -1773,7 +1728,6 @@ fn parse_styled_spans<'a>(
             .and_then(|start| rest[start + 2..].find("**").map(|end| (start, end)));
         let ital_pos = find_italic_pair(rest);
 
-        // Pick whichever comes first in the string.
         let next = match (bold_pos, ital_pos) {
             (Some((bs, _)), Some((is, _))) => {
                 if bs <= is {
