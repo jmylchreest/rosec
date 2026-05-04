@@ -85,7 +85,6 @@ pub fn encrypt(key: &StorageKey, plaintext: &[u8]) -> Result<EncryptedFields, St
     let mut iv = vec![0u8; 16];
     rand::rng().fill_bytes(&mut iv);
 
-    // Encrypt in-place with PKCS#7 padding.
     let pad_len = 16 - (plaintext.len() % 16);
     let mut buf = Zeroizing::new(vec![0u8; plaintext.len() + pad_len]);
     buf[..plaintext.len()].copy_from_slice(plaintext);
@@ -126,7 +125,6 @@ pub fn decrypt(key: &StorageKey, fields: &EncryptedFields) -> Result<Zeroizing<V
         .decode(&fields.mac_b64)
         .map_err(|e| format!("base64 decode mac: {e}"))?;
 
-    // Verify MAC.
     let mut hmac =
         HmacSha256::new_from_slice(key.mac_key()).map_err(|e| format!("HMAC init: {e}"))?;
     hmac.update(&iv);
@@ -134,7 +132,6 @@ pub fn decrypt(key: &StorageKey, fields: &EncryptedFields) -> Result<Zeroizing<V
     hmac.verify_slice(&mac_bytes)
         .map_err(|_| "MAC verification failed (wrong key or tampered data)".to_string())?;
 
-    // Decrypt in-place.
     let mut buf = Zeroizing::new(ciphertext.clone());
     let decryptor =
         Aes256CbcDec::new_from_slices(key.enc_key(), &iv).map_err(|e| format!("AES init: {e}"))?;

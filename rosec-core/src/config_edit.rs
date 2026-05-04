@@ -30,7 +30,6 @@ pub fn add_provider(
     let raw = read_or_empty(config_path)?;
     let mut doc: DocumentMut = raw.parse().context("failed to parse config as TOML")?;
 
-    // Reject duplicate IDs.
     if provider_ids(&doc).any(|existing| existing == id) {
         bail!(
             "provider '{id}' already exists in {}",
@@ -54,7 +53,6 @@ pub fn add_provider(
         .filter(|(k, _)| !TOP_LEVEL_KEYS.contains(&k.as_str()))
         .collect();
 
-    // Build the new table entry.
     let mut entry = Table::new();
     entry.set_implicit(false);
     entry["id"] = value(id);
@@ -76,7 +74,6 @@ pub fn add_provider(
         entry["options"] = Item::Table(opts);
     }
 
-    // Append to the `provider` array-of-tables.
     let providers = doc
         .entry("provider")
         .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
@@ -112,7 +109,6 @@ pub fn set_provider_enabled(config_path: &Path, id: &str, enabled: bool) -> Resu
         .and_then(|item| item.as_array_of_tables_mut())
         .with_context(|| format!("no providers configured in {}", config_path.display()))?;
 
-    // Find the index of the matching entry.
     let idx = (0..array.len()).find(|&i| {
         array
             .get(i)
@@ -125,7 +121,6 @@ pub fn set_provider_enabled(config_path: &Path, id: &str, enabled: bool) -> Resu
         bail!("provider '{id}' not found in {}", config_path.display());
     };
 
-    // get_mut is guaranteed to succeed since we just found the index.
     let table = array
         .get_mut(idx)
         .context("provider entry disappeared unexpectedly")?;
@@ -179,7 +174,6 @@ pub fn set_value(config_path: &Path, key: &str, value_str: &str) -> Result<()> {
     let raw = read_or_empty(config_path)?;
     let mut doc: DocumentMut = raw.parse().context("failed to parse config as TOML")?;
 
-    // Ensure the section table exists.
     let table = doc
         .entry(section)
         .or_insert_with(|| {
@@ -190,7 +184,6 @@ pub fn set_value(config_path: &Path, key: &str, value_str: &str) -> Result<()> {
         .as_table_mut()
         .with_context(|| format!("'{section}' exists but is not a table"))?;
 
-    // Parse the value into the most specific TOML type.
     let item = parse_toml_value(value_str);
     table[field] = item;
 

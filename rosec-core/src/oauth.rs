@@ -152,7 +152,6 @@ pub fn save_encrypted(
     let toml_str =
         toml::to_string(&stored).map_err(|e| format!("failed to serialise credential: {e}"))?;
 
-    // Write with restrictive permissions atomically.
     write_secret_file(&path, toml_str.as_bytes())
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
@@ -179,7 +178,6 @@ pub fn clear(provider_id: &str) -> Result<bool, String> {
 fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
-    // Write to a sibling temp file first.
     let tmp_path = path.with_extension("toml.tmp");
 
     {
@@ -206,7 +204,6 @@ fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()>
         f.flush()?;
     }
 
-    // Atomic rename.
     std::fs::rename(&tmp_path, path)?;
     Ok(())
 }

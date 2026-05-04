@@ -40,11 +40,9 @@ pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
         return Ok(Zeroizing::new(bytes));
     }
 
-    // Generate a fresh seed.
     let mut seed = Zeroizing::new(vec![0u8; 32]);
     rand::rng().fill_bytes(&mut seed);
 
-    // Write with mode 0600.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
