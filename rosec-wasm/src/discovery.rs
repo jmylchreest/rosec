@@ -121,6 +121,14 @@ enum PluginSource {
 ///
 /// `verify` controls signature checking before probing each plugin.
 pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginRegistry {
+    if verify == WasmVerify::Disabled {
+        info!(
+            "wasm_verify = \"disabled\" — WASM plugin signature verification is OFF. \
+             Any .wasm in the provider directories will be loaded without authenticity \
+             checks. Intended for local plugin development only."
+        );
+    }
+
     let mut registry = PluginRegistry::default();
 
     // 1. System-wide directory.
@@ -197,7 +205,15 @@ fn scan_directory(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        match verify_plugin(&path, verify) {
+        let outcome = verify_plugin(&path, verify);
+        debug!(
+            wasm = %wasm_name,
+            path = %path.display(),
+            ?source,
+            ?outcome,
+            "scan_plugins: signature verification result",
+        );
+        match outcome {
             VerifyOutcome::Verified => {
                 info!(
                     wasm = %wasm_name,
@@ -304,6 +320,7 @@ fn should_replace(
 }
 
 /// Outcome of signature verification.
+#[derive(Debug)]
 enum VerifyOutcome {
     /// Signature present and verified.
     Verified,
