@@ -95,7 +95,6 @@ impl SshManager {
 
         let store = KeyStore::new();
 
-        // Spawn the agent listener in the background.
         {
             let agent =
                 SshAgent::new(Arc::clone(&store), agent_sock.clone()).with_confirm(confirm_cb);
@@ -171,7 +170,6 @@ impl SshManager {
                     }
                 };
 
-                // Parse PEM.
                 let private_key = match PrivateKey::from_openssh(material.pem.as_bytes()) {
                     Ok(k) => k,
                     Err(e) => {
@@ -185,10 +183,8 @@ impl SshManager {
                     }
                 };
 
-                // Convert revision_date to SystemTime for conflict resolution.
                 let revision_date = meta.revision_date;
 
-                // Build the key entry.
                 match build_entry(
                     private_key,
                     meta.item_name.clone(),
@@ -406,7 +402,6 @@ pub fn build_confirm_callback(
                 }
             };
 
-            // Send JSON on stdin then close it.
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
                 if let Err(e) = stdin.write_all(request_json.to_string().as_bytes()) {
