@@ -1,47 +1,30 @@
 //! rosec-pam-unlock — pam_exec hook for unlocking rosec vaults on screen unlock.
 //!
-//! This binary is intended to be invoked by `pam_exec.so` with the
-//! `expose_authtok` option, which provides the user's password on stdin
-//! (null-terminated).
-//!
-//! It connects to the D-Bus session bus, enumerates locked vault providers,
-//! and attempts to unlock each one using the supplied password via the
-//! `AuthProviderFromPipe` method on `org.rosec.Daemon`.  The password is
-//! passed through a pipe fd (SCM_RIGHTS), never as a D-Bus message payload,
-//! so it is invisible to `dbus-monitor`.
+//! Invoked by `pam_exec.so expose_authtok`, which feeds the password on stdin
+//! (NUL-terminated). We forward it to `rosecd` via the D-Bus method
+//! `AuthProviderFromPipe`, passing the password through a pipe fd (SCM_RIGHTS)
+//! so it never lands on the D-Bus wire visible to `dbus-monitor`.
 //!
 //! # Scope: screen unlock only, not initial login
 //!
-//! This helper only works during **re-authentication** (screen unlock), not at
-//! initial login.  At initial login the user's D-Bus session bus does not exist
-//! yet and rosecd has not started, so `$DBUS_SESSION_BUS_ADDRESS` is unset and
-//! the connection will fail.  The helper returns `PAM_IGNORE` silently in that
-//! case, which means login is never blocked — vaults simply remain locked until
-//! the user unlocks them interactively (e.g. via `rosec provider auth`).
+//! At initial login `$DBUS_SESSION_BUS_ADDRESS` is unset and `rosecd` is not
+//! yet running, so the connection fails and the helper returns `PAM_IGNORE`
+//! — login is never blocked; vaults simply stay locked until the user
+//! unlocks them interactively (e.g. via `rosec provider auth`).
 //!
-//! For screen-unlock use, rosecd is already running and the session bus is
-//! available, so the helper can connect, pass the password through the pipe,
-//! and have the daemon unlock the vaults transparently.
-//!
-//! # PAM configuration
-//!
-//! Add to the appropriate PAM config for your screen locker
-//! (e.g. `/etc/pam.d/hyprlock`, `/etc/pam.d/swaylock`):
+//! Add to a screen-locker's PAM config (`/etc/pam.d/hyprlock`,
+//! `/etc/pam.d/swaylock`, etc), **not** to `/etc/pam.d/login`:
 //!
 //! ```text
 //! auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
 //! ```
 //!
-//! Do NOT add this to `/etc/pam.d/system-login` or `/etc/pam.d/login` —
-//! it will silently fail there (PAM_IGNORE) and has no effect at initial login.
+//! # Security invariants
 //!
-//! # Security
-//!
-//! - The password is read from stdin and zeroized after use.
-//! - The password is sent to the daemon via a pipe fd — never on the D-Bus wire.
-//! - Errors are silently ignored — this module must never block login.
-//! - No sensitive data is written to stdout/stderr/syslog.
-//! - The D-Bus session bus is per-user, limiting exposure.
+//! - Password is held in `Zeroizing<Vec<u8>>` and scrubbed on drop.
+//! - Password reaches `rosecd` via a pipe fd, never as a D-Bus payload.
+//! - All errors return `PAM_IGNORE` — this module must never block login.
+//! - No sensitive data is ever written to stdout/stderr/syslog.
 
 use std::io::Read as _;
 use std::os::unix::io::FromRawFd as _;
