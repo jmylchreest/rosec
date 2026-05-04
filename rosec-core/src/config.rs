@@ -43,9 +43,7 @@ pub struct ServiceConfig {
     pub wasm_prefer: WasmPreference,
     /// Controls signature verification of WASM provider plugins.
     ///
-    /// - `"if-present"` (default) — verify if `.wasm.sig` exists; skip with
-    ///   warning if absent; never load a plugin with an invalid signature
-    /// - `"required"` — reject plugins without a valid `.wasm.sig`
+    /// - `"required"` (default) — reject plugins without a valid `.wasm.sig`
     /// - `"disabled"` — skip all verification (local development only)
     #[serde(default)]
     pub wasm_verify: WasmVerify,
