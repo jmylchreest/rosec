@@ -127,7 +127,6 @@ impl KeyStore {
         debug!(provider = %provider_id, removed, "keystore: removed keys for provider");
     }
 
-    /// Remove all keys.
     pub fn clear(&mut self) {
         self.entries.clear();
     }

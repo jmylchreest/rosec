@@ -229,7 +229,6 @@ pub struct AttributeDescriptorsResponse {
     pub descriptors: Vec<WasmAttributeDescriptor>,
 }
 
-/// An attribute descriptor.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WasmAttributeDescriptor {
     pub name: String,

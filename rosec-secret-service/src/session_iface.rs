@@ -24,7 +24,6 @@ impl SecretSession {
 
 #[interface(name = "org.freedesktop.Secret.Session")]
 impl SecretSession {
-    /// Close this session.
     fn close(&self) -> Result<(), FdoError> {
         self.sessions
             .close_session(&self.path)

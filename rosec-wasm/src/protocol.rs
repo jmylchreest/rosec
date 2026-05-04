@@ -310,7 +310,6 @@ pub struct AttributeDescriptorsResponse {
     pub descriptors: Vec<WasmAttributeDescriptor>,
 }
 
-/// An attribute descriptor.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WasmAttributeDescriptor {
     pub name: String,
@@ -365,7 +364,6 @@ pub enum ReadinessProbe {
     Tcp {
         /// Hostname to connect to (e.g. `"vault.bitwarden.com"`).
         host: String,
-        /// Port number.
         port: u16,
         /// Probe timeout in seconds (default: 5).
         #[serde(default = "default_probe_timeout")]
