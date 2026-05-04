@@ -326,7 +326,9 @@ fn resolve_prompt_binary() -> String {
 /// `get_config` is called at prompt time (not at construction) so it picks up
 /// hot-reloaded prompt config changes.
 ///
-/// Fail when ssh_confirm=true, but no GUI/TTY can be spawned to ask for confimation
+/// Fails closed when ssh_confirm=true but no GUI/TTY is available to ask
+/// for confirmation — the whole point of ssh_confirm is to defeat silent
+/// abuse, so a headless fallback that signs anyway makes the option a no-op.
 pub fn build_confirm_callback(
     get_config: impl Fn() -> PromptConfig + Send + Sync + 'static,
 ) -> ConfirmCallback {
