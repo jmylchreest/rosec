@@ -731,15 +731,13 @@ impl ServiceState {
                         return Err(FdoError::Failed("prompt cancelled".to_string()));
                     }
 
-                    // Parse the JSON map and extract the password field.
-                    // Use `take` to move the value out of the map so only one
-                    // allocation exists; then zeroize all remaining map values.
                     let mut map: HashMap<String, String> =
                         serde_json::from_str(response_line.trim()).map_err(|e| {
                             FdoError::Failed(format!("rosec-prompt JSON parse: {e}"))
                         })?;
 
-                    // Find the password field ID for this provider.
+                    // Each provider declares its own password field id; look
+                    // it up on the provider so we know which key to extract.
                     let provider = self.provider_by_id(provider_id).ok_or_else(|| {
                         FdoError::Failed(format!("provider '{provider_id}' not found"))
                     })?;
@@ -888,7 +886,7 @@ impl ServiceState {
         let prompt_path_owned = prompt_path.to_string();
         self.set_prompt_pid(&prompt_path_owned, pid);
 
-        // Send JSON on stdin then close it.
+        // Write the request; stdin drops at scope end → EOF to the child.
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write as _;
             stdin
@@ -896,7 +894,6 @@ impl ServiceState {
                 .map_err(|e| FdoError::Failed(format!("rosec-prompt stdin write: {e}")))?;
         }
 
-        // Read one line of JSON from stdout.
         let response_line = {
             let stdout = child
                 .stdout
@@ -965,7 +962,6 @@ impl ServiceState {
             .map_err(|e| FdoError::Failed(format!("cannot open /dev/tty: {e}")))?;
         let fd = tty.as_raw_fd();
 
-        // Print header + prompt label.
         {
             let mut w = &tty;
             let _ = write!(w, "\n{label}\n{}: ", pw_field.label);
