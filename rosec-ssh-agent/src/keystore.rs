@@ -121,7 +121,6 @@ impl KeyStore {
         for group in self.entries.values_mut() {
             group.retain(|e| e.provider_id != provider_id);
         }
-        // Remove empty groups.
         self.entries.retain(|_, v| !v.is_empty());
         let after: usize = self.entries.values().map(|v| v.len()).sum();
         let removed = before - after;

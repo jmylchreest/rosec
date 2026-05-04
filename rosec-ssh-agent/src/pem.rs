@@ -27,7 +27,6 @@ pub fn extract_keys(text: &str) -> Vec<PrivateKey> {
         let mut remaining = text;
         while let Some(start) = remaining.find(header) {
             let pem_start = start;
-            // Find the matching -----END ... ----- line
             let after_header = &remaining[pem_start..];
             if let Some(end_rel) = find_pem_end(after_header) {
                 let pem_block = &after_header[..end_rel];
