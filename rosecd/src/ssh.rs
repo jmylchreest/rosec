@@ -308,17 +308,15 @@ use std::time::SystemTime;
 // SSH sign confirmation via rosec-prompt
 // ---------------------------------------------------------------------------
 
-/// Find the `rosec-prompt` binary next to the current executable or on PATH.
-fn resolve_prompt_binary() -> String {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("rosec-prompt");
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    "rosec-prompt".to_string()
+/// Find the `rosec-prompt` binary next to the current executable.
+///
+/// Returns `None` if no sibling exists. The daemon must not fall back to
+/// a `$PATH` lookup — `$PATH` is attacker-influenceable in some launch
+/// contexts (sysadmin-set environment, broken systemd unit, etc.) and a
+/// silent fallback would let an attacker substitute their own `rosec-prompt`.
+fn resolve_prompt_binary() -> Option<String> {
+    rosec_core::prompt::resolve_sibling_binary("rosec-prompt")
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Build a [`ConfirmCallback`] that spawns `rosec-prompt` in confirmation mode.
@@ -337,7 +335,19 @@ pub fn build_confirm_callback(
         Box::pin(async move {
             // Resolve prompt binary and theme from the live config.
             let program = match cfg.backend.as_str() {
-                "builtin" | "" => resolve_prompt_binary(),
+                "builtin" | "" => match resolve_prompt_binary() {
+                    Some(p) => p,
+                    None => {
+                        warn!(
+                            fingerprint = %fingerprint,
+                            item = %item_name,
+                            "rosec-prompt not found alongside daemon binary; \
+                             denying sign request — refusing PATH fallback as \
+                             a defence against $PATH-controlled substitution"
+                        );
+                        return false;
+                    }
+                },
                 custom => custom.to_string(),
             };
             let theme_json = serde_json::to_value(&cfg.theme).unwrap_or_default();

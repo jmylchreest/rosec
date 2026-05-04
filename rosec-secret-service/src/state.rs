@@ -812,9 +812,23 @@ impl ServiceState {
     /// `display_env` so callers can inject them into child processes.
     fn resolve_prompt_env(&self) -> PromptEnv {
         let cfg = self.prompts.config();
-        let program = match cfg.backend.as_str() {
-            "builtin" | "" => resolve_prompt_binary(),
-            custom => custom.to_string(),
+        // For "builtin", refuse to fall back to a $PATH lookup — the daemon
+        // is long-lived and a $PATH that was attacker-controlled at spawn
+        // time would let the wrong rosec-prompt be executed silently. If
+        // the sibling binary is missing we suppress has_display/has_tty so
+        // the caller takes its "no way to prompt" branch.
+        let (program, builtin_missing) = match cfg.backend.as_str() {
+            "builtin" | "" => match resolve_prompt_binary() {
+                Some(p) => (p, false),
+                None => {
+                    tracing::error!(
+                        "rosec-prompt not found alongside daemon binary; \
+                         refusing $PATH fallback. Prompt-based unlock is unavailable."
+                    );
+                    (String::new(), true)
+                }
+            },
+            custom => (custom.to_string(), false),
         };
 
         let mut has_display =
@@ -856,6 +870,15 @@ impl ServiceState {
             .write(true)
             .open("/dev/tty")
             .is_ok();
+        // If the builtin prompt binary is missing, suppress display/tty
+        // so callers fall through to their "no way to prompt" branch
+        // rather than spawning Command::new("") and getting a confusing
+        // ENOENT at runtime. The actual reason was already logged above.
+        let (has_display, has_tty) = if builtin_missing {
+            (false, false)
+        } else {
+            (has_display, has_tty)
+        };
         PromptEnv {
             cfg,
             program,
@@ -1987,18 +2010,15 @@ struct PromptEnv {
     display_env: Vec<(String, String)>,
 }
 
-/// Find the `rosec-prompt` binary next to the current executable or on PATH.
-fn resolve_prompt_binary() -> String {
-    // Prefer a sibling binary in the same directory (installed layout).
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("rosec-prompt");
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    "rosec-prompt".to_string() // fall back to PATH lookup
+/// Find the `rosec-prompt` binary next to the current executable.
+///
+/// Returns `None` if no sibling exists. The daemon must not fall back to a
+/// `$PATH` lookup — `$PATH` is attacker-influenceable in some launch
+/// contexts and a silent fallback would let an attacker substitute their
+/// own `rosec-prompt`.
+fn resolve_prompt_binary() -> Option<String> {
+    rosec_core::prompt::resolve_sibling_binary("rosec-prompt")
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Discover `WAYLAND_DISPLAY` / `DISPLAY` from the systemd user manager's
