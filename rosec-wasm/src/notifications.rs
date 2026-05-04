@@ -131,7 +131,6 @@ async fn notifications_loop(config: NotificationsConfig, mut cancel_rx: watch::R
             }
         }
 
-        // Get subscription config from the guest.
         let subscription = {
             let mut plugin = config.plugin.lock().await;
             match get_subscription_from_guest(&mut plugin, provider_id) {
@@ -199,7 +198,6 @@ async fn run_session(
 ) -> SessionResult {
     let provider_id = &config.provider_id;
 
-    // Parse the URL.
     let ws_uri = match subscription.url.parse::<http::Uri>() {
         Ok(u) => u,
         Err(e) => return SessionResult::ConnectFailed(format!("invalid WebSocket URI: {e}")),
@@ -207,7 +205,6 @@ async fn run_session(
 
     debug!(provider = %provider_id, "notifications: connecting");
 
-    // Connect WebSocket.
     let ws_result = tokio_websockets::ClientBuilder::from_uri(ws_uri)
         .connect()
         .await;
@@ -216,7 +213,6 @@ async fn run_session(
         Err(e) => return SessionResult::ConnectFailed(format!("WebSocket connect failed: {e}")),
     };
 
-    // Send handshake message if the guest specified one.
     if let Some(ref handshake) = subscription.handshake_message
         && let Err(e) = ws
             .send(tokio_websockets::Message::text(handshake.to_string()))
@@ -227,7 +223,6 @@ async fn run_session(
 
     info!(provider = %provider_id, "notifications: connected");
 
-    // Event loop — receive frames, parse via guest, dispatch callbacks.
     let on_sync = &config.on_sync_nudge;
     let on_lock = &config.on_lock_nudge;
 
@@ -259,7 +254,6 @@ async fn run_session(
                                 len = text.len(),
                                 "notifications: received frame"
                             );
-                            // Call the guest to parse the frame.
                             let action = {
                                 let mut plugin = config.plugin.lock().await;
                                 parse_frame_via_guest(

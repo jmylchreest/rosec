@@ -127,7 +127,6 @@ pub fn write_cache_file(
 ) -> Result<SystemTime, ProviderError> {
     let path = cache_file_path(provider_id)?;
 
-    // Ensure parent directory exists.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
@@ -143,11 +142,9 @@ pub fn write_cache_file(
         .unwrap_or(Duration::ZERO)
         .as_secs() as i64;
 
-    // Generate random IV.
     let mut iv = [0u8; 16];
     rand::rng().fill_bytes(&mut iv);
 
-    // Encrypt with AES-256-CBC + PKCS#7 padding.
     let pad_len = 16 - (plaintext.len() % 16);
     let mut buf = Zeroizing::new(vec![0u8; plaintext.len() + pad_len]);
     buf[..plaintext.len()].copy_from_slice(plaintext);
@@ -252,7 +249,6 @@ pub fn read_cache_file(
     let iv: [u8; 16] = raw[9..25].try_into().expect("16-byte IV slice");
     let ct_len = u32::from_be_bytes(raw[25..29].try_into().expect("4-byte ct_len slice")) as usize;
 
-    // Validate lengths.
     let expected_total = 1 + 8 + 16 + 4 + ct_len + 32;
     if raw.len() != expected_total {
         return Err(ProviderError::Other(anyhow::anyhow!(
@@ -274,7 +270,6 @@ pub fn read_cache_file(
         return Err(ProviderError::AuthFailed);
     }
 
-    // Check cache age.
     let cache_time = UNIX_EPOCH + Duration::from_secs(timestamp as u64);
     if max_age > Duration::ZERO {
         let age = SystemTime::now()
@@ -295,7 +290,6 @@ pub fn read_cache_file(
         }
     }
 
-    // Decrypt.
     let mut buf = Zeroizing::new(ciphertext.to_vec());
     let decryptor = Aes256CbcDec::new_from_slices(key.enc_key(), &iv)
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("AES init: {e}")))?;
