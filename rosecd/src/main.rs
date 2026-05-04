@@ -1164,7 +1164,6 @@ fn wire_provider_callbacks(
         let synced_id = provider_id.clone();
         let failed_id = provider_id.clone();
 
-        // --- Remote nudge callbacks (e.g. Bitwarden SignalR) ---
         let sync_state = Arc::clone(state);
         let lock_state = Arc::clone(state);
         let nudge_sync_id = provider_id.clone();

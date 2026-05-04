@@ -271,8 +271,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
     let mask = args.mask;
     let force = args.force;
 
-    // --- resolve rosecd binary path ------------------------------------------
-
     let rosecd = resolve_rosecd()?;
     println!("using rosecd: {}", rosecd.display());
 
@@ -285,8 +283,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
     let portal_path = portals_dir.join(PORTAL_FILE);
     let service_path = systemd_dir.join(SYSTEMD_SERVICE_UNIT);
     let socket_path = systemd_dir.join(SYSTEMD_SOCKET_UNIT);
-
-    // --- pre-flight checks ---------------------------------------------------
 
     if secrets_path.exists() && !force {
         let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
@@ -322,8 +318,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
         println!();
     }
 
-    // --- install D-Bus service files -----------------------------------------
-
     let contents = render(TEMPLATE_DBUS_SECRETS, &rosecd);
     if install_file(&secrets_path, &contents)? {
         println!("installed {}", secrets_path.display());
@@ -356,8 +350,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
         mask_gnome_keyring_systemd_socket()?;
     }
 
-    // --- install portal files -------------------------------------------------
-
     let portal_dbus_contents = render(TEMPLATE_PORTAL_DBUS, &rosecd);
     if install_file(&portal_dbus_path, &portal_dbus_contents)? {
         println!("installed {}", portal_dbus_path.display());
@@ -370,8 +362,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
     } else {
         println!("unchanged {}", portal_path.display());
     }
-
-    // --- install systemd user units ------------------------------------------
 
     if enable_systemd {
         let svc_contents = render(TEMPLATE_SERVICE, &rosecd);
@@ -422,14 +412,10 @@ pub fn cmd_disable(args: crate::cli::DisableArgs) -> Result<()> {
 
     let mut removed_any = false;
 
-    // --- systemd: stop + disable first (before removing unit files) -----------
-
     if disable_systemd {
         run_systemctl(&["disable", "--now", "rosecd.service"]);
         run_systemctl(&["disable", "--now", "rosecd.socket"]);
     }
-
-    // --- remove D-Bus service files ------------------------------------------
 
     if remove_file_if_exists(&secrets_path)? {
         println!("removed {}", secrets_path.display());
@@ -459,22 +445,14 @@ pub fn cmd_disable(args: crate::cli::DisableArgs) -> Result<()> {
         }
     }
 
-    // --- remove gnome-keyring autostart masks --------------------------------
-
     unmask_gnome_keyring_autostart()?;
 
-    // --- unmask gnome-keyring systemd socket ----------------------------------
-
     unmask_gnome_keyring_systemd_socket()?;
-
-    // --- remove portal file ---------------------------------------------------
 
     if remove_file_if_exists(&portal_path)? {
         println!("removed {}", portal_path.display());
         removed_any = true;
     }
-
-    // --- remove systemd unit files -------------------------------------------
 
     if disable_systemd {
         if remove_file_if_exists(&service_path)? {

@@ -279,7 +279,6 @@ const fn desc(
 /// created locally and items synced from a remote backend produce a consistent
 /// attribute namespace.
 static LOCAL_VAULT_ATTRIBUTES: &[AttributeDescriptor] = &[
-    // -- Common (all item types) --
     desc("name", false, &[], "Item display name"),
     desc(
         rosec_core::ATTR_TYPE,
@@ -288,7 +287,6 @@ static LOCAL_VAULT_ATTRIBUTES: &[AttributeDescriptor] = &[
         "Item type (generic, login, ssh-key, note, card, identity)",
     ),
     desc("notes", true, &[], "Free-form notes (always sensitive)"),
-    // -- Login --
     desc(
         "username",
         false,
@@ -298,11 +296,9 @@ static LOCAL_VAULT_ATTRIBUTES: &[AttributeDescriptor] = &[
     desc("password", true, &["login"], "Login password"),
     desc("totp", true, &["login"], "TOTP seed / otpauth URI"),
     desc("uri", false, &["login"], "Primary login URI"),
-    // -- SSH Key --
     desc("private_key", true, &["ssh-key"], "SSH private key (PEM)"),
     desc("public_key", false, &["ssh-key"], "SSH public key"),
     desc("fingerprint", false, &["ssh-key"], "SSH key fingerprint"),
-    // -- Card --
     desc("cardholder", true, &["card"], "Cardholder name (PII)"),
     desc("number", true, &["card"], "Card number"),
     desc(
@@ -314,7 +310,6 @@ static LOCAL_VAULT_ATTRIBUTES: &[AttributeDescriptor] = &[
     desc("exp_month", true, &["card"], "Card expiration month"),
     desc("exp_year", true, &["card"], "Card expiration year"),
     desc("code", true, &["card"], "Card security code (CVV)"),
-    // -- Identity (all PII → sensitive) --
     desc(
         "title",
         true,
@@ -343,9 +338,7 @@ static LOCAL_VAULT_ATTRIBUTES: &[AttributeDescriptor] = &[
     desc("state", true, &["identity"], "State / province"),
     desc("postal_code", true, &["identity"], "Postal / ZIP code"),
     desc("country", true, &["identity"], "Country"),
-    // -- Note --
     // Notes use only the common "notes" attribute (always sensitive).
-    // -- Generic --
     // Generic items use only common attributes + a "secret" sensitive attribute.
     desc("secret", true, &["generic"], "Generic secret value"),
 ];

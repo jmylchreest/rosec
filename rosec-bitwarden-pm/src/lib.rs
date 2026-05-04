@@ -143,7 +143,6 @@ const PEM_HEADERS: &[&str] = &[
 /// serialised as `WasmAttributeDescriptor` for JSON transport.
 fn bitwarden_attribute_descriptors() -> Vec<WasmAttributeDescriptor> {
     vec![
-        // -- Common (all item types) --
         desc("name", false, &[], "Item display name"),
         desc(
             ATTR_TYPE,
@@ -153,7 +152,6 @@ fn bitwarden_attribute_descriptors() -> Vec<WasmAttributeDescriptor> {
         ),
         desc("folder", false, &[], "Folder name (if assigned)"),
         desc("notes", true, &[], "Free-form notes (always sensitive)"),
-        // -- Login --
         desc(
             "username",
             false,
@@ -163,7 +161,6 @@ fn bitwarden_attribute_descriptors() -> Vec<WasmAttributeDescriptor> {
         desc("password", true, &["login"], "Login password"),
         desc("totp", true, &["login"], "TOTP seed / otpauth URI"),
         desc("uri", false, &["login"], "Primary login URI"),
-        // -- Card --
         desc("cardholder", true, &["card"], "Cardholder name (PII)"),
         desc("number", true, &["card"], "Card number"),
         desc(
@@ -175,11 +172,9 @@ fn bitwarden_attribute_descriptors() -> Vec<WasmAttributeDescriptor> {
         desc("exp_month", true, &["card"], "Card expiration month"),
         desc("exp_year", true, &["card"], "Card expiration year"),
         desc("code", true, &["card"], "Card security code (CVV)"),
-        // -- SSH Key --
         desc("private_key", true, &["ssh-key"], "SSH private key"),
         desc("public_key", false, &["ssh-key"], "SSH public key"),
         desc("fingerprint", false, &["ssh-key"], "SSH key fingerprint"),
-        // -- Identity (all PII → sensitive) --
         desc(
             "title",
             true,
@@ -540,7 +535,6 @@ fn build_item_attributes(
         append_secret_names(IDENTITY_SECRET_FIELDS, ident, &mut secret_names);
     }
 
-    // -- Hidden custom fields are sensitive --
     for (key, _) in index_custom_fields(&dc.fields, &[1]) {
         secret_names.push(key);
     }

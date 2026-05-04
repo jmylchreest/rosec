@@ -400,7 +400,6 @@ fn percent_encode(s: &str) -> String {
 
 const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
 
-// --- Request / Response types ---
 
 #[derive(Debug, Serialize)]
 struct PreloginRequest {

@@ -1140,7 +1140,6 @@ pub(crate) fn print_search_table(items: &[ItemSummary], show_path: bool) {
     let w_user = cols[P_USER].allocated;
     let w_uri = cols[P_URI].allocated;
 
-    // --- Header ---
     if show_path {
         println!(
             "{:<w_type$}  {:<w_prov$}  {:<w_name$}  {:<w_user$}  {:<w_uri$}  {:<w_id$}  PATH",
@@ -1167,7 +1166,6 @@ pub(crate) fn print_search_table(items: &[ItemSummary], show_path: bool) {
         + if show_path { GAP + "PATH".len() } else { 0 };
     println!("{}", "-".repeat(sep_w));
 
-    // --- Rows ---
     for item in items {
         let item_type = item
             .attrs
