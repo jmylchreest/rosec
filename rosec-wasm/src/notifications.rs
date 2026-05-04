@@ -27,10 +27,6 @@ use crate::protocol::{
     WebSocketSubscription,
 };
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Handle to a running notifications background task.
 ///
 /// Dropping this handle cancels the task (the `cancel_tx` sender is dropped,
@@ -75,10 +71,6 @@ pub fn start(config: NotificationsConfig) -> NotificationsHandle {
         _task: task,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
 
 /// Initial delay before first reconnect attempt after a disconnect.
 const BACKOFF_INITIAL: Duration = Duration::from_secs(5);
@@ -295,10 +287,6 @@ async fn run_session(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Guest calls
-// ---------------------------------------------------------------------------
-
 /// Call the guest's `get_notification_config` function.
 fn get_subscription_from_guest(
     plugin: &mut extism::Plugin,
@@ -369,10 +357,6 @@ fn parse_frame_via_guest(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Replace any `access_token=<value>` occurrence with a placeholder.
 fn redact_tokens(s: &str) -> std::borrow::Cow<'_, str> {

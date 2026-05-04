@@ -212,10 +212,6 @@ impl LocalVault {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Key wrapping management (public API for CLI)
-    // -----------------------------------------------------------------------
-
     /// Return the on-disk path of this vault file.
     pub fn path(&self) -> &Path {
         &self.path

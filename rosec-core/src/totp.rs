@@ -10,10 +10,6 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use zeroize::Zeroizing;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /// Hash algorithm used for the HMAC step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TotpAlgorithm {
@@ -66,10 +62,6 @@ pub enum TotpError {
     #[error("TOTP code generation failed: {0}")]
     GenerationFailed(String),
 }
-
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
 
 /// Parse a raw TOTP input (as stored by providers).
 ///
@@ -208,10 +200,6 @@ fn decode_base32(input: &str) -> Result<Zeroizing<Vec<u8>>, TotpError> {
         .map_err(|_| TotpError::InvalidBase32)
 }
 
-// ---------------------------------------------------------------------------
-// Code generation
-// ---------------------------------------------------------------------------
-
 /// Generate a TOTP code for a specific point in time.
 pub fn generate_code(
     params: &TotpParams,
@@ -299,10 +287,6 @@ pub fn time_remaining_at(params: &TotpParams, time: SystemTime) -> u64 {
     let elapsed = unix_secs % params.period;
     params.period - elapsed
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

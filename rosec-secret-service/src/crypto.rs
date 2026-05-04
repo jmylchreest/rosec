@@ -22,10 +22,6 @@ use rosec_core::ProviderError;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-// ---------------------------------------------------------------------------
-// RFC 2409 Second Oakley Group (MODP-1024) parameters
-// ---------------------------------------------------------------------------
-
 /// The 1024-bit MODP prime from RFC 2409 §6.2.
 ///
 /// This is the exact byte sequence specified by the freedesktop Secret Service
@@ -53,10 +49,6 @@ const AES128_KEY_BYTES: usize = 16;
 /// AES block/IV size in bytes.
 const AES_BLOCK_BYTES: usize = 16;
 
-// ---------------------------------------------------------------------------
-// Session algorithm enum
-// ---------------------------------------------------------------------------
-
 /// Session encryption algorithms defined by the Secret Service specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAlgorithm {
@@ -76,10 +68,6 @@ impl SessionAlgorithm {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// DH key exchange
-// ---------------------------------------------------------------------------
 
 /// A server-side DH keypair for one session negotiation.
 ///
@@ -159,10 +147,6 @@ pub fn derive_session_key(
     Ok(key)
 }
 
-// ---------------------------------------------------------------------------
-// AES-128-CBC-PKCS7 encrypt / decrypt
-// ---------------------------------------------------------------------------
-
 type Aes128CbcEnc = cbc::Encryptor<Aes128>;
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
@@ -208,10 +192,6 @@ pub fn aes128_cbc_decrypt(
     Ok(Zeroizing::new(plaintext))
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Zero-pad a big-endian byte vector to exactly 128 bytes.
 ///
 /// `BigUint::to_bytes_be()` omits leading zeros; the DH public key and shared
@@ -222,10 +202,6 @@ fn pad_to_128(mut bytes: Vec<u8>) -> Vec<u8> {
     }
     bytes
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

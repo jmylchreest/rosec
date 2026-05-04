@@ -150,10 +150,6 @@ impl SecretPrompt {
     ) -> zbus::Result<()>;
 }
 
-// ---------------------------------------------------------------------------
-// Background task: credential collection + unlock + Completed signal
-// ---------------------------------------------------------------------------
-
 /// Runs on a Tokio task spawned by `Prompt.prompt()`.  Returns immediately
 /// (fire-and-forget) so the D-Bus method reply is sent before any blocking I/O.
 async fn run_prompt_task(
@@ -543,10 +539,6 @@ async fn on_unlock_success(
     state.finish_prompt(prompt_path);
 }
 
-// ---------------------------------------------------------------------------
-// Deferred operation executors
-// ---------------------------------------------------------------------------
-
 /// Execute a deferred `CreateItem` after successful unlock.
 ///
 /// Returns `Some(item_object_path)` on success or `None` on failure.
@@ -626,10 +618,6 @@ async fn execute_deferred_delete(
 
     Some(zvariant::Value::from(to_object_path("/")))
 }
-
-// ---------------------------------------------------------------------------
-// Caller identification
-// ---------------------------------------------------------------------------
 
 /// Resolve the calling process from the D-Bus message header.
 ///

@@ -414,14 +414,6 @@ impl RosecManagement {
             .await?
     }
 
-    // -----------------------------------------------------------------------
-    // Password (wrapping entry) management
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Password (wrapping entry) management
-    // -----------------------------------------------------------------------
-
     /// Add a password (wrapping entry) to a local vault provider.
     ///
     /// The provider must be unlocked.  The new password wraps the same vault key
@@ -645,10 +637,6 @@ impl RosecManagement {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cancellation helpers for TTY methods
-// ---------------------------------------------------------------------------
-
 /// Create a `(read_fd, write_fd)` pipe used to signal cancellation.
 ///
 /// The read end is passed into the auth task where `read_hidden()` polls it
@@ -767,10 +755,6 @@ async fn wait_for_task_or_peer_exit<T: Send + 'static>(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Return types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
 pub struct DaemonStatus {

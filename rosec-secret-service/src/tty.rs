@@ -11,10 +11,6 @@ use std::os::unix::io::RawFd;
 use anyhow::{Result, anyhow};
 use zeroize::Zeroizing;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// Descriptor for a single prompt field, mirroring the wire format returned by
 /// `GetAuthFields` / `GetRegistrationInfo`.
 #[derive(Debug, Clone)]
@@ -25,10 +21,6 @@ pub struct TtyField {
     pub kind: String,
     pub placeholder: String,
 }
-
-// ---------------------------------------------------------------------------
-// TermiosGuard — RAII terminal-state restoration
-// ---------------------------------------------------------------------------
 
 /// Restores the original `termios` settings on the given fd when dropped.
 ///
@@ -49,10 +41,6 @@ impl Drop for TermiosGuard {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Low-level read
-// ---------------------------------------------------------------------------
 
 /// Read one line from `fd` with terminal echo disabled.
 ///
@@ -174,10 +162,6 @@ pub fn read_hidden(fd: RawFd, cancel_fd: Option<RawFd>) -> io::Result<Zeroizing<
     Ok(Zeroizing::new(s))
 }
 
-// ---------------------------------------------------------------------------
-// Field prompting
-// ---------------------------------------------------------------------------
-
 /// Collect a single field value from the terminal using the given `fd`.
 ///
 /// For hidden fields (`password`/`secret`) echo is suppressed via
@@ -236,10 +220,6 @@ pub async fn prompt_field_on_fd(
 
     Ok(value)
 }
-
-// ---------------------------------------------------------------------------
-// Bulk field collection
-// ---------------------------------------------------------------------------
 
 /// Collect all `fields` from the terminal using `fd`, printing a blank line
 /// before the first prompt.

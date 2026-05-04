@@ -31,10 +31,6 @@ pub enum CryptoError {
     Decryption,
 }
 
-// ---------------------------------------------------------------------------
-// Key derivation
-// ---------------------------------------------------------------------------
-
 /// Derive a 32-byte key from a password using PBKDF2-SHA256.
 ///
 /// Returns `CryptoError::InvalidSalt` if the KDF salt is not valid base64.
@@ -60,20 +56,12 @@ pub fn derive_mac_key(encryption_key: &[u8]) -> Result<Zeroizing<[u8; MAC_KEY_LE
     Ok(mac_key)
 }
 
-// ---------------------------------------------------------------------------
-// Vault key generation
-// ---------------------------------------------------------------------------
-
 /// Generate a random 32-byte vault key.
 pub fn generate_vault_key() -> Zeroizing<[u8; KEY_LEN]> {
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     rand::rng().fill_bytes(&mut *key);
     key
 }
-
-// ---------------------------------------------------------------------------
-// Key wrapping (wrap/unwrap the vault key with a password-derived key)
-// ---------------------------------------------------------------------------
 
 /// Create a wrapping entry that protects the vault key with a password.
 ///
@@ -134,10 +122,6 @@ pub fn unwrap_vault_key(
     Ok(Some(vault_key))
 }
 
-// ---------------------------------------------------------------------------
-// Data encryption / decryption
-// ---------------------------------------------------------------------------
-
 /// Encrypt plaintext with AES-256-CBC. Returns IV || ciphertext.
 pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Vec<u8> {
     let iv = rand::random::<[u8; IV_LEN]>();
@@ -166,10 +150,6 @@ pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, &'sta
         .map(Zeroizing::new)
         .map_err(|_| "decryption failed")
 }
-
-// ---------------------------------------------------------------------------
-// HMAC
-// ---------------------------------------------------------------------------
 
 /// Compute HMAC-SHA256 over data.
 pub fn compute_hmac(mac_key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {

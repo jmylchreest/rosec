@@ -24,10 +24,6 @@ pub fn secure_bootstrap() {
 #[cfg(not(unix))]
 pub fn secure_bootstrap() {}
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
-
 #[cfg(unix)]
 fn set_not_dumpable() {
     // SAFETY: prctl is safe to call with PR_SET_DUMPABLE and a plain integer arg.

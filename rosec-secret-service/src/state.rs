@@ -1899,10 +1899,6 @@ impl ServiceState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Prompt helpers (module-private)
-// ---------------------------------------------------------------------------
-
 /// Information about the D-Bus caller that triggered a prompt.
 ///
 /// Resolved from the caller's unique bus name via the D-Bus daemon's
@@ -1992,10 +1988,6 @@ fn build_prompt_fields_json(
     });
     req.to_string()
 }
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
 
 pub(crate) fn map_provider_error(err: ProviderError) -> FdoError {
     match err {

@@ -264,10 +264,6 @@ impl SshManager {
         self.refresh_fuse();
     }
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
-
     /// Rebuild the FUSE snapshot from the current store contents.
     fn refresh_fuse(&self) {
         let snap_entries: Vec<rosec_ssh_agent::KeyEntry> = match self.store.read() {
@@ -299,10 +295,6 @@ impl SshManager {
 }
 
 use std::time::SystemTime;
-
-// ---------------------------------------------------------------------------
-// SSH sign confirmation via rosec-prompt
-// ---------------------------------------------------------------------------
 
 /// Find the `rosec-prompt` binary next to the current executable.
 ///

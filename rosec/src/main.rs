@@ -135,19 +135,12 @@ pub(crate) fn load_config() -> Config {
         .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------
-// Prompt helpers (local config-value collection only — not credentials)
-// ---------------------------------------------------------------------------
 //
 // These functions are used by `cmd_provider_add` to collect non-secret
 // configuration values (email address, region, base_url, etc.) that go into
 // config.toml.  Credential prompting (passwords, tokens) is handled entirely
 // inside `rosecd` via `UnlockWithTty` / `AuthProviderWithTty` — the TTY fd is
 // passed via D-Bus fd-passing so credentials never appear in any D-Bus message.
-
-// ---------------------------------------------------------------------------
-// Lazy-unlock: detect "locked::<provider_id>" D-Bus errors and prompt
-// ---------------------------------------------------------------------------
 
 /// Extract a `"locked::<provider_id>"` provider ID from a `zbus::Error`, if present.
 ///
@@ -296,10 +289,6 @@ pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Secure field collection (used locally for config-value prompts in `add`)
-// ---------------------------------------------------------------------------
 
 /// Open `/dev/tty` and return it as a `zvariant::OwnedFd` for D-Bus fd-passing.
 ///

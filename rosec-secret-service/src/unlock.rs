@@ -17,10 +17,6 @@ use rosec_core::ProviderError;
 use crate::state::ServiceState;
 use crate::tty::{TtyField, collect_tty_on_fd, prompt_field_on_fd};
 
-// ---------------------------------------------------------------------------
-// Public result types
-// ---------------------------------------------------------------------------
-
 /// Result of a single provider unlock attempt inside `unlock_with_tty`.
 #[derive(Debug)]
 pub struct UnlockResult {
@@ -49,10 +45,6 @@ async fn unlock_success_message(state: &ServiceState, provider_id: &str, suffix:
         (false, false) => format!("unlocked ({suffix})"),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public entry points
-// ---------------------------------------------------------------------------
 
 /// Unlock all locked providers using credentials prompted on `tty_fd`.
 ///
@@ -407,10 +399,6 @@ pub async fn auth_provider_with_tty(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Core implementation
-// ---------------------------------------------------------------------------
-
 /// Collect credentials from the TTY and authenticate `provider_id`.
 ///
 /// If `prefill` is `Some`, the credential prompt is skipped (the password was
@@ -650,10 +638,6 @@ async fn auth_provider_with_tty_inner(
     info!(provider = %provider_id, "provider authenticated via AuthProviderWithTty");
     Ok(password)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Collect auth field descriptors for a provider into `TtyField` structs.
 pub(crate) fn provider_auth_fields(provider: &dyn rosec_core::Provider) -> Vec<TtyField> {

@@ -523,10 +523,6 @@ pub enum ErrorKind {
     Other,
 }
 
-// ---------------------------------------------------------------------------
-// Real-time notifications (Capability::Notifications)
-// ---------------------------------------------------------------------------
-
 /// Response from the guest's `get_notification_config` function.
 ///
 /// Called by the host after a successful online unlock or sync to obtain

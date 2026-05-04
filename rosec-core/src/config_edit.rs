@@ -8,10 +8,6 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Table, value};
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Add a new `[[provider]]` entry to the config file.
 ///
 /// `id` must be unique within the file; returns an error if it is already
@@ -217,10 +213,6 @@ pub fn add_local_provider(
     add_provider(config_path, id, "local", &options)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Remove a `[[key]]` entry whose `id` field matches the given value.
 ///
 /// Finds all matching entries, removes them in reverse index order (to keep
@@ -315,10 +307,6 @@ pub fn provider_ids(doc: &DocumentMut) -> impl Iterator<Item = &str> {
         .flat_map(|aot| aot.iter())
         .filter_map(|t| t.get("id")?.as_str())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

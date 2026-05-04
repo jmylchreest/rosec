@@ -26,10 +26,6 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::crypto::{decrypt_field_opt, decrypt_org_key, derive_token_enc_key};
 use crate::error::SmError;
 
-// ---------------------------------------------------------------------------
-// Parsed access token
-// ---------------------------------------------------------------------------
-
 /// A parsed Bitwarden SM access token.
 ///
 /// Token format: `0.{access_token_id}.{client_secret}:{base64_16_byte_enc_key}`
@@ -88,10 +84,6 @@ impl AccessToken {
     }
 }
 
-// ---------------------------------------------------------------------------
-// API server URLs
-// ---------------------------------------------------------------------------
-
 pub struct SmUrls {
     pub api_url: String,
     pub identity_url: String,
@@ -120,10 +112,6 @@ impl SmUrls {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
 
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -157,10 +145,6 @@ fn url_encode_form(params: &[(&str, String)]) -> Vec<u8> {
         .join("&")
         .into_bytes()
 }
-
-// ---------------------------------------------------------------------------
-// Wire types
-// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct LoginResponse {
@@ -227,10 +211,6 @@ struct SyncCheckResponse {
     #[serde(rename = "hasChanges")]
     has_changes: bool,
 }
-
-// ---------------------------------------------------------------------------
-// API functions (synchronous — Extism PDK HTTP)
-// ---------------------------------------------------------------------------
 
 /// Step 3: Authenticate with the `client_credentials` grant.
 pub fn login(urls: &SmUrls, token: &AccessToken) -> Result<LoginResponse, SmError> {
@@ -430,10 +410,6 @@ pub fn check_secrets_changed(
     Ok(sync.has_changes)
 }
 
-// ---------------------------------------------------------------------------
-// Decrypted secret
-// ---------------------------------------------------------------------------
-
 /// A fully decrypted SM secret.
 pub struct DecryptedSecret {
     pub id: String,
@@ -456,10 +432,6 @@ impl std::fmt::Debug for DecryptedSecret {
             .finish()
     }
 }
-
-// ---------------------------------------------------------------------------
-// High-level orchestrator: authenticate + fetch all secrets
-// ---------------------------------------------------------------------------
 
 /// Authenticate and fetch all secrets for the given organisation in one call.
 ///
@@ -524,10 +496,6 @@ pub fn fetch_secrets(
     extism_pdk::debug!("SM secrets loaded and decrypted count={}", secrets.len());
     Ok((bearer, secrets))
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -8,10 +8,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-// ---------------------------------------------------------------------------
-// Embedded templates (compile-time)
-// ---------------------------------------------------------------------------
-
 const TEMPLATE_SERVICE: &str = include_str!("templates/rosecd.service");
 const TEMPLATE_SOCKET: &str = include_str!("templates/rosecd.socket");
 const TEMPLATE_DBUS_SECRETS: &str = include_str!("templates/org.freedesktop.secrets.service");
@@ -22,10 +18,6 @@ const TEMPLATE_PORTAL_DBUS: &str =
 
 /// Placeholder in templates replaced with the resolved `rosecd` binary path.
 const ROSECD_PLACEHOLDER: &str = "@@ROSECD@@";
-
-// ---------------------------------------------------------------------------
-// File names we manage
-// ---------------------------------------------------------------------------
 
 const DBUS_SECRETS_SERVICE: &str = "org.freedesktop.secrets.service";
 const DBUS_KEYRING_SERVICE: &str = "org.gnome.keyring.service";
@@ -54,18 +46,10 @@ const KNOWN_PROVIDERS: &[(&str, &str)] = &[
     ),
 ];
 
-// ---------------------------------------------------------------------------
-// Template rendering
-// ---------------------------------------------------------------------------
-
 /// Render a template by replacing `@@ROSECD@@` with the binary path.
 fn render(template: &str, rosecd: &Path) -> String {
     template.replace(ROSECD_PLACEHOLDER, &rosecd.display().to_string())
 }
-
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
 
 /// Return `~/.local/share/dbus-1/services/`.
 fn user_dbus_services_dir() -> Result<PathBuf> {
@@ -153,10 +137,6 @@ fn detect_existing_providers() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// File utilities
-// ---------------------------------------------------------------------------
-
 /// Write a file, creating parent directories as needed. Returns `Ok(true)` if
 /// written, `Ok(false)` if the file already has identical contents (skip).
 fn install_file(path: &Path, contents: &str) -> Result<bool> {
@@ -206,10 +186,6 @@ fn run_systemctl(extra_args: &[&str]) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// gnome-keyring autostart masking
-// ---------------------------------------------------------------------------
 
 /// XDG autostart `.desktop` files that gnome-keyring ships.
 /// We create user-local overrides with `Hidden=true` to prevent the desktop
@@ -274,10 +250,6 @@ fn unmask_gnome_keyring_autostart() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// gnome-keyring systemd socket masking
-// ---------------------------------------------------------------------------
-
 /// The gnome-keyring systemd user socket unit to mask.
 const GNOME_KEYRING_SOCKET_UNIT: &str = "gnome-keyring-daemon.socket";
 
@@ -292,10 +264,6 @@ fn unmask_gnome_keyring_systemd_socket() -> Result<()> {
     run_systemctl(&["unmask", GNOME_KEYRING_SOCKET_UNIT]);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Public entry points
-// ---------------------------------------------------------------------------
 
 /// `rosec enable [flags]`
 pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
