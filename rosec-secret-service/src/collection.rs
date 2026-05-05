@@ -116,16 +116,17 @@ impl SecretCollection {
             .get_session_key(&session_path)
             .map_err(map_provider_error)?;
 
-        let plaintext: Vec<u8> = if let Some(key) = aes_key.as_deref() {
-            aes128_cbc_decrypt(key, &parameters, &secret_value)
-                .map_err(map_provider_error)?
-                .to_vec()
+        // Hold plaintext only in zeroizing buffers — no intermediate plain Vec.
+        let secret = if let Some(key) = aes_key.as_deref() {
+            let plaintext =
+                aes128_cbc_decrypt(key, &parameters, &secret_value).map_err(map_provider_error)?;
+            SecretBytes::from_zeroizing(plaintext)
         } else {
-            secret_value
+            SecretBytes::new(secret_value)
         };
 
         let mut secrets = HashMap::new();
-        secrets.insert("secret".to_string(), SecretBytes::new(plaintext));
+        secrets.insert("secret".to_string(), secret);
 
         let item = NewItem {
             label,

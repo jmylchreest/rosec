@@ -392,11 +392,15 @@ impl RosecManagement {
                         return Err(FdoError::Failed("pipe password is empty".to_string()));
                     }
 
-                    // Convert to Zeroizing<String> for auth_provider.
-                    let s = String::from_utf8(std::mem::take(&mut *buf)).map_err(|_| {
+                    // Validate UTF-8 against the zeroizing buffer; on success
+                    // copy into a Zeroizing<String>, on failure leave the bytes
+                    // in `buf` (which scrubs on drop). std::mem::take here
+                    // would move the Vec out of the Zeroizing wrapper and the
+                    // UTF-8 error path would drop a non-zeroizing Vec.
+                    let s = std::str::from_utf8(&buf).map_err(|_| {
                         FdoError::Failed("pipe password is not valid UTF-8".to_string())
                     })?;
-                    zeroize::Zeroizing::new(s)
+                    zeroize::Zeroizing::new(s.to_owned())
                 };
 
                 // Look up the password field ID for this provider.

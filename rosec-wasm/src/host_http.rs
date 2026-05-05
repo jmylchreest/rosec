@@ -147,7 +147,7 @@ fn http_request_impl(
         Some(h) => h,
         None => anyhow::bail!("invalid handle offset for http request: {http_req_offset}"),
     };
-    let req: extism_manifest::HttpRequest = serde_json::from_slice(data.memory_bytes(handle)?)?;
+    let mut req: extism_manifest::HttpRequest = serde_json::from_slice(data.memory_bytes(handle)?)?;
     data.memory_free(handle)?;
 
     let body_offset = input[1].unwrap_i64() as u64;
@@ -189,6 +189,16 @@ fn http_request_impl(
 
     for (k, v) in req.headers.iter() {
         r = r.header(k, v);
+    }
+
+    // Scrub the deserialised header values from the source struct now that
+    // they're copied into the builder. Authorization tokens otherwise linger
+    // in extism_manifest::HttpRequest's plain String allocations until the
+    // value drops at end of scope. Best-effort: we can't change the upstream
+    // type, but we can overwrite the contents in place via zeroize.
+    use zeroize::Zeroize as _;
+    for (_, v) in req.headers.iter_mut() {
+        v.zeroize();
     }
 
     let timeout = data.time_remaining();

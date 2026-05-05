@@ -575,17 +575,27 @@ impl WasmProvider {
                     || ProviderError::Unavailable("no offline cache available".to_string()),
                 )?;
 
-            let blob_b64 = String::from_utf8(plaintext.to_vec()).map_err(|e| {
+            // Validate UTF-8 against the zeroizing buffer; copy into the
+            // request struct only after success.  `plaintext.to_vec()` would
+            // produce a non-zeroizing intermediate Vec that drops without
+            // scrubbing on the UTF-8 error path.
+            let blob_str = std::str::from_utf8(plaintext.as_slice()).map_err(|e| {
                 ProviderError::Other(anyhow::anyhow!("cache blob is not valid UTF-8: {e}"))
             })?;
+            let blob_b64 = blob_str.to_owned();
 
             (blob_b64, cache_time)
         };
         // guard is dropped here — safe to await.
 
         let mut plugin = self.plugin.lock().await;
-        let restore_req = RestoreCacheRequest { blob_b64 };
-        let resp: SimpleResponse = self.call_json(&mut plugin, "restore_cache", &restore_req)?;
+        let mut restore_req = RestoreCacheRequest { blob_b64 };
+        // Use the *sensitive* call helper so the serialised JSON (which
+        // contains the entire decrypted vault as base64) is zeroized after
+        // dispatch.  Then explicitly scrub the source String we own.
+        let resp: SimpleResponse =
+            self.call_json_sensitive(&mut plugin, "restore_cache", &restore_req)?;
+        restore_req.blob_b64.zeroize();
 
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));

@@ -42,8 +42,8 @@ toml = "1.0.3"
 sha1 = "0.10.6"
 sha2 = "0.10.9"
 data-encoding = "2.8.0"
-aes = "0.8.4"
-cbc = { version = "0.1.2", features = ["alloc", "std"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
+cbc = { version = "0.1.2", features = ["alloc", "std", "zeroize"] }
 hmac = "0.12.1"
 hkdf = "0.12.4"
 base64 = "0.22.1"
