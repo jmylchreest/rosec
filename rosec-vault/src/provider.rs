@@ -59,7 +59,6 @@ struct UnlockedState {
     mac_key: Zeroizing<[u8; 32]>,
     /// The current wrapping entries (preserved for re-saving).
     wrapping_entries: Vec<WrappingEntry>,
-    /// Decrypted vault data.
     data: VaultData,
     /// Whether in-memory data has been modified since last save.
     dirty: bool,
@@ -115,7 +114,6 @@ impl LocalVault {
             )));
         }
 
-        // Try each wrapping entry until one succeeds.
         let mut vault_key = None;
         for entry in &vault_file.wrapping_entries {
             match crypto::unwrap_vault_key(entry, password) {
@@ -212,7 +210,6 @@ impl LocalVault {
         Ok(())
     }
 
-    /// Return the on-disk path of this vault file.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -253,10 +250,6 @@ impl std::fmt::Debug for LocalVault {
             .finish()
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Static attribute catalogue for LocalVault
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Helper: build an `AttributeDescriptor` with `'static` lifetimes.
 const fn desc(
@@ -497,7 +490,6 @@ impl Provider for LocalVault {
         let mut guard = self.state.write().await;
         let state = guard.as_mut().ok_or(ProviderError::Locked)?;
 
-        // Find the wrapping entry that the old password unlocks.
         let old_entry_idx = state
             .wrapping_entries
             .iter()
@@ -509,10 +501,8 @@ impl Provider for LocalVault {
             })
             .ok_or(ProviderError::AuthFailed)?;
 
-        // Inherit the label from the old entry.
         let label = state.wrapping_entries[old_entry_idx].label.clone();
 
-        // Create a new wrapping entry for the new password with the same vault key.
         let new_entry = crypto::wrap_vault_key(&state.vault_key, new_password.as_bytes(), label)
             .map_err(|e| ProviderError::Other(e.into()))?;
 
@@ -747,7 +737,6 @@ impl Provider for LocalVault {
             .items
             .iter()
             .filter(|item| {
-                // Must have a private_key secret present.
                 if !item.secrets.contains_key("private_key") {
                     return false;
                 }
@@ -775,7 +764,6 @@ impl Provider for LocalVault {
                     .cloned()
                     .filter(|v| !v.is_empty());
 
-                // SSH host patterns from custom.ssh_host / custom.ssh-host attributes.
                 let ssh_hosts: Vec<String> = ["custom.ssh_host", "custom.ssh-host"]
                     .iter()
                     .filter_map(|key| item.attributes.get(*key))
@@ -785,14 +773,12 @@ impl Provider for LocalVault {
                     .map(String::from)
                     .collect();
 
-                // SSH username from custom.ssh_user / custom.ssh-user.
                 let ssh_user = ["custom.ssh_user", "custom.ssh-user"]
                     .iter()
                     .filter_map(|key| item.attributes.get(*key))
                     .map(|v| v.trim().to_string())
                     .find(|s| !s.is_empty());
 
-                // Require confirmation from custom.ssh_confirm / custom.ssh-confirm.
                 let require_confirm = ["custom.ssh_confirm", "custom.ssh-confirm"]
                     .iter()
                     .filter_map(|key| item.attributes.get(*key))
@@ -1331,7 +1317,6 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Lock and unlock with the original password still works
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
@@ -1358,14 +1343,12 @@ mod tests {
         let entries = provider.list_passwords().await.unwrap();
         assert_eq!(entries.len(), 1);
 
-        // Lock and try the removed password — should fail
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new("second".to_string())))
             .await;
         assert!(result.is_err());
 
-        // Original still works
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new("master".to_string())))
             .await;
@@ -1415,7 +1398,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Try to add another password with the same label — should fail
         let result = provider
             .add_password(b"other-pw", "login".to_string())
             .await;
@@ -1441,10 +1423,6 @@ mod tests {
             .await;
         assert!(result.is_err());
     }
-
-    // -----------------------------------------------------------------------
-    // change_password tests
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn change_password_happy_path() {
@@ -1472,7 +1450,6 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Old password should no longer work.
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new(
@@ -1528,7 +1505,6 @@ mod tests {
         assert_eq!(entries_before.len(), 1);
         assert_eq!(entries_before[0].1, Some("master".to_string()));
 
-        // Change password — the new entry should inherit "master" label.
         provider
             .change_password(
                 Zeroizing::new("master-pw".to_string()),
@@ -1568,11 +1544,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Should still have 2 entries.
         let entries = provider.list_passwords().await.unwrap();
         assert_eq!(entries.len(), 2);
 
-        // Lock and verify both passwords work.
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new(
@@ -1589,7 +1563,6 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Old master should fail.
         provider.lock().await.unwrap();
         let result = provider
             .unlock(UnlockInput::Password(Zeroizing::new(
