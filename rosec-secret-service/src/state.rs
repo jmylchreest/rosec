@@ -1,8 +1,31 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
+use std::process::{Child, ExitStatus};
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// Cap how long we'll wait for a prompt subprocess. 120 s is comfortably past
+/// any human interaction window; beyond that the prompt is hung and we kill
+/// it rather than leaking a child + tying up the prompt mutex forever.
+const PROMPT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wait for `child` to exit, capped at [`PROMPT_WAIT_TIMEOUT`]. On timeout,
+/// SIGKILL the child and return an error.
+fn wait_with_timeout(child: &mut Child) -> std::io::Result<ExitStatus> {
+    use wait_timeout::ChildExt as _;
+    match child.wait_timeout(PROMPT_WAIT_TIMEOUT)? {
+        Some(status) => Ok(status),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("prompt did not exit within {PROMPT_WAIT_TIMEOUT:?}"),
+            ))
+        }
+    }
+}
 
 use rosec_core::config::{Config, PromptConfig};
 
@@ -625,8 +648,7 @@ impl ServiceState {
                 line
             };
 
-            let status = child
-                .wait()
+            let status = wait_with_timeout(&mut child)
                 .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS wait error: {e}")))?;
 
             if !status.success() || password.is_empty() {
@@ -703,8 +725,7 @@ impl ServiceState {
                         line
                     };
 
-                    let status = child
-                        .wait()
+                    let status = wait_with_timeout(&mut child)
                         .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
 
                     if !status.success() {
@@ -884,8 +905,7 @@ impl ServiceState {
             line
         };
 
-        let status = child
-            .wait()
+        let status = wait_with_timeout(&mut child)
             .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
 
         if !status.success() {

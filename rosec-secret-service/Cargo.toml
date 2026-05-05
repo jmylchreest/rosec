@@ -29,3 +29,4 @@ base64 = { workspace = true }
 futures-util = { workspace = true }
 libc = { workspace = true }
 wildmatch = { workspace = true }
+wait-timeout = { workspace = true }

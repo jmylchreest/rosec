@@ -17,7 +17,6 @@
 //! 5. Drop of [`SshManager`] unmounts the FUSE filesystem and closes the agent
 //!    socket (both handled by their respective RAII wrappers).
 
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, UNIX_EPOCH};
@@ -363,7 +362,7 @@ pub fn build_confirm_callback(
                 "theme": theme_json,
             });
 
-            let mut cmd = std::process::Command::new(&program);
+            let mut cmd = tokio::process::Command::new(&program);
             // SAFETY: pre_exec runs after fork() in the child process.
             // setsid() is async-signal-safe and has no preconditions.
             unsafe {
@@ -374,7 +373,8 @@ pub fn build_confirm_callback(
             }
             cmd.stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::inherit());
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true);
 
             if !has_display {
                 cmd.arg("--tty");
@@ -393,20 +393,20 @@ pub fn build_confirm_callback(
             };
 
             if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write as _;
-                if let Err(e) = stdin.write_all(request_json.to_string().as_bytes()) {
+                use tokio::io::AsyncWriteExt as _;
+                if let Err(e) = stdin.write_all(request_json.to_string().as_bytes()).await {
                     warn!("rosec-prompt stdin write error: {e}, denying sign");
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    let _ = child.kill().await;
                     return false;
                 }
                 // stdin dropped here → EOF sent to child
             }
 
-            // We only care about the exit code — stdout is `{}` for
-            // confirm-mode dialogs.
-            match child.wait() {
-                Ok(status) => {
+            // Bound the wait so a hung prompt cannot pin the SSH agent
+            // forever. 120 s is well past any human interaction window.
+            const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+            match tokio::time::timeout(CONFIRM_TIMEOUT, child.wait()).await {
+                Ok(Ok(status)) => {
                     if status.success() {
                         true
                     } else {
@@ -418,8 +418,17 @@ pub fn build_confirm_callback(
                         false
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!("rosec-prompt wait error: {e}, denying sign");
+                    false
+                }
+                Err(_) => {
+                    warn!(
+                        fingerprint = %fingerprint,
+                        item = %item_name,
+                        "rosec-prompt did not exit within {CONFIRM_TIMEOUT:?}, denying sign"
+                    );
+                    let _ = child.kill().await;
                     false
                 }
             }
