@@ -18,6 +18,7 @@ const KEY_LEN: usize = 32;
 const IV_LEN: usize = 16;
 const MAC_KEY_LEN: usize = 32;
 
+/// Errors from cryptographic operations within the vault.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     #[error("invalid base64 in KDF salt: {0}")]
@@ -150,6 +151,7 @@ pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, &'sta
         .map_err(|_| "decryption failed")
 }
 
+/// Compute HMAC-SHA256 over `data` using `mac_key`.
 pub fn compute_hmac(mac_key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha256::new_from_slice(mac_key).map_err(|_| CryptoError::HmacKey)?;
     mac.update(data);

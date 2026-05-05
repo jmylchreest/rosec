@@ -96,6 +96,7 @@ impl std::fmt::Debug for VaultItemData {
     }
 }
 
+/// Container for all vault items (decrypted form).
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct VaultData {
     pub items: Vec<VaultItemData>,

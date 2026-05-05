@@ -210,6 +210,7 @@ impl LocalVault {
         Ok(())
     }
 
+    /// On-disk path of this vault file.
     pub fn path(&self) -> &Path {
         &self.path
     }

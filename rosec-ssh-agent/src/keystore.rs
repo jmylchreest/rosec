@@ -25,6 +25,7 @@ pub struct KeyEntry {
     /// Human-readable name of the vault item this key came from.
     pub item_name: String,
 
+    /// Provider that owns this key.
     pub provider_id: String,
 
     /// The private key (zeroized on drop via `ssh_key::PrivateKey`).

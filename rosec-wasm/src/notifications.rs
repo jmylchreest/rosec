@@ -41,10 +41,16 @@ pub struct NotificationsHandle {
 
 /// Configuration for the notifications background task.
 pub struct NotificationsConfig {
+    /// Provider ID (used in log messages).
     pub provider_id: String,
+    /// WASM plugin handle for `get_notification_config` and `parse_notification`
+    /// guest calls.
     pub plugin: Arc<Mutex<extism::Plugin>>,
+    /// Readiness probes evaluated before each (re)connect attempt.
     pub readiness_probes: Vec<crate::protocol::ReadinessProbe>,
+    /// Allowed hosts for probe evaluation.
     pub allowed_hosts: Vec<String>,
+    /// TLS mode applied to readiness-probe connections.
     pub tls_mode_probe: rosec_core::config::TlsMode,
     /// Invoked when the guest classifies a frame as `Sync`.
     pub on_sync_nudge: Option<Arc<dyn Fn() + Send + Sync + 'static>>,

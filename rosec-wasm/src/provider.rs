@@ -41,9 +41,11 @@ const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 pub struct WasmProviderConfig {
     /// Unique provider ID (from config file).
     pub id: String,
+    /// Human-readable provider name.
     pub name: String,
     /// Provider kind string (e.g. `"bitwarden-wasm"`).
     pub kind: String,
+    /// Filesystem path of the `.wasm` plugin file.
     pub wasm_path: String,
     /// Allowed HTTP hosts the plugin may contact (e.g. `["*.bitwarden.com"]`).
     pub allowed_hosts: Vec<String>,
