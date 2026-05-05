@@ -96,10 +96,8 @@ impl SecretPrompt {
         let prompt_path = self.path.clone();
         let provider_id = self.provider_id.clone();
 
-        // Resolve the calling process so the prompt can display it.
         let caller = resolve_caller_info(&header, conn).await;
 
-        // Determine a human-readable label for the prompt dialog.
         let label = state
             .provider_by_id(&provider_id)
             .map(|b| format!("Unlock {}", b.name()))
@@ -173,9 +171,8 @@ async fn run_prompt_task(
         state.finish_prompt(prompt_path);
     }
 
-    // ── Prompt serialization (gnome-keyring unlock_prompt_queue pattern) ──
-    //
-    // Acquire a per-provider mutex so that only one prompt GUI subprocess runs
+    // Prompt serialization mirrors gnome-keyring's unlock_prompt_queue:
+    // acquire a per-provider mutex so that only one prompt GUI subprocess runs
     // at a time.  If another client's prompt is already in progress for this
     // provider, we wait for it to finish.  When we acquire the lock, we check
     // whether the provider is still locked — if the first prompt succeeded,
@@ -283,7 +280,6 @@ async fn run_prompt_task(
                 return;
             }
             Err(rosec_core::ProviderError::TwoFactorRequired { methods }) => {
-                // ── 2FA required — launch a second prompt for the token ──
                 tracing::debug!(
                     provider = %provider_id,
                     "two-factor authentication required, prompting for 2FA code"
@@ -300,7 +296,6 @@ async fn run_prompt_task(
                     return;
                 }
 
-                // Build fields for the 2FA prompt.
                 let mut two_fa_fields: Vec<serde_json::Value> = Vec::new();
 
                 // If multiple methods, add a choice selector.
@@ -339,7 +334,6 @@ async fn run_prompt_task(
                     "placeholder": "",
                 }));
 
-                // Launch the 2FA prompt via spawn_prompt_fields.
                 let state_2fa = Arc::clone(&state);
                 let prompt_path_2fa = prompt_path.clone();
                 let provider_name = provider.name().to_string();
@@ -381,7 +375,6 @@ async fn run_prompt_task(
                     Ok(m) => m,
                 };
 
-                // Resolve the chosen 2FA method.
                 let final_method_id = if chosen_method_id.is_empty() {
                     // Multiple methods — resolve from the choice field.
                     let choice_str = two_fa_map
@@ -397,7 +390,6 @@ async fn run_prompt_task(
                     chosen_method_id
                 };
 
-                // Build the credential map with password + 2FA fields.
                 let mut cred_map: HashMap<String, Zeroizing<String>> = HashMap::new();
                 cred_map.insert(pw_field_id, password_for_sweep.clone());
                 cred_map.insert(
@@ -408,7 +400,6 @@ async fn run_prompt_task(
                     cred_map.insert("__2fa_token".to_string(), token_val.clone());
                 }
 
-                // Retry authentication with 2FA.
                 match state.try_auth_provider(&provider_id, cred_map).await {
                     Ok(()) => {
                         on_unlock_success(

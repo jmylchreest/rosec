@@ -43,10 +43,8 @@ const MODP1024_GENERATOR: u64 = 2;
 /// Expected byte length of a MODP-1024 public key (1024 bits = 128 bytes).
 const DH_KEY_BYTES: usize = 128;
 
-/// AES-128 key length in bytes.
 const AES128_KEY_BYTES: usize = 16;
 
-/// AES block/IV size in bytes.
 const AES_BLOCK_BYTES: usize = 16;
 
 /// Session encryption algorithms defined by the Secret Service specification.
@@ -89,7 +87,6 @@ pub fn generate_dh_keypair() -> Result<DhKeypair, ProviderError> {
     let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
     let g = BigUint::from(MODP1024_GENERATOR);
 
-    // Generate 128 random bytes for the private key
     let mut priv_bytes = Zeroizing::new([0u8; DH_KEY_BYTES]);
     rand::RngExt::fill(&mut rand::rng(), priv_bytes.as_mut_slice());
     let private = BigUint::from_bytes_be(priv_bytes.as_ref());

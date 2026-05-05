@@ -285,7 +285,6 @@ impl SecretService {
                             }
                         }
                     }
-                    // All relevant providers are unlocked.
                     Ok(None)
                 }
             })
@@ -293,13 +292,11 @@ impl SecretService {
 
         match prompt_provider_opt {
             None => {
-                // All relevant providers unlocked — no prompt needed.
                 debug!("Unlock: all relevant providers already unlocked");
                 Ok((objects, to_object_path("/")))
             }
             Some(provider_id) => {
                 debug!(provider = %provider_id, "Unlock: allocating prompt for locked provider");
-                // Allocate a unique prompt path and register the object.
                 let prompt_path = self.state.allocate_prompt(&provider_id);
                 let prompt_obj =
                     SecretPrompt::new(prompt_path.clone(), provider_id, Arc::clone(&self.state));
@@ -308,7 +305,6 @@ impl SecretService {
                     .at(prompt_path.clone(), prompt_obj)
                     .await
                     .map_err(map_zbus_error)?;
-                // Return empty unlocked list + the prompt path.
                 Ok((vec![], to_object_path(&prompt_path)))
             }
         }

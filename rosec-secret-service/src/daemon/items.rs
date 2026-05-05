@@ -71,7 +71,6 @@ impl RosecItems {
             .parse()
             .map_err(|e: String| FdoError::InvalidArgs(e))?;
 
-        // Check the provider supports this item type.
         let supported = write_provider.supported_item_types();
         if !supported.is_empty() && !supported.contains(&parsed_type) {
             return Err(FdoError::NotSupported(format!(
@@ -79,7 +78,6 @@ impl RosecItems {
             )));
         }
 
-        // Build the NewItem with typed secrets.
         let secret_map: HashMap<String, SecretBytes> = secrets
             .into_iter()
             .map(|(k, v)| (k, SecretBytes::new(v)))
@@ -208,7 +206,6 @@ impl RosecItems {
         Ok(())
     }
 
-    /// Delete an item by its D-Bus object path.
     async fn delete_item(
         &self,
         item_path: &str,

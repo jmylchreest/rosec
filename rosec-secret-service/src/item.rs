@@ -27,7 +27,6 @@ pub struct ItemState {
     pub tokio_handle: tokio::runtime::Handle,
     /// Reference to service state for cache updates and prompt allocation.
     pub items_cache: Arc<std::sync::Mutex<HashMap<String, ItemMeta>>>,
-    /// Service state — needed for prompt allocation on locked-provider operations.
     pub service_state: Arc<crate::state::ServiceState>,
 }
 
@@ -120,7 +119,6 @@ impl SecretItem {
             .state
             .tokio_handle
             .spawn(async move {
-                // Try return_attr resolution first.
                 match provider.get_item_attributes(&item_id).await {
                     Ok(ia) => {
                         for pattern in &patterns {
@@ -411,7 +409,6 @@ mod tests {
         };
         let item = SecretItem::new(state);
 
-        // Confirm it's locked via the D-Bus property.
         assert!(item.locked());
 
         // Simulate cache rebuild after provider unlocks.
@@ -420,10 +417,8 @@ mod tests {
             cache.insert(path, meta(false));
         }
 
-        // Now the item should report unlocked.
         assert!(!item.locked());
 
-        // And GetSecret should succeed.
         let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),

@@ -70,7 +70,6 @@ impl PromptManager {
             .and_then(|mut map| map.remove(prompt_path))
     }
 
-    /// Store the child PID for an active prompt.
     pub fn set_pid(&self, prompt_path: &str, pid: u32) {
         if let Ok(mut map) = self.active.lock()
             && let Some(entry) = map.get_mut(prompt_path)

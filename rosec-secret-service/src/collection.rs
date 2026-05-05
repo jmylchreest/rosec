@@ -150,7 +150,6 @@ impl SecretCollection {
 
         if is_locked {
             debug!(provider = %provider_id, "write provider is locked, deferring CreateItem behind prompt");
-            // Stash the operation and return a prompt path.
             let op = PendingOperation::CreateItem {
                 provider_id: provider_id.clone(),
                 item,

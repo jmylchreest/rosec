@@ -185,7 +185,6 @@ impl ServiceState {
         self.prompts.update_config(new_config.prompt);
     }
 
-    /// Return a snapshot of the current live config.
     pub fn live_config(&self) -> Config {
         self.live_config
             .read()
@@ -201,7 +200,6 @@ impl ServiceState {
         self.prompts.config()
     }
 
-    /// Return the `return_attr` patterns for a given provider ID.
     fn return_attr_patterns(&self, provider_id: &str) -> Vec<String> {
         self.registry.return_attr_patterns(provider_id)
     }
@@ -225,7 +223,6 @@ impl ServiceState {
             Err(e) => return Err(e),
         };
 
-        // Find the first secret_name that matches any return_attr pattern.
         for pattern in &patterns {
             let wm = WildMatch::new(pattern);
             if let Some(matched) = attr_names.iter().find(|n| wm.matches(n)) {
@@ -287,17 +284,14 @@ impl ServiceState {
         Ok((provider, item_id))
     }
 
-    /// Return all providers in configured order.
     pub fn providers_ordered(&self) -> Vec<Arc<dyn Provider>> {
         self.registry.ordered()
     }
 
-    /// Look up a provider by its ID.
     pub fn provider_by_id(&self, id: &str) -> Option<Arc<dyn Provider>> {
         self.registry.by_id(id)
     }
 
-    /// Return a snapshot of the current provider ordering (config-driven).
     pub fn provider_order_snapshot(&self) -> Vec<String> {
         self.registry.order_snapshot()
     }
@@ -361,7 +355,6 @@ impl ServiceState {
         self.tokio_handle.spawn(fut)
     }
 
-    /// Return the number of currently registered providers.
     pub fn provider_count(&self) -> usize {
         self.registry.count()
     }
@@ -428,7 +421,6 @@ impl ServiceState {
         self.prompts.take_pending_operation(prompt_path)
     }
 
-    /// Store the child PID for an active prompt.
     pub fn set_prompt_pid(&self, prompt_path: &str, pid: u32) {
         self.prompts.set_pid(prompt_path, pid);
     }
@@ -452,7 +444,6 @@ impl ServiceState {
         self.deregister_prompt_object(prompt_path);
     }
 
-    /// Remove a `SecretPrompt` D-Bus object from the object server.
     fn deregister_prompt_object(&self, prompt_path: &str) {
         let conn = self.conn();
         let path = prompt_path.to_string();
@@ -486,7 +477,6 @@ impl ServiceState {
         self.locks.mark_unlocked();
     }
 
-    /// Record that a specific provider has been unlocked.
     pub(crate) fn mark_provider_unlocked(&self, provider_id: &str) {
         self.locks.mark_provider_unlocked(provider_id);
     }
@@ -496,7 +486,6 @@ impl ServiceState {
         self.locks.mark_all_locked();
     }
 
-    /// Clear the unlock timestamp for a specific provider.
     pub(crate) fn clear_provider_unlocked(&self, provider_id: &str) {
         self.locks.clear_provider_unlocked(provider_id);
     }
@@ -516,7 +505,6 @@ impl ServiceState {
         self.locks.is_max_unlocked_expired(max_minutes)
     }
 
-    /// Returns `true` if a specific provider has been unlocked longer than `max_minutes`.
     pub fn is_provider_max_unlocked_expired(&self, provider_id: &str, max_minutes: u64) -> bool {
         self.locks
             .is_provider_max_unlocked_expired(provider_id, max_minutes)
@@ -588,8 +576,6 @@ impl ServiceState {
 
         let prompt_path = prompt_path.to_string();
         let provider_id_str = provider_id.to_string();
-
-        // ── 1. SSH_ASKPASS ─────────────────────────────────────────────────
         if let Ok(askpass) = std::env::var("SSH_ASKPASS")
             && !askpass.is_empty()
         {
@@ -650,8 +636,6 @@ impl ServiceState {
             }
             return Ok(password);
         }
-
-        // ── Resolve rosec-prompt binary ────────────────────────────────────
         let PromptEnv {
             cfg: prompt_cfg,
             program,
@@ -659,10 +643,7 @@ impl ServiceState {
             has_tty,
             display_env,
         } = self.resolve_prompt_env();
-
-        // ── 2 & 3. GUI or TTY via rosec-prompt ────────────────────────────
         if has_display || has_tty {
-            // Build the JSON request that rosec-prompt expects.
             let json = build_prompt_json(provider_id_str, label, &prompt_cfg, caller);
 
             tracing::debug!(
@@ -692,7 +673,6 @@ impl ServiceState {
             }
 
             if !has_display {
-                // No GUI available — request TTY mode.
                 cmd.arg("--tty");
             }
 
@@ -774,8 +754,6 @@ impl ServiceState {
                 }
             }
         }
-
-        // ── 3a. Built-in TTY prompt (fallback) ───────────────────────────
         // Reached when either:
         // - rosec-prompt binary was not found but /dev/tty is available, or
         // - there is no display (TTY-only) and the binary is missing.
@@ -786,8 +764,6 @@ impl ServiceState {
         if has_tty {
             return self.builtin_tty_prompt(provider_id, label);
         }
-
-        // ── 4. Headless — cannot prompt ────────────────────────────────────
         tracing::debug!(
             %provider_id,
             "prompt dismissed: no display server, no controlling TTY, \
@@ -916,7 +892,6 @@ impl ServiceState {
             return Err(FdoError::Failed("prompt cancelled".to_string()));
         }
 
-        // Parse the JSON response into a map, wrapping all values in Zeroizing.
         let raw_map: HashMap<String, String> = serde_json::from_str(response_line.trim())
             .map_err(|e| FdoError::Failed(format!("rosec-prompt JSON parse: {e}")))?;
 
@@ -1228,7 +1203,6 @@ impl ServiceState {
             .collect();
 
         for (id, provider) in &providers {
-            // Skip already-unlocked providers.
             let locked = match provider.status().await {
                 Ok(s) => s.locked,
                 Err(_) => continue,
@@ -2177,8 +2151,6 @@ fn hash_id(input: &str) -> u64 {
             .unwrap_or_else(|_| unreachable!("SHA-256 output is always 32 bytes")),
     )
 }
-
-// ── Test-only helpers ────────────────────────────────────────────────────────
 #[cfg(test)]
 impl ServiceState {
     /// Insert an entry directly into the metadata cache (test helper).

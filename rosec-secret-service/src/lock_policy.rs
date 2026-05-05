@@ -87,7 +87,6 @@ impl LockPolicy {
         }
     }
 
-    /// Clear the unlock timestamp for a specific provider.
     pub fn clear_provider_unlocked(&self, provider_id: &str) {
         if let Ok(mut guard) = self.unlocked_since_map.lock() {
             guard.remove(provider_id);

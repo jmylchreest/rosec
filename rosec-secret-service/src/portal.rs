@@ -29,7 +29,6 @@ const PORTAL_SCHEMA: &str = "org.freedesktop.portal.Secret";
 /// The attribute key used to look up portal secrets by application ID.
 const PORTAL_ATTR_APP_ID: &str = "app_id";
 
-/// The attribute key for the XDG schema.
 const PORTAL_ATTR_SCHEMA: &str = "xdg:schema";
 
 /// Size of the per-app secret in bytes (matches gnome-keyring, oo7, and KWallet).
@@ -144,7 +143,6 @@ impl PortalSecret {
     /// accidentally regenerate a secret just because the vault was locked
     /// between the store and the next lookup.
     async fn find_portal_secret(&self, app_id: &str) -> Result<Option<PortalLookup>, FdoError> {
-        // Search by app_id alone for compatibility with all portal backends.
         let mut search_attrs = HashMap::new();
         search_attrs.insert(PORTAL_ATTR_APP_ID.to_string(), app_id.to_string());
 
@@ -192,7 +190,6 @@ impl PortalSecret {
             return Ok(Some(PortalLookup::Locked));
         }
 
-        // Try each candidate in rank order until one yields a readable secret.
         for (path, meta) in &entries {
             let Ok((provider, item_id)) = self.state.provider_and_id_for_path(path) else {
                 continue;
@@ -254,7 +251,6 @@ impl PortalSecret {
             FdoError::Failed("no write-capable provider available — add a local vault first".into())
         })?;
 
-        // Verify the provider is unlocked.
         let status = self
             .state
             .run_on_tokio({
@@ -581,7 +577,6 @@ mod tests {
         let owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(w) };
         let zvar_fd = zvariant::OwnedFd::from(owned);
 
-        // Replicate write_to_fd logic.
         {
             use std::io::Write;
             use std::os::unix::io::AsRawFd;
@@ -604,9 +599,6 @@ mod tests {
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         (fds[0], fds[1])
     }
-
-    // ── Additional mocks for compat tests ──────────────────────────────────────
-
     /// Mock provider that exposes secrets only via the `"password"` attribute,
     /// simulating gnome-keyring's single-secret-per-item model.
     #[derive(Debug)]
@@ -732,9 +724,6 @@ mod tests {
             tokio::runtime::Handle::current(),
         ))
     }
-
-    // ── Compat tests ───────────────────────────────────────────────────────────
-
     /// oo7-portal stores portal secrets with `app_id` only — no `xdg:schema`.
     /// Verify find_portal_secret still discovers them.
     #[tokio::test]

@@ -44,17 +44,10 @@ impl Drop for TermiosGuard {
 
 /// Read one line from `fd` with terminal echo disabled.
 ///
-/// Flushes any stale input (via `TCSAFLUSH`), saves the current `termios`,
-/// clears `ECHO`/`ECHONL`, reads a line, then restores the original settings.
-/// The returned string has the trailing newline stripped.
-///
-/// A `TermiosGuard` ensures the original terminal settings are restored even
-/// if the read is interrupted, the thread panics, or the function exits early
-/// via `?`.
-///
-/// The read buffer is `Zeroizing<Vec<u8>>` so the raw bytes are scrubbed on
-/// drop — no plain copy of the secret ever lingers on the heap.
-/// Read one line from `fd` with terminal echo disabled.
+/// Flushes any stale input (via `TCSAFLUSH`), saves and restores `termios` via
+/// `TermiosGuard` (so the terminal is left clean even on panic / early `?`).
+/// The returned string has the trailing newline stripped. The buffer is
+/// `Zeroizing<Vec<u8>>` so the raw bytes are scrubbed on drop.
 ///
 /// If `cancel_fd` is `Some(cfd)`, a `poll()` call races `fd` against `cfd`
 /// before the blocking `read`.  If `cfd` becomes readable (or gets a hangup /

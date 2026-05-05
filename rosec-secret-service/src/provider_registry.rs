@@ -60,7 +60,6 @@ impl ProviderRegistry {
             .collect()
     }
 
-    /// Look up a provider by its ID.
     pub fn by_id(&self, id: &str) -> Option<Arc<dyn Provider>> {
         self.providers
             .read()
@@ -69,7 +68,6 @@ impl ProviderRegistry {
             .map(Arc::clone)
     }
 
-    /// Snapshot of the current provider ordering.
     pub fn order_snapshot(&self) -> Vec<String> {
         self.provider_order
             .read()
