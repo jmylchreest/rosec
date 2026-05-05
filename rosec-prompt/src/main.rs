@@ -255,11 +255,12 @@ fn main() -> Result<()> {
     rosec_core::process::harden();
 
     // Internal screenshot helper — runs in a subprocess to avoid portal
-    // D-Bus session reuse issues.  Not user-facing.
+    // D-Bus session reuse issues.  Pipes the PNG bytes back via stdout,
+    // never lands on a parent-controlled disk path. Not user-facing.
     {
         let args: Vec<String> = std::env::args().collect();
-        if args.len() == 3 && args[1] == "--screenshot-helper" {
-            run_screenshot_helper(std::path::Path::new(&args[2]));
+        if args.len() == 2 && args[1] == "--screenshot-helper" {
+            run_screenshot_helper();
         }
     }
 
@@ -415,12 +416,40 @@ fn run_tty(request: PromptRequest) -> Result<()> {
         values.insert(field.id.clone(), value);
     }
 
-    // Emit JSON result — field values are temporary &str borrows, not copies.
+    // Emit JSON via the zeroizing-serialise path so the serialised bytes
+    // (which contain password material) never live in a non-zeroizing
+    // String allocation.
     let out: HashMap<&str, &str> = values
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    println!("{}", serde_json::to_string(&out)?);
+    emit_secret_json(&out)?;
+    Ok(())
+}
+
+/// Serialize `value` to JSON inside a `Zeroizing<Vec<u8>>` and write the
+/// bytes directly to fd 1 (stdout) via `libc::write`, bypassing Rust's
+/// stdout buffer so password / TOTP-seed material is never copied into a
+/// userspace allocation that wouldn't be scrubbed on drop.
+fn emit_secret_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(256));
+    serde_json::to_writer(&mut *buf, value)?;
+    buf.push(b'\n');
+    let mut written = 0usize;
+    while written < buf.len() {
+        // SAFETY: fd 1 is always valid; ptr is from a live Vec; len is bounded.
+        let n = unsafe {
+            libc::write(
+                1,
+                buf.as_ptr().add(written) as *const _,
+                buf.len() - written,
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        written += n as usize;
+    }
     Ok(())
 }
 
@@ -693,22 +722,14 @@ impl GuiApp {
     }
 }
 
-fn confirm_and_exit(state: &GuiApp) {
-    use std::io::Write as _;
+fn confirm_and_exit(state: &GuiApp) -> ! {
     let out: HashMap<&str, &str> = state
         .fields
         .iter()
         .map(|f| (f.spec.id.as_str(), f.value.as_str()))
         .collect();
-    match serde_json::to_string(&out) {
-        Ok(json) => {
-            // Must flush stdout explicitly — std::process::exit() bypasses
-            // Rust's stdio buffers and the JSON would be lost otherwise.
-            let _ = std::io::stdout().write_all(json.as_bytes());
-            let _ = std::io::stdout().write_all(b"\n");
-            let _ = std::io::stdout().flush();
-        }
-        Err(e) => eprintln!("output serialization error: {e}"),
+    if let Err(e) = emit_secret_json(&out) {
+        eprintln!("output emit error: {e}");
     }
     std::process::exit(0);
 }
@@ -1364,12 +1385,14 @@ impl QrApp {
     }
 }
 
-fn qr_emit_and_exit(uri: &str) {
-    use std::io::Write as _;
-    let json = format!("{{\"otpauth_uri\":{}}}", serde_json::json!(uri));
-    let _ = std::io::stdout().write_all(json.as_bytes());
-    let _ = std::io::stdout().write_all(b"\n");
-    let _ = std::io::stdout().flush();
+fn qr_emit_and_exit(uri: &str) -> ! {
+    // The otpauth:// URI contains the TOTP seed — sensitive. Route through
+    // emit_secret_json so the serialised bytes live only in a Zeroizing
+    // buffer.
+    let out = serde_json::json!({ "otpauth_uri": uri });
+    if let Err(e) = emit_secret_json(&out) {
+        eprintln!("output emit error: {e}");
+    }
     std::process::exit(0);
 }
 
@@ -1380,34 +1403,37 @@ fn qr_emit_and_exit(uri: &str) {
 /// connections process-globally, which causes the second in-process call
 /// to hang on some portal implementations (e.g. xdg-desktop-portal-hyprland).
 ///
-/// The child re-invokes the current binary with `--screenshot-helper <path>`
-/// and exits 0 on success (file written) or non-zero on failure.
-fn capture_screenshot(path: &std::path::Path) -> bool {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    match std::process::Command::new(exe)
+/// The child re-invokes the current binary with `--screenshot-helper`,
+/// captures stdout (PNG bytes), and returns the bytes on success.
+///
+/// Bytes flow parent←child through a kernel pipe; the parent never gives
+/// the child a writable filesystem path, so a malicious invocation of
+/// the same binary cannot trick it into clobbering a chosen file.
+fn capture_screenshot() -> Result<Vec<u8>, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let output = std::process::Command::new(exe)
         .arg("--screenshot-helper")
-        .arg(path)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
-        .status()
-    {
-        Ok(s) => s.success(),
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to spawn screenshot helper");
-            false
-        }
+        .output()
+        .map_err(|e| format!("spawn screenshot helper: {e}"))?;
+    if !output.status.success() {
+        return Err("screenshot helper exited non-zero".to_string());
     }
+    if output.stdout.is_empty() {
+        return Err("screenshot helper produced no output".to_string());
+    }
+    Ok(output.stdout)
 }
 
-/// Entry point for the `--screenshot-helper <path>` subprocess.
-/// Takes a screenshot via the XDG portal and writes it to the given path.
-/// Exits 0 on success, 1 on failure.
-fn run_screenshot_helper(dest: &std::path::Path) -> ! {
-    let dest = dest.to_path_buf();
+/// Entry point for the `--screenshot-helper` subprocess.
+///
+/// Asks the XDG desktop portal for a screenshot, reads the (portal-written)
+/// PNG file from disk, writes the raw bytes to stdout, removes the portal's
+/// file, and exits. Stdout is the only output channel back to the parent;
+/// the only on-disk artefact is the portal's own file (which we delete).
+fn run_screenshot_helper() -> ! {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1415,45 +1441,41 @@ fn run_screenshot_helper(dest: &std::path::Path) -> ! {
             eprintln!("screenshot-helper: tokio init failed: {e}");
             std::process::exit(1);
         });
-    let ok = rt.block_on(async {
-        let portal = match ashpd::desktop::screenshot::Screenshot::request()
+    let bytes = rt.block_on(async {
+        let portal = ashpd::desktop::screenshot::Screenshot::request()
             .interactive(false)
             .modal(false)
             .send()
             .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("screenshot-helper: portal request failed: {e}");
-                return false;
-            }
-        };
-        let response = match portal.response() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("screenshot-helper: portal response failed: {e}");
-                return false;
-            }
-        };
+            .map_err(|e| format!("portal request failed: {e}"))?;
+        let response = portal
+            .response()
+            .map_err(|e| format!("portal response failed: {e}"))?;
         let uri = response.uri().to_string();
         let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
-        if std::path::Path::new(file_path).exists() {
-            if let Err(e) = std::fs::copy(file_path, &dest) {
-                eprintln!("screenshot-helper: copy failed: {e}");
-                return false;
-            }
-            let _ = std::fs::remove_file(file_path);
-            true
-        } else {
-            eprintln!("screenshot-helper: file not found: {file_path}");
-            false
-        }
+        let bytes = std::fs::read(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
+        let _ = std::fs::remove_file(file_path);
+        Ok::<Vec<u8>, String>(bytes)
     });
-    std::process::exit(if ok { 0 } else { 1 });
+    match bytes {
+        Ok(bytes) => {
+            use std::io::Write as _;
+            if let Err(e) = std::io::stdout().write_all(&bytes) {
+                eprintln!("screenshot-helper: stdout write failed: {e}");
+                std::process::exit(1);
+            }
+            let _ = std::io::stdout().flush();
+            std::process::exit(0);
+        }
+        Err(msg) => {
+            eprintln!("screenshot-helper: {msg}");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn decode_qr_from_file(path: &std::path::Path) -> Option<String> {
-    let img = image::open(path).ok()?;
+fn decode_qr_from_bytes(bytes: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(bytes).ok()?;
     let gray = img.to_luma8();
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     let grids = prepared.detect_grids();
@@ -1479,43 +1501,34 @@ fn qr_update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
         QrMessage::WindowHidden => iced::Task::perform(
             async {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                let path =
-                    std::env::temp_dir().join(format!("rosec-qr-{}.png", std::process::id()));
-                // Wrap the screenshot in a timeout to prevent portal hangs.
+                // Cap at 10s — some portal impls hang indefinitely.
                 let captured = tokio::time::timeout(
                     Duration::from_secs(10),
-                    tokio::task::spawn_blocking(move || capture_screenshot(&path)),
+                    tokio::task::spawn_blocking(capture_screenshot),
                 )
                 .await;
-                let ok = match captured {
-                    Ok(Ok(true)) => true,
-                    Ok(Ok(false)) => false,
-                    Ok(Err(_)) => false,
+                let bytes = match captured {
+                    Ok(Ok(Ok(b))) => b,
+                    Ok(Ok(Err(msg))) => {
+                        return Err(format!(
+                            "Screenshot failed: {msg}. Ensure xdg-desktop-portal is running."
+                        ));
+                    }
+                    Ok(Err(_)) => {
+                        return Err("Screenshot helper panicked.".to_string());
+                    }
                     Err(_) => {
                         return Err("Screenshot timed out. Portal may be unresponsive.".to_string());
                     }
                 };
-                let path =
-                    std::env::temp_dir().join(format!("rosec-qr-{}.png", std::process::id()));
-                if !ok {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(
-                        "Screenshot failed. Ensure xdg-desktop-portal is running.".to_string()
-                    );
-                }
-                let result = decode_qr_from_file(&path);
-                let _ = std::fs::remove_file(&path);
-                match result {
+                match decode_qr_from_bytes(&bytes) {
                     Some(uri) => Ok(uri),
                     None => Err("No otpauth:// QR code found on screen. Try again.".to_string()),
                 }
             },
             QrMessage::ScanResult,
         ),
-        QrMessage::ScanResult(Ok(uri)) => {
-            qr_emit_and_exit(&uri);
-            iced::Task::none()
-        }
+        QrMessage::ScanResult(Ok(uri)) => qr_emit_and_exit(&uri),
         QrMessage::ScanResult(Err(msg)) => {
             state.scanning = false;
             state.status = msg;
