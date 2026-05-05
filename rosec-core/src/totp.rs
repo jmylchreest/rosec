@@ -79,7 +79,6 @@ pub fn parse_totp_input(raw: &[u8]) -> Result<TotpParams, TotpError> {
     } else if text.starts_with("steam://") {
         parse_steam_uri(text)
     } else {
-        // Bare base32 secret — use defaults.
         let secret = decode_base32(text)?;
         Ok(TotpParams {
             secret,
@@ -177,7 +176,6 @@ fn parse_steam_uri(uri: &str) -> Result<TotpParams, TotpError> {
 
 /// Decode a base32-encoded string (case-insensitive, ignoring padding/spaces).
 fn decode_base32(input: &str) -> Result<Zeroizing<Vec<u8>>, TotpError> {
-    // Normalise: uppercase, strip spaces and padding.
     let cleaned: Zeroizing<String> = Zeroizing::new(
         input
             .chars()

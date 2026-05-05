@@ -414,10 +414,6 @@ mod tests {
         assert!(contents.contains("id = \"bw1\""));
     }
 
-    // -----------------------------------------------------------------------
-    // Local provider (vault) config editing tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn add_local_provider_creates_file() {
         let dir = tmp();
@@ -517,10 +513,6 @@ mod tests {
         assert!(contents.contains("[[provider]]"));
         assert!(contents.contains("id = \"bw1\""));
     }
-
-    // -----------------------------------------------------------------------
-    // Enable / disable
-    // -----------------------------------------------------------------------
 
     #[test]
     fn disable_provider_adds_enabled_false() {

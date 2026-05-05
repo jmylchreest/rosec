@@ -89,7 +89,6 @@ fn select_by_newest(
 ) -> ItemMeta {
     // Callers always pass non-empty slices (grouped from a non-empty HashMap entry).
     debug_assert!(!candidates.is_empty(), "candidates must be non-empty");
-    // Use iterator destructuring so there is no index-based access.
     let (first, rest) = match candidates.split_first() {
         Some(pair) => pair,
         // Empty slice: debug_assert above catches this in test builds;

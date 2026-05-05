@@ -26,53 +26,29 @@ pub(crate) static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new((
 
 pub type Attributes = HashMap<String, String>;
 
-// ---------------------------------------------------------------------------
-// Reserved & rosec-managed attribute keys
-// ---------------------------------------------------------------------------
-//
-// All attribute names that rosec manages internally live here as named
-// constants.  `RESERVED_ATTRIBUTES` is built from them so the validation
-// list can never get out of sync.
-//
-// Struct-field attributes (`id`, `label`, `created`, `modified`) correspond
-// to first-class fields on `ItemMeta` / `VaultItemData` and must not appear
-// as user-supplied attribute keys.
-//
-// The `rosec:` namespace attributes are stamped by providers or the service
-// layer and carry rosec-specific semantics.  The `rosec:` prefix follows
-// the `xdg:schema` convention from the Secret Service spec, keeping them
-// distinct from arbitrary client-supplied attributes.
+// `id`, `label`, `created`, `modified` are first-class fields on ItemMeta /
+// VaultItemData and must not appear as user-supplied attribute keys.
+// The `rosec:` namespace mirrors the Secret Service spec's `xdg:schema`
+// convention, separating provider/service-stamped attributes from arbitrary
+// client-supplied ones.
 
-/// Item identifier (first-class struct field).
 pub const ATTR_ID: &str = "id";
-
-/// Item display label (first-class struct field).
 pub const ATTR_LABEL: &str = "label";
-
-/// Creation timestamp (first-class struct field).
 pub const ATTR_CREATED: &str = "created";
-
-/// Last-modified timestamp (first-class struct field).
 pub const ATTR_MODIFIED: &str = "modified";
 
-/// Which provider owns the item.  Stamped by the service layer and exposed
-/// as a public, searchable attribute on the D-Bus interface.
+/// Stamped by the service layer; exposed as a public, searchable attribute.
 pub const ATTR_PROVIDER: &str = "rosec:provider";
 
-/// Item type classification (e.g. "login", "note", "ssh-key").  Set by
-/// providers that have a concept of item types (Bitwarden, Bitwarden SM).
-/// Used by [`ItemType::from_attributes`] to determine the default secret
-/// attribute name.
+/// Item type classification (e.g. "login", "note", "ssh-key"). Used by
+/// [`ItemType::from_attributes`] to pick the default secret attribute name.
 pub const ATTR_TYPE: &str = "rosec:type";
 
-/// Boolean flag indicating the item has a TOTP seed.  Stamped by providers
-/// during item creation/sync when a `"totp"` secret attribute is present.
+/// Boolean flag stamped by providers when a `"totp"` secret attribute is present.
 /// Searchable via `SearchItems({"rosec:totp": "true"})`.
 pub const ATTR_TOTP: &str = "rosec:totp";
 
-/// Attribute names that cannot be set by users.
-///
-/// Built from the named constants above so the list stays in sync.
+/// Attribute names rejected from user input — kept in sync with the consts above.
 pub const RESERVED_ATTRIBUTES: &[&str] = &[
     ATTR_ID,
     ATTR_LABEL,
@@ -83,10 +59,6 @@ pub const RESERVED_ATTRIBUTES: &[&str] = &[
     ATTR_TOTP,
 ];
 
-// ---------------------------------------------------------------------------
-// Capability model
-// ---------------------------------------------------------------------------
-
 /// Declares what optional functionality a provider supports.
 ///
 /// Providers return a static slice from [`Provider::capabilities`].  The service
@@ -96,15 +68,11 @@ pub const RESERVED_ATTRIBUTES: &[&str] = &[
 /// `ProviderError::NotSupported` if the provider lacks the required capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
-    /// Provider can sync with a remote source ([`Provider::sync`]).
     Sync,
-    /// Provider supports write operations (create, update, delete items).
     Write,
-    /// Provider exposes SSH keys ([`Provider::list_ssh_keys`], [`Provider::get_ssh_private_key`]).
     Ssh,
-    /// Provider supports key-wrapping / multiple unlock passwords.
+    /// Supports multiple unlock passwords wrapping the same vault key.
     KeyWrapping,
-    /// Provider supports password changes ([`Provider::change_password`]).
     PasswordChange,
     /// Provider supports offline cache export/restore (`export_cache`, `restore_cache`).
     ///
@@ -168,7 +136,6 @@ impl ItemType {
         }
     }
 
-    /// The canonical `rosec:type` attribute value for this type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Generic => "generic",
@@ -180,7 +147,6 @@ impl ItemType {
         }
     }
 
-    /// The default secret attribute name for this item type.
     pub fn default_secret_attr(&self) -> &'static str {
         match self {
             Self::Generic | Self::Note | Self::Identity => "secret",
@@ -216,7 +182,6 @@ impl std::str::FromStr for ItemType {
 /// A request to create a new vault item.
 #[derive(Debug, Clone)]
 pub struct NewItem {
-    /// Display label (required, non-empty).
     pub label: String,
     /// Item type hint.
     ///
@@ -263,7 +228,6 @@ impl NewItem {
 /// All fields are optional — only provided values are changed.
 #[derive(Debug, Clone, Default)]
 pub struct ItemUpdate {
-    /// New display label (None = no change).
     pub label: Option<String>,
     /// New item type (None = no change).
     ///
@@ -575,10 +539,6 @@ pub enum ProviderError {
     Other(#[from] anyhow::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Attribute model
-// ---------------------------------------------------------------------------
-
 /// Describes a single attribute that a provider can produce for items.
 ///
 /// Providers return a static slice of these from [`Provider::available_attributes`]
@@ -629,10 +589,6 @@ pub struct ItemAttributes {
     pub secret_names: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// SSH agent types
-// ---------------------------------------------------------------------------
-
 /// Public metadata for a single SSH key exposed by a provider.
 ///
 /// Contains no private key material — use [`Provider::get_ssh_private_key`]
@@ -642,10 +598,7 @@ pub struct SshKeyMeta {
     /// Opaque item identifier, passed back to `get_ssh_private_key`.
     pub item_id: String,
 
-    /// Human-readable vault item name.
     pub item_name: String,
-
-    /// Provider that owns this key.
     pub provider_id: String,
 
     /// OpenSSH wire-format public key (the `authorized_keys` line), if known.
@@ -689,11 +642,7 @@ impl std::fmt::Debug for SshPrivateKeyMaterial {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Provider event callbacks
-// ---------------------------------------------------------------------------
-
-/// Callback type alias: a cheaply-cloneable, send-safe, zero-argument closure.
+/// Cheaply-cloneable zero-argument event callback.
 pub type CallbackFn = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// Optional callback fired when a sync completes.
@@ -711,9 +660,7 @@ pub type SyncSucceededFn = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 /// run safely.
 #[derive(Clone, Default)]
 pub struct ProviderCallbacks {
-    /// Fired immediately after a successful unlock.
     pub on_unlocked: Option<CallbackFn>,
-    /// Fired immediately after a successful lock.
     pub on_locked: Option<CallbackFn>,
     /// Fired after a sync completes successfully.
     ///
@@ -749,8 +696,6 @@ impl std::fmt::Debug for ProviderCallbacks {
             .finish()
     }
 }
-
-// ---------------------------------------------------------------------------
 
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
@@ -960,10 +905,6 @@ pub trait Provider: Send + Sync {
     async fn list_items(&self) -> Result<Vec<ItemMeta>, ProviderError>;
     async fn search(&self, attrs: &Attributes) -> Result<Vec<ItemMeta>, ProviderError>;
 
-    // -----------------------------------------------------------------------
-    // Attribute model
-    // -----------------------------------------------------------------------
-
     /// Static catalogue of all attributes this provider can produce.
     ///
     /// Returns a slice of [`AttributeDescriptor`]s describing every field this
@@ -1005,10 +946,6 @@ pub trait Provider: Send + Sync {
     /// All providers must implement this — there is no default.
     async fn get_secret_attr(&self, id: &str, attr: &str) -> Result<SecretBytes, ProviderError>;
 
-    // -----------------------------------------------------------------------
-    // SSH agent interface
-    // -----------------------------------------------------------------------
-
     /// List all SSH keys available from this provider (public metadata only).
     ///
     /// Gated behind [`Capability::Ssh`].  Returns one [`SshKeyMeta`] per
@@ -1035,10 +972,7 @@ pub trait Provider: Send + Sync {
     async fn get_ssh_private_key(&self, _id: &str) -> Result<SshPrivateKeyMaterial, ProviderError> {
         Err(ProviderError::NotSupported)
     }
-
-    // -----------------------------------------------------------------------
     // Write operations (gated behind Capability::Write)
-    // -----------------------------------------------------------------------
 
     /// Create a new item in this provider.
     ///
@@ -1084,10 +1018,7 @@ pub trait Provider: Send + Sync {
     async fn delete_item(&self, _id: &str) -> Result<(), ProviderError> {
         Err(ProviderError::NotSupported)
     }
-
-    // -----------------------------------------------------------------------
     // Key-wrapping / password management (gated behind Capability::KeyWrapping)
-    // -----------------------------------------------------------------------
 
     /// Add a password (wrapping entry) to this vault.
     ///
@@ -1123,10 +1054,6 @@ pub trait Provider: Send + Sync {
         Err(ProviderError::NotSupported)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
 
 /// Get the primary secret for an item using type-aware default attribute.
 ///
