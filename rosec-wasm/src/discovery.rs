@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use extism::{Manifest, PluginBuilder, Wasm};
 use minisign_verify::{PublicKey, Signature};
@@ -51,6 +52,10 @@ const USER_PLUGIN_SUBDIR: &str = "rosec/providers";
 pub struct DiscoveredPlugin {
     /// Absolute path to the `.wasm` file.
     pub wasm_path: PathBuf,
+    /// Raw `.wasm` bytes captured at discovery, after signature verification.
+    /// Held in an `Arc` so the WasmProvider can share the same buffer without
+    /// re-reading from disk (closing the verify-then-load TOCTOU window).
+    pub wasm_bytes: Arc<Vec<u8>>,
     /// The manifest returned by `plugin_manifest()`.
     pub manifest: PluginManifest,
 }
@@ -194,7 +199,7 @@ fn scan_directory(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let outcome = verify_plugin(&path, verify);
+        let (outcome, wasm_bytes) = verify_plugin(&path, verify);
         debug!(
             wasm = %wasm_name,
             path = %path.display(),
@@ -233,8 +238,22 @@ fn scan_directory(
             }
         }
 
-        // Step 2: probe the plugin (fuel-limited, size-capped).
-        match probe_plugin(&path) {
+        // wasm_bytes is Some after Verified or NotVerified.
+        let wasm_bytes = match wasm_bytes {
+            Some(b) => Arc::new(b),
+            None => {
+                warn!(
+                    wasm = %wasm_name,
+                    "internal error: verify_plugin returned no bytes for non-rejected outcome"
+                );
+                continue;
+            }
+        };
+
+        // Step 2: probe the plugin (fuel-limited, size-capped) using the
+        // bytes we just verified — never re-read from disk, so a swap between
+        // verify and probe cannot smuggle in a different module.
+        match probe_plugin(&path, &wasm_bytes) {
             Ok(manifest) => {
                 let kind = manifest.kind.clone();
                 if let Some(existing) = registry.plugins.get(&kind) {
@@ -267,6 +286,7 @@ fn scan_directory(
                     kind,
                     DiscoveredPlugin {
                         wasm_path: path,
+                        wasm_bytes,
                         manifest,
                     },
                 );
@@ -320,64 +340,86 @@ enum VerifyOutcome {
     Rejected { reason: String },
 }
 
-/// Check the signature of a `.wasm` file according to the configured policy.
-fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> VerifyOutcome {
+/// Read the wasm bytes once and check the signature according to the configured
+/// policy. Returns the bytes alongside the outcome so callers (probe + load) can
+/// reuse the same buffer — closing the verify-then-load TOCTOU window where the
+/// file on disk could be swapped between the signature check and the wasmtime
+/// `Wasm::file` re-read.
+fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> (VerifyOutcome, Option<Vec<u8>>) {
+    let wasm_bytes = match std::fs::read(wasm_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                VerifyOutcome::Rejected {
+                    reason: format!("failed to read WASM file '{}': {e}", wasm_path.display()),
+                },
+                None,
+            );
+        }
+    };
+
     if verify == WasmVerify::Disabled {
-        return VerifyOutcome::NotVerified { reason: "disabled" };
+        return (
+            VerifyOutcome::NotVerified { reason: "disabled" },
+            Some(wasm_bytes),
+        );
     }
 
     let sig_path = wasm_path.with_extension("wasm.minisig");
 
     if !sig_path.exists() {
-        return VerifyOutcome::Rejected {
-            reason: format!(
-                "signature file '{}' not found (set wasm_verify = \"disabled\" \
-                 to load unsigned plugins for local development)",
-                sig_path.display(),
-            ),
-        };
+        return (
+            VerifyOutcome::Rejected {
+                reason: format!(
+                    "signature file '{}' not found (set wasm_verify = \"disabled\" \
+                     to load unsigned plugins for local development)",
+                    sig_path.display(),
+                ),
+            },
+            None,
+        );
     }
 
     let pk = match PublicKey::from_base64(WASM_SIGNING_PUBKEY) {
         Ok(pk) => pk,
         Err(e) => {
-            return VerifyOutcome::Rejected {
-                reason: format!("invalid embedded public key: {e}"),
-            };
+            return (
+                VerifyOutcome::Rejected {
+                    reason: format!("invalid embedded public key: {e}"),
+                },
+                None,
+            );
         }
     };
 
     let signature = match Signature::from_file(&sig_path) {
         Ok(sig) => sig,
         Err(e) => {
-            return VerifyOutcome::Rejected {
-                reason: format!(
-                    "failed to read signature file '{}': {e}",
-                    sig_path.display()
-                ),
-            };
-        }
-    };
-
-    let wasm_bytes = match std::fs::read(wasm_path) {
-        Ok(b) => b,
-        Err(e) => {
-            return VerifyOutcome::Rejected {
-                reason: format!("failed to read WASM file '{}': {e}", wasm_path.display()),
-            };
+            return (
+                VerifyOutcome::Rejected {
+                    reason: format!(
+                        "failed to read signature file '{}': {e}",
+                        sig_path.display()
+                    ),
+                },
+                None,
+            );
         }
     };
 
     if let Err(e) = pk.verify(&wasm_bytes, &signature, false) {
-        return VerifyOutcome::Rejected {
-            reason: format!(
-                "signature verification failed for '{}': {e}",
-                wasm_path.display()
-            ),
-        };
+        return (
+            VerifyOutcome::Rejected {
+                reason: format!(
+                    "signature verification failed for '{}': {e}",
+                    wasm_path.display()
+                ),
+            },
+            None,
+        );
     }
 
-    VerifyOutcome::Verified
+    (VerifyOutcome::Verified, Some(wasm_bytes))
 }
 
 /// Load a `.wasm` file and call `plugin_manifest()` to extract its
@@ -387,19 +429,17 @@ fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> VerifyOutcome {
 /// - File size capped at [`MAX_WASM_SIZE_BYTES`] before loading.
 /// - Fuel-limited to [`PROBE_FUEL_LIMIT`] instructions to prevent
 ///   runaway execution in the WASM `start` section or `plugin_manifest`.
-fn probe_plugin(wasm_path: &Path) -> Result<PluginManifest, anyhow::Error> {
+fn probe_plugin(wasm_path: &Path, wasm_bytes: &[u8]) -> Result<PluginManifest, anyhow::Error> {
     // Size cap — reject before handing to wasmtime.
-    let file_size = std::fs::metadata(wasm_path)
-        .map_err(|e| anyhow::anyhow!("cannot stat '{}': {e}", wasm_path.display()))?
-        .len();
-    if file_size > MAX_WASM_SIZE_BYTES {
+    if wasm_bytes.len() as u64 > MAX_WASM_SIZE_BYTES {
         return Err(anyhow::anyhow!(
-            "'{}' is {file_size} bytes, exceeds limit of {MAX_WASM_SIZE_BYTES}",
+            "'{}' is {} bytes, exceeds limit of {MAX_WASM_SIZE_BYTES}",
             wasm_path.display(),
+            wasm_bytes.len(),
         ));
     }
 
-    let wasm = Wasm::file(wasm_path);
+    let wasm = Wasm::data(wasm_bytes.to_vec());
     // No allowed hosts for probing — plugin_manifest must not make HTTP requests.
     let manifest = Manifest::new([wasm]);
 

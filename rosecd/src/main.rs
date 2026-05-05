@@ -1769,6 +1769,7 @@ async fn build_single_provider(
                 name,
                 kind: kind.to_string(),
                 wasm_path: discovered.wasm_path.display().to_string(),
+                wasm_bytes: discovered.wasm_bytes.clone(),
                 allowed_hosts,
                 allowed_paths,
                 allowed_files,

@@ -45,8 +45,13 @@ pub struct WasmProviderConfig {
     pub name: String,
     /// Provider kind string (e.g. `"bitwarden-wasm"`).
     pub kind: String,
-    /// Filesystem path of the `.wasm` plugin file.
+    /// Filesystem path of the `.wasm` plugin file (kept for log messages and
+    /// recreate-after-trap; the live module is loaded from `wasm_bytes`).
     pub wasm_path: String,
+    /// Verified WASM module bytes captured at discovery time. Loading from
+    /// these bytes (rather than re-reading `wasm_path`) closes the
+    /// verify-then-load TOCTOU window.
+    pub wasm_bytes: Arc<Vec<u8>>,
     /// Allowed HTTP hosts the plugin may contact (e.g. `["*.bitwarden.com"]`).
     pub allowed_hosts: Vec<String>,
     /// Filesystem paths the WASI sandbox may access.
@@ -179,7 +184,8 @@ impl WasmProvider {
             }
         }
 
-        let wasm = Wasm::file(&config.wasm_path);
+        // Load from the verified bytes captured at discovery, not from disk.
+        let wasm = Wasm::data((*config.wasm_bytes).clone());
         let mut manifest = Manifest::new([wasm])
             .with_allowed_hosts(config.allowed_hosts.iter().cloned())
             .with_timeout(GUEST_CALL_TIMEOUT)
