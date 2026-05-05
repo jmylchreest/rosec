@@ -135,13 +135,22 @@ impl TotpApp {
     }
 }
 
-/// `wl-copy` forks a background daemon that owns the clipboard until another
-/// app copies — necessary because iced's clipboard API requires a live window
-/// surface, impractical for a prompt that exits immediately after copy.
+/// Write the TOTP code to the clipboard with auto-clear semantics.
+///
+/// `wl-copy --paste-once` is a one-shot: the clipboard is consumed by the
+/// first paste, after which the clipboard reverts to whatever was there
+/// before. iced's clipboard API needs a live window surface, which is
+/// impractical for a prompt that exits immediately after copy — hence the
+/// subprocess.
+///
+/// `xclip` has no equivalent flag, so we fork a detached helper that
+/// overwrites the selection with an empty string after `clear_after`.
 fn clipboard_write(text: &str) {
     use std::process::{Command, Stdio};
 
+    // Wayland: --paste-once clears the clipboard after the first paste.
     if let Ok(mut child) = Command::new("wl-copy")
+        .arg("--paste-once")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -155,6 +164,9 @@ fn clipboard_write(text: &str) {
         return;
     }
 
+    // X11 fallback: xclip has no auto-clear flag. Stamp the selection now,
+    // then schedule a delayed clear via a detached subprocess. 30 s matches
+    // the typical TOTP step.
     if let Ok(mut child) = Command::new("xclip")
         .args(["-selection", "clipboard"])
         .stdin(Stdio::piped())
@@ -167,6 +179,15 @@ fn clipboard_write(text: &str) {
             let _ = stdin.write_all(text.as_bytes());
         }
         let _ = child.wait();
+
+        // Detached `sh -c "sleep 30 && xclip -i ..."` — survives our exit.
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30 && printf '' | xclip -selection clipboard -i 2>/dev/null")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
 }
 
