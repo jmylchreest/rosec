@@ -44,6 +44,8 @@
 //! Otherwise (SSH session, TTY, headless) each field is collected via
 //! `rpassword` (hidden) or a plain `eprint!` + `read_line` (visible text).
 
+mod helpers;
+
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::sync::LazyLock;
@@ -54,6 +56,8 @@ use iced::widget::text_input;
 use rosec_core::config::PromptTheme;
 use serde::Deserialize;
 use zeroize::Zeroizing;
+
+use helpers::*;
 
 /// Stable ID for the first text input field so we can auto-focus it on startup.
 static FIRST_FIELD_ID: LazyLock<text_input::Id> = LazyLock::new(text_input::Id::unique);
@@ -475,74 +479,25 @@ fn run_gui(request: PromptRequest) -> Result<()> {
     let fields = request.effective_fields();
     let font_size = request.theme.font_size;
 
-    // Iced's default LineHeight is Relative(1.3).
-    let iced_line_h = |sz: f32| (sz * 1.3).ceil();
-    let input_h = iced_line_h(font_size) + 16.0; // text_input: padding(8) top+bottom + text
-    let btn_h = iced_line_h(font_size) + 16.0; // button: padding(8) top+bottom + text
+    let input_h = line_height(font_size) + 16.0; // text_input: padding(8) top+bottom + text
+    let btn_h = line_height(font_size) + 16.0; // button: padding(8) top+bottom + text
+    let content_w = content_width(420.0);
 
-    // Usable content width after outer padding (4) + inner padding (14).
-    // Iced draws borders *inside* the container bounds (overlapping the
-    // outer padding), so the border does not further reduce content width.
-    let content_w = 420.0 - (4.0 + 14.0) * 2.0;
+    let mut m = TextMeasurer::new(&request.theme, content_w);
 
-    // Use cosmic-text directly (same shaping engine iced uses) for exact
-    // glyph metrics — iced's own measurement API isn't exposed.
-    let mut font_system = cosmic_text::FontSystem::new();
-    let font_family = cosmic_font_family(&request.theme.font_family);
-
-    let title_h = measure_text_height(
-        &mut font_system,
-        &request.title,
-        font_size + 1.0,
-        content_w,
-        font_family,
-        cosmic_text::Weight::BOLD,
-    );
-
-    let info_h = if request.info.trim().is_empty() {
-        0.0
-    } else {
-        // Strip **bold** markers for measurement; leave _ alone since
-        // word-boundary italic markers are rare and the width difference
-        // between normal and italic glyphs is negligible for sizing.
-        let plain = request.info.replace("**", "");
-        measure_text_height(
-            &mut font_system,
-            &plain,
-            font_size - 1.0,
-            content_w,
-            font_family,
-            cosmic_text::Weight::NORMAL,
-        )
-    };
-
-    let msg_h = if request.message.is_empty() {
-        0.0
-    } else {
-        measure_text_height(
-            &mut font_system,
-            &request.message,
-            font_size,
-            content_w,
-            font_family,
-            cosmic_text::Weight::NORMAL,
-        )
-    };
+    let title_h = m.title(&request.title);
+    // Strip **bold** markers for measurement; leave _ alone since
+    // word-boundary italic markers are rare and the width difference
+    // between normal and italic glyphs is negligible for sizing.
+    let info_h = m.body_small(&request.info.replace("**", ""));
+    let msg_h = m.body(&request.message);
 
     // Sum per-field heights individually to account for label wrapping.
     let fields_total_h: f32 = fields
         .iter()
         .map(|f| {
             let label_text = if f.label.is_empty() { &f.id } else { &f.label };
-            let label_h = measure_text_height(
-                &mut font_system,
-                label_text,
-                font_size - 1.0,
-                content_w,
-                font_family,
-                cosmic_text::Weight::NORMAL,
-            );
-            label_h + 3.0 + input_h + 10.0 // label + spacing(3) + input + column gap
+            m.body_small(label_text) + 3.0 + input_h + 10.0
         })
         .sum();
 
@@ -1351,38 +1306,15 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
 /// content width, then we add the layout's fixed padding + spacing + button
 /// row to get total height.
 fn derive_qr_window_size(title: &str, status: &str, theme: &ThemeConfig) -> iced::Size {
-    let font_size = theme.font_size;
-    let iced_line_h = |sz: f32| (sz * 1.3).ceil();
-    let btn_h = iced_line_h(font_size) + 16.0; // padding(8) top+bottom + text
     let width = 380.0_f32;
-    // Usable width: 380 - outer padding(4) - inner padding(14), both sides.
-    let content_w = width - (4.0 + 14.0) * 2.0;
+    let btn_h = line_height(theme.font_size) + 16.0; // padding(8) top+bottom + text
+    let mut m = TextMeasurer::new(theme, content_width(width));
 
-    let mut font_system = cosmic_text::FontSystem::new();
-    let family = cosmic_font_family(&theme.font_family);
-
-    let title_h = measure_text_height(
-        &mut font_system,
-        title,
-        font_size + 1.0,
-        content_w,
-        family,
-        cosmic_text::Weight::BOLD,
-    );
-    let status_h = measure_text_height(
-        &mut font_system,
-        status,
-        font_size,
-        content_w,
-        family,
-        cosmic_text::Weight::NORMAL,
-    );
-
-    let height = (4.0 + 14.0) * 2.0  // outer + inner padding (top + bottom)
-        + title_h
-        + 10.0                       // spacing after title
-        + status_h
-        + 10.0                       // spacing after status
+    let height = (OUTER_PADDING + INNER_PADDING) * 2.0  // top + bottom padding
+        + m.title(title)
+        + 10.0                                          // spacing after title
+        + m.body(status)
+        + 10.0                                          // spacing after status
         + btn_h;
 
     iced::Size::new(width, height)
@@ -1702,309 +1634,4 @@ fn qr_view(state: &QrApp) -> iced::Element<'_, QrMessage> {
             shadow: iced::Shadow::default(),
         })
         .into()
-}
-
-/// Measure the pixel height of `text` rendered at `font_size` within a given
-/// `wrap_width`, using cosmic-text (the same shaping engine iced uses) for
-/// exact glyph measurement and word-wrap.
-///
-/// Iced uses `LineHeight::Relative(1.3)` by default, so the cosmic-text
-/// `Metrics` line height is set to `font_size * 1.3`.
-fn measure_text_height(
-    font_system: &mut cosmic_text::FontSystem,
-    text: &str,
-    font_size: f32,
-    wrap_width: f32,
-    family: cosmic_text::Family<'_>,
-    weight: cosmic_text::Weight,
-) -> f32 {
-    let line_height = (font_size * 1.3).ceil();
-    let metrics = cosmic_text::Metrics::new(font_size, line_height);
-    let mut buffer = cosmic_text::Buffer::new(font_system, metrics);
-    buffer.set_size(font_system, Some(wrap_width), None);
-    let attrs = cosmic_text::Attrs::new().family(family).weight(weight);
-    buffer.set_text(font_system, text, attrs, cosmic_text::Shaping::Advanced);
-    buffer.shape_until_scroll(font_system, false);
-
-    // Sum the line_height of every layout run.  Each run represents one
-    // visual line after word-wrapping.
-    let mut total = 0.0_f32;
-    for run in buffer.layout_runs() {
-        total += run.line_height;
-    }
-    // Empty text still occupies one line in iced's layout.
-    total.max(line_height)
-}
-
-/// Map the theme's font_family string to a `cosmic_text::Family` value,
-/// mirroring the logic in `font_from_string()` for iced fonts.
-fn cosmic_font_family(name: &str) -> cosmic_text::Family<'_> {
-    let name = name.trim();
-    if name.eq_ignore_ascii_case("monospace") {
-        return cosmic_text::Family::Monospace;
-    }
-    if name.eq_ignore_ascii_case("sans")
-        || name.eq_ignore_ascii_case("sans-serif")
-        || name.is_empty()
-    {
-        return cosmic_text::Family::SansSerif;
-    }
-    if name.eq_ignore_ascii_case("serif") {
-        return cosmic_text::Family::Serif;
-    }
-    cosmic_text::Family::Name(name)
-}
-
-/// Parse a string with `**bold**` and `_italic_` markers into iced rich_text spans.
-///
-/// Segments outside markers use `normal_color` and the base font.
-/// Bold segments (`**...**`) use `emphasis_color` and bold weight.
-/// Italic segments (`_..._`) use `normal_color` and italic style.
-///
-/// Italic `_` markers must be at word boundaries (start/end of string or
-/// adjacent to whitespace) to avoid false matches on paths like
-/// `/usr/share/signal_desktop`.
-fn parse_styled_spans<'a>(
-    input: &str,
-    size: u16,
-    normal_color: iced::Color,
-    emphasis_color: iced::Color,
-    base_font: iced::Font,
-) -> Vec<iced::widget::text::Span<'a, Message>> {
-    let bold_font = iced::Font {
-        weight: iced::font::Weight::Bold,
-        ..base_font
-    };
-    let italic_font = iced::Font {
-        style: iced::font::Style::Italic,
-        ..base_font
-    };
-
-    /// Find a `_` that sits at a word boundary: preceded by start-of-string or
-    /// whitespace, and followed by a non-whitespace character (opening), or
-    /// preceded by a non-whitespace character and followed by end-of-string or
-    /// whitespace (closing).  Returns the byte offset of a valid opening `_`.
-    fn find_italic_pair(s: &str) -> Option<(usize, usize)> {
-        let bytes = s.as_bytes();
-        for (i, &b) in bytes.iter().enumerate() {
-            if b != b'_' {
-                continue;
-            }
-            // Opening _: at start or after whitespace, followed by non-ws
-            let at_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
-            let next_non_ws = i + 1 < bytes.len() && !bytes[i + 1].is_ascii_whitespace();
-            if !(at_start && next_non_ws) {
-                continue;
-            }
-            // Search for closing _: before end or whitespace, after non-ws
-            for j in (i + 2)..bytes.len() {
-                if bytes[j] != b'_' {
-                    continue;
-                }
-                let prev_non_ws = !bytes[j - 1].is_ascii_whitespace();
-                let at_end = j + 1 == bytes.len() || bytes[j + 1].is_ascii_whitespace();
-                if prev_non_ws && at_end {
-                    return Some((i, j));
-                }
-            }
-        }
-        None
-    }
-
-    let mut spans = Vec::new();
-    let mut rest = input;
-
-    while !rest.is_empty() {
-        // Find the earliest marker: ** or boundary-aware _
-        let bold_pos = rest
-            .find("**")
-            .and_then(|start| rest[start + 2..].find("**").map(|end| (start, end)));
-        let ital_pos = find_italic_pair(rest);
-
-        let next = match (bold_pos, ital_pos) {
-            (Some((bs, _)), Some((is, _))) => {
-                if bs <= is {
-                    Some(("bold", bs))
-                } else {
-                    Some(("italic", is))
-                }
-            }
-            (Some((bs, _)), None) => Some(("bold", bs)),
-            (None, Some((is, _))) => Some(("italic", is)),
-            (None, None) => None,
-        };
-
-        match next {
-            Some(("bold", start)) => {
-                let end = rest[start + 2..].find("**").unwrap();
-                if start > 0 {
-                    spans.push(
-                        iced::widget::text::Span::new(rest[..start].to_string())
-                            .size(size)
-                            .color(normal_color)
-                            .font(base_font),
-                    );
-                }
-                let content = &rest[start + 2..start + 2 + end];
-                spans.push(
-                    iced::widget::text::Span::new(content.to_string())
-                        .size(size)
-                        .color(emphasis_color)
-                        .font(bold_font),
-                );
-                rest = &rest[start + 2 + end + 2..];
-            }
-            Some(("italic", start)) => {
-                let (_, close) = find_italic_pair(rest).unwrap();
-                if start > 0 {
-                    spans.push(
-                        iced::widget::text::Span::new(rest[..start].to_string())
-                            .size(size)
-                            .color(normal_color)
-                            .font(base_font),
-                    );
-                }
-                let content = &rest[start + 1..close];
-                spans.push(
-                    iced::widget::text::Span::new(content.to_string())
-                        .size(size)
-                        .color(normal_color)
-                        .font(italic_font),
-                );
-                rest = &rest[close + 1..];
-            }
-            _ => {
-                spans.push(
-                    iced::widget::text::Span::new(rest.to_string())
-                        .size(size)
-                        .color(normal_color)
-                        .font(base_font),
-                );
-                break;
-            }
-        }
-    }
-
-    spans
-}
-
-fn parse_color(value: &str, fallback: iced::Color) -> iced::Color {
-    iced::Color::parse(value.trim()).unwrap_or(fallback)
-}
-
-fn font_from_string(name: &str) -> iced::Font {
-    let name = name.trim();
-    if name.eq_ignore_ascii_case("monospace") {
-        return iced::Font::MONOSPACE;
-    }
-    if name.eq_ignore_ascii_case("sans") || name.eq_ignore_ascii_case("sans-serif") {
-        return iced::Font::DEFAULT;
-    }
-    if name.eq_ignore_ascii_case("serif") {
-        return iced::Font {
-            family: iced::font::Family::Serif,
-            ..iced::Font::DEFAULT
-        };
-    }
-    if !name.is_empty() {
-        // `iced::Font::with_name` requires `&'static str`.  We store the name
-        // in a process-wide OnceLock so the single allocation is reachable for
-        // the lifetime of the process instead of being silently leaked.
-        // rosec-prompt is a short-lived subprocess; this runs at most once.
-        static FONT_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let stored = FONT_NAME.get_or_init(|| name.to_string());
-        return iced::Font::with_name(stored.as_str());
-    }
-    iced::Font::DEFAULT
-}
-
-fn darken(c: iced::Color, f: f32) -> iced::Color {
-    let f = f.clamp(0.0, 1.0);
-    iced::Color {
-        r: c.r * f,
-        g: c.g * f,
-        b: c.b * f,
-        a: c.a,
-    }
-}
-
-/// Render a TOTP code as individual digit boxes (pin-entry style).
-fn pin_box_row<'a, M: 'a>(
-    code: &str,
-    font_size: u16,
-    digit_color: iced::Color,
-    box_bg: iced::Color,
-    box_border: iced::Color,
-) -> iced::Element<'a, M> {
-    use iced::widget::{center, container, text};
-    use iced::{Alignment, Background, Length};
-
-    let mono = iced::Font {
-        family: iced::font::Family::Name("monospace"),
-        weight: iced::font::Weight::Bold,
-        ..iced::Font::default()
-    };
-    let digit_size = font_size + 8;
-    let box_size = (digit_size as f32 * 1.8).ceil();
-
-    let digit_boxes: Vec<iced::Element<'_, M>> = code
-        .chars()
-        .map(|ch| {
-            let digit = text(ch.to_string())
-                .size(digit_size)
-                .color(digit_color)
-                .font(mono)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center);
-
-            container(center(digit).width(box_size).height(box_size))
-                .width(box_size)
-                .height(box_size)
-                .style(move |_| container::Style {
-                    background: Some(Background::Color(box_bg)),
-                    border: iced::Border {
-                        color: box_border,
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    text_color: None,
-                    shadow: iced::Shadow::default(),
-                })
-                .into()
-        })
-        .collect();
-
-    iced::widget::Row::with_children(digit_boxes)
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .width(Length::Shrink)
-        .into()
-}
-
-fn button_style(
-    bg: iced::Color,
-    fg: iced::Color,
-    status: iced::widget::button::Status,
-) -> iced::widget::button::Style {
-    let base = iced::widget::button::Style {
-        background: Some(iced::Background::Color(bg)),
-        text_color: fg,
-        border: iced::Border {
-            color: bg,
-            width: 0.0,
-            radius: 6.0.into(),
-        },
-        shadow: iced::Shadow::default(),
-    };
-    match status {
-        iced::widget::button::Status::Hovered => iced::widget::button::Style {
-            background: Some(iced::Background::Color(darken(bg, 0.9))),
-            ..base
-        },
-        iced::widget::button::Status::Pressed => iced::widget::button::Style {
-            background: Some(iced::Background::Color(darken(bg, 0.8))),
-            ..base
-        },
-        _ => base,
-    }
 }
