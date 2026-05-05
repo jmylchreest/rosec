@@ -251,18 +251,24 @@ fn default_font_size() -> f32 {
 }
 
 fn main() -> Result<()> {
-    // Apply process hardening before reading stdin or spawning anything else.
-    rosec_core::process::harden();
-
     // Internal screenshot helper — runs in a subprocess to avoid portal
     // D-Bus session reuse issues.  Pipes the PNG bytes back via stdout,
     // never lands on a parent-controlled disk path. Not user-facing.
+    //
+    // Detected BEFORE harden() because xdg-desktop-portal needs to read
+    // /proc/<our-pid>/root for sandbox identification, and PR_SET_DUMPABLE=0
+    // re-owns that to root. The helper applies its own staged hardening
+    // around the portal call.
     {
         let args: Vec<String> = std::env::args().collect();
         if args.len() == 2 && args[1] == "--screenshot-helper" {
             run_screenshot_helper();
         }
     }
+
+    // Full hardening for the prompt path. The helper above never reaches
+    // here because run_screenshot_helper() returns `!`.
+    rosec_core::process::harden();
 
     // Handle --version before anything else (no stdin read needed).
     if std::env::args().any(|a| a == "--version" || a == "-V") {
@@ -1315,10 +1321,13 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
     use iced::application;
     use iced::window::settings::PlatformSpecific;
 
+    let initial_status = "Position the QR code on your screen, then click Scan";
+    let initial_size = derive_qr_window_size(&request.title, initial_status, &request.theme);
+
     application("rosec prompt", qr_update, qr_view)
         .subscription(qr_subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(380.0, 145.0),
+            size: initial_size,
             resizable: false,
             decorations: false,
             transparent: true,
@@ -1333,6 +1342,50 @@ fn run_gui_qr(request: PromptRequest) -> Result<()> {
             (state, iced::Task::none())
         })?;
     Ok(())
+}
+
+/// Compute the QR window size by measuring the rendered text.
+///
+/// Mirrors the regular prompt's derivation: cosmic-text measures the title
+/// (bold, font_size+1) and the status text (normal, font_size) at the actual
+/// content width, then we add the layout's fixed padding + spacing + button
+/// row to get total height.
+fn derive_qr_window_size(title: &str, status: &str, theme: &ThemeConfig) -> iced::Size {
+    let font_size = theme.font_size;
+    let iced_line_h = |sz: f32| (sz * 1.3).ceil();
+    let btn_h = iced_line_h(font_size) + 16.0; // padding(8) top+bottom + text
+    let width = 380.0_f32;
+    // Usable width: 380 - outer padding(4) - inner padding(14), both sides.
+    let content_w = width - (4.0 + 14.0) * 2.0;
+
+    let mut font_system = cosmic_text::FontSystem::new();
+    let family = cosmic_font_family(&theme.font_family);
+
+    let title_h = measure_text_height(
+        &mut font_system,
+        title,
+        font_size + 1.0,
+        content_w,
+        family,
+        cosmic_text::Weight::BOLD,
+    );
+    let status_h = measure_text_height(
+        &mut font_system,
+        status,
+        font_size,
+        content_w,
+        family,
+        cosmic_text::Weight::NORMAL,
+    );
+
+    let height = (4.0 + 14.0) * 2.0  // outer + inner padding (top + bottom)
+        + title_h
+        + 10.0                       // spacing after title
+        + status_h
+        + 10.0                       // spacing after status
+        + btn_h;
+
+    iced::Size::new(width, height)
 }
 
 impl QrApp {
@@ -1429,11 +1482,14 @@ fn capture_screenshot() -> Result<Vec<u8>, String> {
 
 /// Entry point for the `--screenshot-helper` subprocess.
 ///
-/// Asks the XDG desktop portal for a screenshot, reads the (portal-written)
-/// PNG file from disk, writes the raw bytes to stdout, removes the portal's
-/// file, and exits. Stdout is the only output channel back to the parent;
-/// the only on-disk artefact is the portal's own file (which we delete).
+/// Staged hardening: NO_NEW_PRIVS + mlockall up front, then the portal
+/// call (which requires xdg-desktop-portal to read /proc/<our-pid>/root
+/// for sandbox identification — PR_SET_DUMPABLE=0 would block this).
+/// Once the portal returns and we're about to bring PNG bytes into
+/// memory, we set PR_SET_DUMPABLE=0 to close the dumpable window.
 fn run_screenshot_helper() -> ! {
+    rosec_core::process::harden_introspectable();
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1453,6 +1509,9 @@ fn run_screenshot_helper() -> ! {
             .map_err(|e| format!("portal response failed: {e}"))?;
         let uri = response.uri().to_string();
         let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
+        // Portal phase done — close /proc/<pid>/* introspection before
+        // the PNG (which contains the user's screen) enters our memory.
+        rosec_core::process::set_not_dumpable();
         let bytes = std::fs::read(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
         let _ = std::fs::remove_file(file_path);
         Ok::<Vec<u8>, String>(bytes)
@@ -1532,7 +1591,13 @@ fn qr_update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
         QrMessage::ScanResult(Err(msg)) => {
             state.scanning = false;
             state.status = msg;
-            iced::window::get_oldest().and_then(|id| iced::window::minimize(id, false))
+            // Re-measure for the new (typically longer) status text and
+            // resize the window to fit, otherwise the wrapped error text
+            // overflows beyond the original "Position the QR..." height.
+            let new_size = derive_qr_window_size(&state.title, &state.status, &state.theme);
+            iced::window::get_oldest().and_then(move |id| {
+                iced::window::resize(id, new_size).chain(iced::window::minimize(id, false))
+            })
         }
         QrMessage::Cancel => std::process::exit(1),
         QrMessage::KeyPressed(key) => {
