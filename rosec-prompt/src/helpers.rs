@@ -1,7 +1,7 @@
 //! Layout, measurement, and widget helpers shared across the three Iced apps
 //! in this binary (regular prompt, TOTP display, QR scan).
 
-use crate::ThemeConfig;
+use crate::request::ThemeConfig;
 
 // ── Layout constants ─────────────────────────────────────────────────────
 
