@@ -30,7 +30,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Developers',
       collapsed: true,
-      items: ['developers/wasm-provider-guide'],
+      items: ['developers/wasm-provider-guide', 'developers/wasm-policy-sidecar'],
     },
   ],
 };
