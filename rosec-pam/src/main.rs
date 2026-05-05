@@ -72,6 +72,22 @@ fn debug_log(_msg: &str) {
     }
 }
 
+/// Log a non-debug message to syslog at the given priority. Used to surface
+/// chauthtok partial-success summaries to admins regardless of build profile.
+fn syslog_log(priority: i32, msg: &str) {
+    // SAFETY: We pass a valid format string and C string.
+    unsafe {
+        libc::openlog(
+            c"rosec-pam-unlock".as_ptr(),
+            libc::LOG_PID | libc::LOG_NDELAY,
+            libc::LOG_AUTH,
+        );
+        if let Ok(cmsg) = std::ffi::CString::new(msg) {
+            libc::syslog(priority, c"%s".as_ptr(), cmsg.as_ptr());
+        }
+    }
+}
+
 /// Operating mode — determined by argv.
 enum Mode {
     /// Default: unlock locked providers with a single password.
@@ -529,7 +545,8 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
         targets.len()
     ));
 
-    let mut any_changed = false;
+    let mut succeeded: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (id, name, ..) in &targets {
         let old_pipe = make_password_pipe(old_password).context("create old password pipe")?;
         let new_pipe = make_password_pipe(new_password).context("create new password pipe")?;
@@ -539,26 +556,39 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
             .call("ChangeProviderPassword", &(id.as_str(), old_pipe, new_pipe))
             .await;
 
-        match &result {
-            Ok(()) => {
-                debug_log(&format!("provider {name} ({id}) password changed"));
-                any_changed = true;
-            }
-            Err(e) => {
-                // Not an error — the old password may not match this vault's
-                // wrapping entry.  Log and continue.
-                debug_log(&format!(
-                    "provider {name} ({id}) password change failed: {e}"
-                ));
-            }
+        match result {
+            Ok(()) => succeeded.push(format!("{name} ({id})")),
+            Err(e) => failed.push((format!("{name} ({id})"), e.to_string())),
         }
     }
 
-    if any_changed {
-        debug_log("at least one provider password changed");
-        Ok(())
-    } else {
-        debug_log("no provider passwords were changed");
-        Ok(())
+    // Always surface the partial-success picture to syslog at info / warning
+    // so admins can see which providers rotated and which didn't.  Silent
+    // partial success would leave a vault stuck on the old password without
+    // the user noticing until next login.
+    syslog_log(
+        libc::LOG_INFO,
+        &format!(
+            "chauthtok summary: {} succeeded, {} failed",
+            succeeded.len(),
+            failed.len()
+        ),
+    );
+    for s in &succeeded {
+        syslog_log(libc::LOG_INFO, &format!("  ok:   {s}"));
     }
+    for (s, e) in &failed {
+        syslog_log(libc::LOG_WARNING, &format!("  fail: {s}: {e}"));
+    }
+
+    // No targets and no errors → nothing to do (PAM_IGNORE-style success).
+    // At least one success → success even if others failed (best-effort).
+    // All failed (and there were targets) → surface so PAM reports failure.
+    if succeeded.is_empty() && !failed.is_empty() {
+        bail!(
+            "chauthtok: all {} provider password changes failed",
+            failed.len()
+        );
+    }
+    Ok(())
 }
