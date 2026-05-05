@@ -41,7 +41,6 @@ fn build_tls_config(tls_mode: &TlsMode) -> ureq::tls::TlsConfig {
     }
 }
 
-/// Build a `ureq::Agent` configured for the given TLS mode.
 pub(crate) fn build_agent(tls_mode: &TlsMode) -> ureq::Agent {
     ureq::Agent::config_builder()
         .tls_config(build_tls_config(tls_mode))
@@ -62,8 +61,6 @@ pub(crate) fn build_probe_agent(tls_mode: &TlsMode) -> ureq::Agent {
 }
 
 /// Build the three HTTP host functions that shadow extism's built-ins.
-///
-/// Returns a `Vec<Function>` ready to pass to `Plugin::new`.
 pub(crate) fn build_http_host_functions(tls_mode: &TlsMode) -> Vec<Function> {
     // UserData::new wraps in Arc<Mutex<T>>; cloning shares the same Arc.
     let user_data: UserData<HttpState> = UserData::new(HttpState {
@@ -133,14 +130,11 @@ fn http_request_impl(
     let state_arc = get_state(&user_data)?;
     let agent = lock_state(&state_arc)?.agent.clone();
 
-    // Reset state from previous request.
     {
         let mut state = lock_state(&state_arc)?;
         state.status = 0;
         state.headers.clear();
     }
-
-    // ── Read the request from WASM memory ──────────────────────────
 
     let http_req_offset = input[0].unwrap_i64() as u64;
     let handle = match data.memory_handle(http_req_offset) {
@@ -151,8 +145,6 @@ fn http_request_impl(
     data.memory_free(handle)?;
 
     let body_offset = input[1].unwrap_i64() as u64;
-
-    // ── Check allowed_hosts ────────────────────────────────────────
 
     let url = match url::Url::parse(&req.url) {
         Ok(u) => u,
@@ -178,8 +170,6 @@ fn http_request_impl(
             req.url
         )));
     }
-
-    // ── Build the ureq request ─────────────────────────────────────
 
     let mut r = ureq::http::request::Builder::new()
         .method(
@@ -220,8 +210,6 @@ fn http_request_impl(
     if let Some(handle) = data.memory_handle(body_offset) {
         data.memory_free(handle)?;
     }
-
-    // ── Process the response ───────────────────────────────────────
 
     let reader = match res {
         Ok(res) => {

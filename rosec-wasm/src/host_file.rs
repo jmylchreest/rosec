@@ -84,7 +84,7 @@ fn lock_state(user_data: &UserData<FileState>) -> Result<Arc<Mutex<FileState>>, 
         .map_err(|e| extism::Error::msg(format!("file state error: {e}")))
 }
 
-/// Read a UTF-8 string from WASM memory at `offset`, then free the handle.
+/// Reads the string and frees the WASM memory handle (caller must not double-free).
 fn read_path_arg(data: &mut CurrentPlugin, offset: u64) -> Result<String, extism::Error> {
     let handle = data
         .memory_handle(offset)
@@ -94,7 +94,6 @@ fn read_path_arg(data: &mut CurrentPlugin, offset: u64) -> Result<String, extism
     String::from_utf8(bytes).map_err(|e| extism::Error::msg(format!("path is not UTF-8: {e}")))
 }
 
-/// Allocate `bytes` in WASM memory and return its offset.
 fn write_output_bytes(data: &mut CurrentPlugin, bytes: &[u8]) -> Result<u64, extism::Error> {
     let handle = data.memory_new(bytes)?;
     Ok(handle.offset())
@@ -149,7 +148,6 @@ fn file_read_impl(
 struct StatResponse {
     /// Modification time, seconds since UNIX epoch.  0 if unavailable.
     mtime_secs: u64,
-    /// File size in bytes.
     size: u64,
 }
 

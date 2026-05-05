@@ -28,15 +28,6 @@ use crate::protocol::{
     WasmAttributeDescriptor, WasmSshKeyMeta,
 };
 
-// ── Configuration ────────────────────────────────────────────────
-
-/// Default timeout for guest function calls (60 seconds).
-///
-/// This covers the worst-case network latency for operations like
-/// `unlock` and `sync` that hit Bitwarden's API.  If a guest call
-/// exceeds this duration the WASM execution is interrupted via
-/// wasmtime epoch interruption, and the provider returns an error
-/// instead of blocking indefinitely.
 /// Hard wall-clock cap on a single guest function call.  Set high enough to
 /// cover slow paths in WASM-compiled crypto (Argon2 KDF in keepassxc-file
 /// can take 30–60 s for default KeePassXC params, and significantly longer
@@ -50,11 +41,9 @@ const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 pub struct WasmProviderConfig {
     /// Unique provider ID (from config file).
     pub id: String,
-    /// Human-readable name.
     pub name: String,
     /// Provider kind string (e.g. `"bitwarden-wasm"`).
     pub kind: String,
-    /// Path to the `.wasm` file.
     pub wasm_path: String,
     /// Allowed HTTP hosts the plugin may contact (e.g. `["*.bitwarden.com"]`).
     pub allowed_hosts: Vec<String>,
@@ -90,8 +79,6 @@ pub struct WasmProviderConfig {
     pub unlock_timeout_secs: u64,
 }
 
-// ── WasmProvider ─────────────────────────────────────────────────
-
 /// A `Provider` backed by an Extism WASM plugin.
 ///
 /// All plugin calls go through a `Mutex<Plugin>` because `extism::Plugin`
@@ -107,13 +94,14 @@ pub struct WasmProvider {
     /// Attribute descriptors queried once from the guest at construction time.
     /// Leaked so we can return `&'static [AttributeDescriptor]` from the trait.
     attribute_descriptors: &'static [AttributeDescriptor],
-    /// Auth fields queried once from the guest at construction time.
+    /// Auth fields queried once at construction time. Leaked to satisfy the
+    /// `&'static` return.
     auth_fields: &'static [AuthField],
-    /// Registration info queried once from the guest at construction time.
+    /// Registration info queried once at construction time. Leaked to satisfy
+    /// the `&'static` return.
     registration_info: Option<RegistrationInfo>,
     /// Readiness probes queried once from the guest after init.
     readiness_probes: Vec<crate::protocol::ReadinessProbe>,
-    /// Callbacks registered by the daemon
     callbacks: std::sync::RwLock<ProviderCallbacks>,
     /// Cached timestamp of the last successful sync.
     last_sync_time: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
@@ -177,7 +165,6 @@ impl WasmProvider {
     /// The static-lifetime slices are created via `Box::leak`; this is
     /// acceptable because providers live for the process lifetime.
     pub fn new(config: WasmProviderConfig) -> Result<Self, ProviderError> {
-        // Warn if the allowed-hosts list grants unrestricted network access.
         for host in &config.allowed_hosts {
             if host.trim() == "*" {
                 warn!(
@@ -236,10 +223,7 @@ impl WasmProvider {
             ))
         })?;
 
-        // Call init to let the guest set up its internal state.
         init_guest(&mut plugin, &config, "init")?;
-
-        // ── Eagerly query static metadata from the guest ─────────
 
         let capabilities = query_capabilities(&mut plugin, &config.id);
         let attribute_descriptors = query_attribute_descriptors(&mut plugin, &config.id);
@@ -314,7 +298,6 @@ impl WasmProvider {
             ))
         })?;
 
-        // Re-run init with the same config.
         init_guest(&mut plugin, config, "re-init")?;
 
         Ok((plugin, watch_rx))
@@ -592,7 +575,6 @@ impl WasmProvider {
         };
         // guard is dropped here — safe to await.
 
-        // Feed the blob back to the guest.
         let mut plugin = self.plugin.lock().await;
         let restore_req = RestoreCacheRequest { blob_b64 };
         let resp: SimpleResponse = self.call_json(&mut plugin, "restore_cache", &restore_req)?;
@@ -752,7 +734,6 @@ impl WasmProvider {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
 
-        // Clone the callbacks for the notification task.
         let on_sync_nudge = self
             .callbacks
             .read()
@@ -820,8 +801,6 @@ impl WasmProvider {
         }
     }
 }
-
-// ── Provider trait impl ──────────────────────────────────────────
 
 #[async_trait]
 impl Provider for WasmProvider {
@@ -943,8 +922,6 @@ impl Provider for WasmProvider {
                 ))
             });
         }
-
-        // ── Online unlock path ──────────────────────────────────────
 
         let mut req = match &input {
             UnlockInput::Password(pw) => UnlockRequest {
@@ -1081,8 +1058,6 @@ impl Provider for WasmProvider {
                     ..
                 } = &input
             {
-                // Save all registration fields so we can restore them on the
-                // next unlock without prompting the user again.
                 match crate::wasm_cred::save(
                     &self.config.id,
                     password_ref.as_str(),
@@ -1204,12 +1179,10 @@ impl Provider for WasmProvider {
             self.cached
                 .store(false, std::sync::atomic::Ordering::Relaxed);
 
-            // Update the cached last-sync timestamp.
             if let Ok(mut guard) = self.last_sync_time.lock() {
                 *guard = Some(chrono::Utc::now());
             }
 
-            // Export and persist cache for offline use.
             if self.offline_cache_enabled() {
                 self.try_export_cache(&mut plugin);
             }
@@ -1350,7 +1323,6 @@ impl Provider for WasmProvider {
     /// If the guest does not export the function, falls back to the trait
     /// default (`Ok(true)` — assume changed, trigger a full sync).
     async fn check_remote_changed(&self) -> Result<bool, ProviderError> {
-        // Check if the guest supports this function (requires plugin lock).
         // Build the ISO-8601 timestamp from the cached last_sync_time before
         // acquiring the plugin lock to avoid holding two locks simultaneously.
         let iso8601 = match self.last_synced_at() {
@@ -1386,8 +1358,6 @@ impl Provider for WasmProvider {
         Ok(resp.has_changes)
     }
 }
-
-// ── Eager metadata queries (called during new()) ─────────────────
 
 /// Query capabilities from the guest, leak into `&'static [Capability]`.
 fn query_capabilities(plugin: &mut Plugin, provider_id: &str) -> &'static [Capability] {
@@ -1527,8 +1497,6 @@ fn query_readiness_probes(
     }
 }
 
-// ── Readiness probe evaluation ───────────────────────────────────
-
 /// Check whether a probe target's hostname is in the allowed hosts list.
 ///
 /// Uses the same glob matching as Extism's built-in HTTP host function.
@@ -1567,7 +1535,6 @@ pub(crate) fn evaluate_probe(
             expected_status,
             timeout_secs,
         } => {
-            // Parse URL and enforce allowed_hosts.
             let parsed =
                 url::Url::parse(url).map_err(|e| format!("invalid probe URL '{url}': {e}"))?;
             let host = parsed
@@ -1617,7 +1584,6 @@ pub(crate) fn evaluate_probe(
             port,
             timeout_secs,
         } => {
-            // Enforce allowed_hosts.
             if !is_host_allowed(host, allowed_hosts) {
                 return Err(format!("probe host '{host}' not in allowed_hosts"));
             }
@@ -1642,8 +1608,6 @@ pub(crate) fn evaluate_probe(
         }
     }
 }
-
-// ── Guest init helper ────────────────────────────────────────────
 
 /// Build init options (injecting `home_dir` if needed), call the guest
 /// `init` function, and check the response.
@@ -1700,8 +1664,6 @@ fn init_guest(
     }
     Ok(())
 }
-
-// ── Guest call helpers ───────────────────────────────────────────
 
 /// Whether a `plugin.call()` failure occurred (as opposed to a
 /// serialization/deserialization error).
@@ -1866,9 +1828,6 @@ fn map_guest_2fa_error(
     }
 }
 
-// ── Conversion helpers ───────────────────────────────────────────
-
-/// Convert a `WasmItemMeta` to a core `ItemMeta`.
 fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta {
     ItemMeta {
         id: w.id,
@@ -1959,7 +1918,6 @@ fn spawn_watch_dispatcher(
     })
 }
 
-/// Convert a `WasmSshKeyMeta` to a core `SshKeyMeta`.
 fn to_ssh_key_meta(w: WasmSshKeyMeta, provider_id: &str) -> SshKeyMeta {
     SshKeyMeta {
         item_id: w.item_id,
@@ -1976,7 +1934,6 @@ fn to_ssh_key_meta(w: WasmSshKeyMeta, provider_id: &str) -> SshKeyMeta {
     }
 }
 
-/// Parse a capability string from the guest.
 fn parse_capability(s: &str) -> Option<Capability> {
     match s {
         "sync" | "Sync" => Some(Capability::Sync),
@@ -2039,8 +1996,6 @@ fn leak_auth_field(w: crate::protocol::WasmAuthField) -> AuthField {
 mod tests {
     use super::*;
     use crate::protocol::{ErrorKind, TwoFactorMethod as ProtoTwoFactorMethod};
-
-    // ── map_guest_2fa_error: happy paths ──────────────────────────
 
     #[test]
     fn map_2fa_totp_method() {
@@ -2174,8 +2129,6 @@ mod tests {
         assert_eq!(methods[2].id, "4");
     }
 
-    // ── map_guest_2fa_error: unhappy paths ────────────────────────
-
     #[test]
     fn map_2fa_empty_methods_list() {
         let err = map_guest_2fa_error(Some("2fa required".into()), Some(vec![]));
@@ -2203,8 +2156,6 @@ mod tests {
         assert!(methods.is_empty());
     }
 
-    // ── map_guest_error: TwoFactorRequired fallback ───────────────
-
     #[test]
     fn map_error_twofactor_fallback_has_empty_methods() {
         let err = map_guest_error(
@@ -2218,8 +2169,6 @@ mod tests {
         // used map_guest_2fa_error() instead.
         assert!(methods.is_empty());
     }
-
-    // ── map_guest_error: non-2FA variants ─────────────────────────
 
     #[test]
     fn map_error_auth_failed() {

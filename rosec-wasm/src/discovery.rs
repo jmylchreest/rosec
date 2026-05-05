@@ -45,8 +45,6 @@ const SYSTEM_PLUGIN_DIR: &str = "/usr/lib/rosec/providers";
 /// Subdirectory under `$XDG_DATA_HOME` for user-installed providers.
 const USER_PLUGIN_SUBDIR: &str = "rosec/providers";
 
-// ── PluginRegistry ───────────────────────────────────────────────
-
 /// A discovered plugin: its manifest plus the resolved path to the
 /// `.wasm` file.
 #[derive(Debug, Clone)]
@@ -64,40 +62,33 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    /// Look up a discovered plugin by kind.
     pub fn get(&self, kind: &str) -> Option<&DiscoveredPlugin> {
         self.plugins.get(kind)
     }
 
-    /// Iterate over all discovered plugins.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &DiscoveredPlugin)> {
         self.plugins.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// All discovered kind strings, sorted for deterministic output.
+    /// Sorted for deterministic iteration.
     pub fn kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = self.plugins.keys().map(String::as_str).collect();
         kinds.sort_unstable();
         kinds
     }
 
-    /// Whether the registry contains a given kind.
     pub fn contains_kind(&self, kind: &str) -> bool {
         self.plugins.contains_key(kind)
     }
 
-    /// Number of discovered plugins.
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
-    /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
 }
-
-// ── Scanning ─────────────────────────────────────────────────────
 
 /// Which directory a discovered plugin came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +122,6 @@ pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginReg
 
     let mut registry = PluginRegistry::default();
 
-    // 1. System-wide directory.
     let system_dir = PathBuf::from(SYSTEM_PLUGIN_DIR);
     scan_directory(
         &system_dir,
@@ -141,7 +131,6 @@ pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginReg
         verify,
     );
 
-    // 2. User-local directory.
     if let Some(user_dir) = user_plugin_dir() {
         scan_directory(
             &user_dir,
@@ -469,14 +458,12 @@ fn probe_plugin(wasm_path: &Path) -> Result<PluginManifest, anyhow::Error> {
 ///
 /// Uses `$XDG_DATA_HOME/rosec/providers/` (default `~/.local/share/rosec/providers/`).
 fn user_plugin_dir() -> Option<PathBuf> {
-    // Check $XDG_DATA_HOME first.
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME")
         && !data_home.is_empty()
     {
         return Some(PathBuf::from(data_home).join(USER_PLUGIN_SUBDIR));
     }
 
-    // Fall back to $HOME/.local/share/rosec/providers/
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty()
     {
@@ -491,11 +478,7 @@ fn user_plugin_dir() -> Option<PathBuf> {
     None
 }
 
-// ── Helpers for consumers (daemon, CLI) ──────────────────────────
-
-/// Return the required options for a discovered plugin kind.
-///
-/// Returns `None` if the kind is not in the registry.
+/// Required options for a kind, or `None` if unknown.
 pub fn required_options(
     registry: &PluginRegistry,
     kind: &str,
@@ -505,9 +488,7 @@ pub fn required_options(
         .map(|p| p.manifest.required_options.clone())
 }
 
-/// Return the optional options for a discovered plugin kind.
-///
-/// Returns `None` if the kind is not in the registry.
+/// Optional options for a kind, or `None` if unknown.
 pub fn optional_options(
     registry: &PluginRegistry,
     kind: &str,

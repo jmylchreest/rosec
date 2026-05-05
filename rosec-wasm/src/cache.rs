@@ -103,7 +103,6 @@ pub fn derive_cache_key(
     password: &str,
     provider_id: &str,
 ) -> Result<CacheKey, ProviderError> {
-    // Concatenate machine_key || password as IKM.
     let mut ikm = Zeroizing::new(Vec::with_capacity(machine_key.len() + password.len()));
     ikm.extend_from_slice(machine_key);
     ikm.extend_from_slice(password.as_bytes());
@@ -157,7 +156,6 @@ pub fn write_cache_file(
 
     let ct_len = ciphertext.len() as u32;
 
-    // Compute HMAC over version || timestamp || iv || ciphertext.
     let mac = compute_mac(key.mac_key(), CACHE_VERSION, timestamp, &iv, ciphertext)?;
 
     // Write to a temporary file then rename for atomicity.

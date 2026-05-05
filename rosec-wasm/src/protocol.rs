@@ -11,8 +11,6 @@ use std::{collections::HashMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
-// ── Init / lifecycle ─────────────────────────────────────────────
-
 /// Sent to `init` — one-time plugin configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitRequest {
@@ -29,16 +27,12 @@ pub struct InitResponse {
     pub error: Option<String>,
 }
 
-// ── Status ───────────────────────────────────────────────────────
-
 /// Returned by `status`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub locked: bool,
     pub last_sync_epoch_secs: Option<u64>,
 }
-
-// ── Unlock / Lock ────────────────────────────────────────────────
 
 /// Sent to `unlock`.
 ///
@@ -126,8 +120,6 @@ pub struct TwoFactorMethod {
     pub challenge: Option<String>,
 }
 
-// ── Items ────────────────────────────────────────────────────────
-
 /// Returned by `list_items` and `search`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemListResponse {
@@ -156,8 +148,6 @@ pub struct SearchRequest {
     pub attributes: HashMap<String, String>,
 }
 
-// ── Attributes ───────────────────────────────────────────────────
-
 /// Sent to `get_item_attributes`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemIdRequest {
@@ -177,8 +167,6 @@ pub struct ItemAttributesResponse {
     #[serde(default)]
     pub secret_names: Vec<String>,
 }
-
-// ── Secrets ──────────────────────────────────────────────────────
 
 /// Sent to `get_secret_attr`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,8 +201,6 @@ impl fmt::Debug for SecretAttrResponse {
             .finish()
     }
 }
-
-// ── SSH ──────────────────────────────────────────────────────────
 
 /// Returned by `list_ssh_keys`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -273,8 +259,6 @@ impl fmt::Debug for SshPrivateKeyResponse {
     }
 }
 
-// ── Registration / Auth fields ───────────────────────────────────
-
 /// Returned by `registration_info`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegistrationInfoResponse {
@@ -301,8 +285,6 @@ pub struct WasmAuthField {
     pub kind: String, // "text", "password", "secret"
 }
 
-// ── Attribute descriptors ────────────────────────────────────────
-
 /// Returned by `attribute_descriptors`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AttributeDescriptorsResponse {
@@ -317,15 +299,11 @@ pub struct WasmAttributeDescriptor {
     pub description: String,
 }
 
-// ── Capabilities ─────────────────────────────────────────────────
-
 /// Returned by `capabilities`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CapabilitiesResponse {
     pub capabilities: Vec<String>,
 }
-
-// ── Readiness probes ─────────────────────────────────────────────
 
 /// Returned by `readiness_probes` — declares what the host should check
 /// before attempting stateful calls like `unlock`.
@@ -381,8 +359,6 @@ fn default_probe_expected_status() -> u16 {
 fn default_probe_timeout() -> u32 {
     5
 }
-
-// ── Plugin manifest (pre-init discovery) ─────────────────────────
 
 /// Returned by `plugin_manifest` — called before `init` to discover
 /// the plugin's kind, name, config requirements, and allowed hosts.
@@ -449,8 +425,6 @@ fn default_option_kind() -> String {
     "text".into()
 }
 
-// ── SM-specific: delta-sync check ────────────────────────────────
-
 /// Sent to `check_remote_changed` (SM guest only).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CheckRemoteChangedRequest {
@@ -469,8 +443,6 @@ pub struct CheckRemoteChangedResponse {
     /// Whether the org's secrets have changed since `last_synced_iso8601`.
     pub has_changes: bool,
 }
-
-// ── Offline cache ────────────────────────────────────────────────
 
 /// Returned by `export_cache` — the guest serialises its current in-memory
 /// state into an opaque blob.  The host wraps this in an additional
@@ -498,8 +470,6 @@ pub struct RestoreCacheRequest {
     /// The same opaque blob that was returned by `export_cache`, base64.
     pub blob_b64: String,
 }
-
-// ── Error classification ─────────────────────────────────────────
 
 /// Allows the guest to communicate structured error kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]

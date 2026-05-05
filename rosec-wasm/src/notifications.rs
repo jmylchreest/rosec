@@ -41,16 +41,10 @@ pub struct NotificationsHandle {
 
 /// Configuration for the notifications background task.
 pub struct NotificationsConfig {
-    /// Provider ID (for log messages).
     pub provider_id: String,
-    /// Reference to the WASM plugin (for `get_notification_config` and
-    /// `parse_notification` guest calls).
     pub plugin: Arc<Mutex<extism::Plugin>>,
-    /// Readiness probes to evaluate before (re)connecting.
     pub readiness_probes: Vec<crate::protocol::ReadinessProbe>,
-    /// Allowed hosts for probe evaluation.
     pub allowed_hosts: Vec<String>,
-    /// TLS mode for readiness probes.
     pub tls_mode_probe: rosec_core::config::TlsMode,
     /// Invoked when the guest classifies a frame as `Sync`.
     pub on_sync_nudge: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
@@ -85,7 +79,6 @@ async fn notifications_loop(config: NotificationsConfig, mut cancel_rx: watch::R
     let mut is_first_attempt = true;
 
     loop {
-        // Check cancellation before each attempt.
         if cancel_rx.has_changed().is_err() {
             debug!(provider = %provider_id, "notifications: cancellation received, exiting");
             return;
@@ -182,7 +175,6 @@ enum SessionResult {
     ConnectFailed(String),
 }
 
-/// Run one WebSocket session.
 async fn run_session(
     config: &NotificationsConfig,
     subscription: &WebSocketSubscription,
@@ -287,7 +279,6 @@ async fn run_session(
     }
 }
 
-/// Call the guest's `get_notification_config` function.
 fn get_subscription_from_guest(
     plugin: &mut extism::Plugin,
     provider_id: &str,
@@ -326,7 +317,7 @@ fn get_subscription_from_guest(
     }
 }
 
-/// Call the guest's `parse_notification` function with a raw frame.
+/// Classify a raw WS frame via the guest's `parse_notification` export.
 fn parse_frame_via_guest(
     plugin: &mut extism::Plugin,
     provider_id: &str,
