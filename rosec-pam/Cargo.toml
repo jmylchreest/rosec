@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+rosec-core = { path = "../rosec-core" }
 zbus = { workspace = true }
 zvariant = { workspace = true }
 zeroize = { workspace = true }

@@ -81,6 +81,9 @@ enum Mode {
 }
 
 fn main() -> ! {
+    // Apply process hardening before stdin is read or D-Bus is touched.
+    rosec_core::process::harden();
+
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         eprintln!(
             "rosec-pam-unlock {} ({})",

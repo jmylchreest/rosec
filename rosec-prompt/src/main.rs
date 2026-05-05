@@ -251,6 +251,9 @@ fn default_font_size() -> f32 {
 }
 
 fn main() -> Result<()> {
+    // Apply process hardening before reading stdin or spawning anything else.
+    rosec_core::process::harden();
+
     // Internal screenshot helper — runs in a subprocess to avoid portal
     // D-Bus session reuse issues.  Not user-facing.
     {
@@ -272,8 +275,20 @@ fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter("warn").init();
 
+    // Cap stdin so a misbehaving caller cannot drive us into unbounded
+    // allocation by holding stdin open. 64 KiB covers the largest realistic
+    // request (theme + many fields + info text) with comfortable headroom.
+    const MAX_REQUEST: u64 = 64 * 1024;
     let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
+    let stdin = io::stdin();
+    stdin
+        .lock()
+        .take(MAX_REQUEST + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_REQUEST {
+        eprintln!("prompt request exceeds {MAX_REQUEST} bytes");
+        std::process::exit(2);
+    }
 
     let request: PromptRequest = if raw.trim().is_empty() {
         PromptRequest {

@@ -566,8 +566,16 @@ pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHand
     let fuse = Arc::new(SshFuse::new(agent_sock.clone(), keys_by_name_dir));
 
     let mut config = Config::default();
+    // Defence-in-depth mount flags. The kernel applies NoSuid by default for
+    // non-root FUSE mounts, but listing the flags here explicitly survives
+    // changes to that default and documents intent. SSH .pub key files and
+    // generated ssh_config snippets are never executable, never devices,
+    // never setuid.
     config.mount_options = vec![
         MountOption::RO,
+        MountOption::NoSuid,
+        MountOption::NoDev,
+        MountOption::NoExec,
         MountOption::FSName("rosec-ssh".to_string()),
     ];
     config.acl = SessionACL::Owner;

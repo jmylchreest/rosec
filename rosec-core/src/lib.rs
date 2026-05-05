@@ -11,6 +11,7 @@ pub mod credential;
 pub mod dedup;
 pub mod machine_key;
 pub mod oauth;
+pub mod process;
 pub mod prompt;
 pub mod router;
 pub mod totp;

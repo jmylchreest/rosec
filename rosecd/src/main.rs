@@ -1,4 +1,3 @@
-mod bootstrap;
 #[cfg(feature = "private-socket")]
 mod bus;
 mod ssh;
@@ -46,10 +45,10 @@ async fn run() -> Result<()> {
 
     tracing::info!("rosecd v{}", env!("CARGO_PKG_VERSION"));
 
-    // Security hardening: disable core dumps, lock memory pages.
+    // Security hardening: PR_SET_NO_NEW_PRIVS, PR_SET_DUMPABLE=0, mlockall.
     // Called immediately after logging is initialised so warnings are visible,
     // but before any providers are constructed or secrets are touched.
-    bootstrap::secure_bootstrap();
+    rosec_core::process::harden();
 
     let config = load_config(&config_path)?;
     tracing::info!("loaded config from {}", config_path.display());

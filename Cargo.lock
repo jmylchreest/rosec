@@ -4182,6 +4182,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "hmac",
+ "libc",
  "rand 0.10.1",
  "semver",
  "serde",
@@ -4219,6 +4220,7 @@ version = "0.0.27"
 dependencies = [
  "anyhow",
  "libc",
+ "rosec-core",
  "tokio",
  "zbus",
  "zeroize",

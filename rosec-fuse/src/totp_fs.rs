@@ -493,8 +493,12 @@ pub fn totp_mount(mountpoint: &Path) -> anyhow::Result<TotpMountHandle> {
     let fuse = Arc::new(TotpFuse::new());
 
     let mut config = Config::default();
+    // Defence-in-depth mount flags. TOTP "files" only contain ASCII digits.
     config.mount_options = vec![
         MountOption::RO,
+        MountOption::NoSuid,
+        MountOption::NoDev,
+        MountOption::NoExec,
         MountOption::FSName("rosec-totp".to_string()),
     ];
     config.acl = SessionACL::Owner;
