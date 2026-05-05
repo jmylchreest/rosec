@@ -1,11 +1,11 @@
 ---
 sidebar_position: 5
-title: WASM policy sidecar (proposal)
+title: WASM policy sidecar
 ---
 
-# WASM policy sidecar — design proposal
+# WASM policy sidecar
 
-Status: **proposal — not implemented**.
+Status: **design accepted; implementation pending** (tracked in issue #21).
 
 ## Problem
 
@@ -18,9 +18,8 @@ network surface is entirely guest-declared.
 
 This means **the prisoner picks the prison's keys**. A signed `.wasm` whose
 signing key is compromised — or whose author over-broadens
-`default_allowed_hosts` — gets data exfiltration paths the user never
-explicitly authorised. The mitigation today is "trust the WASM author",
-which is exactly the trust we want to *avoid* when sandboxing.
+`default_allowed_hosts` — gets data-exfiltration paths the user never
+explicitly authorised.
 
 A second problem: `plugin_manifest()` is itself unsigned in any meaningful
 sense. The signature attests the bytes of the `.wasm` file. A guest can
@@ -28,12 +27,26 @@ return any value from `plugin_manifest()` it likes, and the host believes
 it as long as the byte signature checks out. There's no *separate* policy
 attestation.
 
-## Proposed solution
+## Solution
 
-Ship a signed policy sidecar `.policy.toml` next to each `.wasm`. The
-host loads policy from the sidecar, treats `plugin_manifest()` as
-informational only for security-bearing fields, and signs both files
-together so substitution is detected.
+Ship a signed policy sidecar `.policy.toml` alongside each `.wasm`. The
+host loads policy from the sidecar, signs both files together so
+substitution is detected, and stops trusting `plugin_manifest()` for
+security-bearing fields.
+
+### Trust model
+
+The user is the security principal. The policy is the **plugin author's
+claim** about what the plugin needs; the user can always extend it
+(adding hosts) and may also replace it outright (narrowing). The policy
+matters for two reasons:
+
+1. **Auditability.** The user can `cat foo.wasm.policy.toml` to see what
+   a plugin asks for *before* loading it. This is far better than
+   reverse-engineering `plugin_manifest()` from WASM bytes.
+2. **Tamper detection.** The combined signature ensures the policy text
+   you read is the policy text the host enforces; substituting either
+   `.wasm` or `.policy.toml` invalidates the signature.
 
 ### File layout
 
@@ -43,6 +56,12 @@ provider-name.wasm.policy.toml
 provider-name.wasm.minisig          # signs (BLAKE3(wasm) || BLAKE3(policy))
 ```
 
+All three files **must** live in the same directory. Distributions ship
+them together; the user can drop a third-party plugin trio into
+`$XDG_DATA_HOME/rosec/providers/` and the daemon picks it up at next
+scan. There are no separate override directories — user-level
+customisation goes through `rosec.toml` (see below).
+
 ### Policy schema
 
 ```toml
@@ -51,30 +70,30 @@ kind = "bitwarden-pm"
 name = "Bitwarden Password Manager"
 version = "1.4.0"
 
-# Host-enforced ceiling. Manifest's default_allowed_hosts becomes a hint only.
+# Plugin-author baseline. The user's effective set is policy ∪ user.additional_hosts,
+# OR user.allowed_hosts ∪ user.additional_hosts when the user replaces the policy.
 [network]
 allowed_hosts = ["*.bitwarden.com", "*.bitwarden.eu"]
 
 # Path templates resolve against the user's option values at provider construction.
 # Templates: $option:<key>, $home, $xdg_data_home, $xdg_config_home.
-# Templates that resolve outside an allow-listed prefix are rejected.
 [[filesystem.preopens]]
 host_template = "$home/.local/share/keyrings"
-guest_path = "/keyrings"
-mode = "ro"          # "ro" or "rw"
+guest_path    = "/keyrings"
+mode          = "ro"           # "ro" or "rw"
 
 [[filesystem.allowed_files]]
 host_template = "$option:path"
-mode = "ro"
+mode          = "ro"
 
 [[filesystem.allowed_files]]
 host_template = "$option:key_file"
-mode = "ro"
-optional = true      # missing option is accepted
+mode          = "ro"
+optional      = true           # missing option is accepted
 
 [options]
-required = ["path"]
-optional = ["key_file"]
+required = ["path"]            # user MUST set these
+optional = ["key_file"]        # user MAY set these
 ```
 
 ### Signature scheme
@@ -87,149 +106,156 @@ sig     = minisign(signing_key, sigdata)
 Substituting either file invalidates the signature. A single `.minisig`
 covers both, simplifying distribution.
 
+### User overrides (via `rosec.toml`)
+
+```toml
+[provider.my-bitwarden]
+kind   = "bitwarden-pm"
+# ... required and optional plugin options live here ...
+server_url = "https://bitwarden.example.com"
+
+# Override knobs:
+#   allowed_hosts     — REPLACES policy.network.allowed_hosts
+#   additional_hosts  — EXTENDS the effective set, always
+#
+# Effective set = (allowed_hosts ?? policy.allowed_hosts) ∪ additional_hosts.
+allowed_hosts    = ["api.bitwarden.com"]    # narrows from policy
+additional_hosts = ["proxy.corp.local"]      # always-extending
+```
+
+| User config | Effective `allowed_hosts` |
+|---|---|
+| (nothing set) | `policy.allowed_hosts` |
+| `additional_hosts = [X]` | `policy.allowed_hosts ∪ {X}` |
+| `allowed_hosts = [Y]` | `{Y}` (policy replaced; loud `warn!` at startup) |
+| `allowed_hosts = [Y]` + `additional_hosts = [X]` | `{Y, X}` |
+
+When the user replaces the policy via `allowed_hosts`, rosecd logs a
+single `warn!` at startup so it's auditable. `additional_hosts` is
+informational at `info!`.
+
+There is no equivalent for filesystem preopens or `allowed_files` — those
+follow the policy as declared. Users who don't want a plugin's filesystem
+access don't enable the plugin.
+
 ### Trust flow
 
-1. `discovery::scan_plugins` reads `.policy.toml` first, falling back per
-   the rules below.
-2. `verify_plugin_and_policy(wasm_path, policy_path)` computes the combined
+1. `discovery::scan_plugins` reads the sidecar `.policy.toml` and the
+   sibling `.minisig`.
+2. `verify_plugin_and_policy(wasm, policy)` computes the combined BLAKE3
    hash and verifies the minisign signature.
 3. `DiscoveredPlugin` gains `policy: PluginPolicy`.
 4. `compute_wasi_allowed_paths` / `compute_allowed_files` in
-   `rosecd/src/main.rs` are replaced by `policy.resolve(&user_options) ->
-   ResolvedPolicy`. The `kind == "..."` hardcoded gate goes away.
-5. `WasmProviderConfig.allowed_hosts` becomes the **intersection** of
-   `policy.network.allowed_hosts` and any `allowed_hosts` the user set in
-   their config. Users can narrow but not widen.
+   `rosecd/src/main.rs` are replaced by
+   `policy.resolve(&user_options) -> ResolvedPolicy`. The
+   `kind == "..."` hardcoded gate is removed.
+5. `WasmProviderConfig.allowed_hosts` is the effective set per the table
+   above.
 6. `plugin_manifest()` is downgraded to informational. It can still
-   declare `attribute_descriptors`, `auth_fields`, etc., but the
-   `default_allowed_hosts` field is dropped from the trust path (kept for
-   one cycle as a deprecation log).
+   declare `attribute_descriptors`, `auth_fields`, etc., but its
+   `default_allowed_hosts` field is dropped from the trust path.
 
 ### Fallback behaviour
 
-| `wasm_verify` | `.policy.toml` present | result |
+| `wasm_verify` | sidecar present | result |
 |---|---|---|
-| `required` (default) | yes | verify signature; load with policy |
-| `required` (default) | no | **reject** with "plugin missing required policy file" |
+| `required` (default) | yes | verify combined signature; load with policy |
+| `required` (default) | no | reject with `"plugin missing required policy file"` |
 | `disabled` (dev) | yes | load with policy, signature ignored |
-| `disabled` (dev) | no | load with **empty** allow-lists (no network, no FS); guest fails at first `host_*` call with a clear error |
+| `disabled` (dev) | no | load with **manifest-declared** allow-lists, `warn!` loudly — `disabled` means "trust the wasm" |
 
-## Open questions
+### Required and unknown options
 
-These need agreement before implementation:
+- **Missing required option** — refuse to load with
+  `"provider 'X' (kind Y) requires option 'Z' per policy"`, pointing at
+  the policy file.
+- **Unknown user option** — `warn!` once at startup
+  (`"unknown option 'foo' for kind X, ignored"`) and continue. Lenient
+  mode: typos are common; the security cost of an ignored option is zero.
 
-### 1. User overrides — full mental model
+### Schema versioning
 
-The audit prompt that triggered this proposal asked specifically about
-how user config overrides interact with the policy. The current sketch
-says "user can narrow but not widen" `allowed_hosts`, but several edge
-cases need decisions:
+Plugin policy ships `schema_version = N`; this rosecd understands schema
+versions ≤ M.
 
-- **Filesystem preopens.** Can the user add a `[[filesystem.preopens]]`
-  entry beyond the policy? Probably no — that's widening, same logic as
-  network. But what about reducing? A user might want to deny the
-  `keyring_dir` preopen for a provider they don't actually use.
-- **Filesystem allowed_files.** The policy says
-  `host_template = "$option:path"`. The user supplies the option `path`.
-  If the user sets `path = "/etc/shadow"`, the policy template resolves
-  to `/etc/shadow` and the provider gets read access. Is that the user's
-  prerogative (they chose the path) or a footgun (the provider was meant
-  for `*.kdbx`)? Probably we need a `host_template_must_match = "*.kdbx"`
-  refinement.
-- **Network override via local proxy.** A user might want all
-  `*.bitwarden.com` traffic to go via a corporate proxy on
-  `proxy.corp.local`. That's *adding* a host (proxy) but logically
-  narrowing the ultimate destination. How is this expressed?
-- **Required options policy.** If policy says
-  `required = ["path"]` but the user omits `path` from their config,
-  what happens? Probably refuse-to-load with a clear error pointing at
-  the policy file. Symmetric for unknown options the user supplies that
-  the policy doesn't list.
-- **Schema upgrades.** When policy `schema_version = 2` ships with a new
-  field, how does an older `rosecd` (still on schema 1) treat it? Reject
-  the plugin? Ignore unknown fields with a warning? Fail loudly to
-  prompt upgrade? (Probably: fail loudly. Security policies must not be
-  silently ignored.)
+| Policy schema | rosecd knowledge | result |
+|---|---|---|
+| N ≤ M | recognised | load |
+| N > M | future schema | refuse to load with `"upgrade rosec to load this plugin (policy schema N, daemon supports up to M)"` |
 
-### 2. Migration path
+Security policies must not be silently ignored. Hard refuse on
+forward-incompatible policies; users get a clear "upgrade rosec"
+message rather than a silently-relaxed sandbox.
 
-Existing signed WASM plugins (no policy sidecar yet) must continue to
-load somehow during the transition. Options:
+### Migration
 
-- **Hard cutover.** Set a release boundary: rosecd 0.1.0 requires policy
-  sidecars universally. All providers re-issued.
-- **Soft migration.** rosecd 0.0.x trusts `plugin_manifest()` if no
-  sidecar is present, with a `warn!` log on every load. Drop the trust
-  in 0.1.0.
-- **Per-plugin grandfather list.** Hard-coded `kind` allow-list of
-  legacy providers that still trust the manifest. Removed in 0.1.0.
+**Hard cutover** at the next minor release (likely 0.1.0). All in-tree
+providers (bitwarden-pm, bitwarden-sm, keepassxc-file, gnome-keyring)
+get policy files committed in this work and re-signed. Third-party
+plugins must re-issue with a sidecar to remain loadable.
 
-Soft migration is friendliest but extends the vulnerability window.
-Hard cutover is cleaner but requires re-signing every provider.
-
-### 3. Policy authoring tooling
-
-A `tools/rosec-package-wasm` CLI is needed:
-
-```
-rosec-package-wasm \
-  --wasm bitwarden-pm.wasm \
-  --policy bitwarden-pm.policy.toml \
-  --signing-key /path/to/minisign.key \
-  --output-sig bitwarden-pm.wasm.minisig
-```
-
-Validates the policy schema, computes the combined hash, signs.
-
-A `rosec-validate-plugin` command for users:
-
-```
-rosec-validate-plugin /usr/lib/rosec/providers/bitwarden-pm.wasm
-# Verifies signature, prints policy summary, checks template resolution
-# against the current user config.
-```
-
-### 4. Default-deny vs explicit-deny
-
-The current sketch says missing-policy in `wasm_verify=disabled` mode →
-"empty allow-lists". An alternative: missing-policy → refuse to load
-even in dev mode, requiring `wasm_verify = "disabled-and-trust-manifest"`
-as an explicit fourth option. More steps but harder to misuse.
+The user base is small enough that the disruption cost is low and the
+"soft migration with deprecation warning" path would extend the
+vulnerability window for too little gain.
 
 ## Code surface
 
 - new `rosec-wasm/src/policy.rs` (~250 lines: parse, validate, resolve
-  templates, signature verification helper)
-- `discovery.rs`: extend `VerifyOutcome` and `verify_plugin`; add
-  `policy: PluginPolicy` to `DiscoveredPlugin`
+  templates, combined-signature verification)
+- `rosec-wasm/src/discovery.rs`: extend `VerifyOutcome`; require sidecar
+  presence under `Required` mode; add `policy: PluginPolicy` to
+  `DiscoveredPlugin`
 - `rosecd/src/main.rs`: replace `compute_wasi_allowed_paths` /
   `compute_allowed_files` with `policy.resolve(&user_options)`;
-  intersect `allowed_hosts`
+  compute effective `allowed_hosts` from policy + user
+  `allowed_hosts` / `additional_hosts`
 - `rosec-wasm/src/provider.rs`: stop reading manifest's
   `default_allowed_hosts` for trust; treat as informational
-- new `tools/rosec-package-wasm` (~80 lines) for plugin authors
-- new `tools/rosec-validate-plugin` (~60 lines) for users
-- documentation: replace "WASM author declares allowed_hosts" examples
-  with "policy sidecar" examples in `wasm-provider-guide.md`
+- `rosec-core/src/config.rs`: add per-provider
+  `allowed_hosts: Option<Vec<String>>` and
+  `additional_hosts: Vec<String>` fields
+- new `rosec-tools` crate containing:
+  - `rosec-package-wasm` — for plugin authors: bundle wasm + policy →
+    `.minisig`, validates schema first
+  - `rosec-validate-plugin` — for users: verifies signature, prints
+    policy summary, dry-runs template resolution against the current
+    user config. Also exposed as `rosec provider validate <kind>` for
+    discoverability
+- in-tree provider repos: add `*.policy.toml` files, update CI to sign
+  both files together
+- documentation updates in `wasm-provider-guide.md` to replace
+  "WASM author declares allowed_hosts" examples with "policy sidecar"
+  examples
 
-## Threat model — what this fixes vs. doesn't
+## Threat model
 
-**Fixes:**
-- Compromised signing key still requires re-signing both files; if the
-  attacker only obtained the WASM signing capability and not the
-  policy, they cannot widen the network allow-list.
-- A bug or oversight in `plugin_manifest()` returning over-broad
-  `default_allowed_hosts` no longer affects trust.
-- The brittle `kind == "keepassxc-file"` hardcoded gate in
-  `compute_wasi_allowed_paths` becomes an explicit policy declaration
-  per-plugin.
+**What the sidecar fixes:**
 
-**Does not fix:**
-- A compromised signing key with full access to both wasm and policy
-  files — the attacker can sign anything they want. That's the
-  irreducible trust root.
-- Bugs in the host's network enforcement (`host_http`, redirect
-  following). The policy is the host's input, not the host's
-  enforcement code.
-- Provider-side data exfiltration via legitimate channels (e.g. a
-  bitwarden provider exfiltrating to bitwarden.com itself).
+- ✅ The brittle `kind == "..."` hardcoded gates in
+  `compute_wasi_allowed_paths` and `compute_allowed_files` are replaced
+  with a per-plugin declarative policy file.
+- ✅ `plugin_manifest()` self-declared `default_allowed_hosts` is no
+  longer trusted.
+- ✅ Substitution of `.wasm` or `.policy.toml` without re-signing is
+  detected by the combined signature.
+- ✅ Users can audit a plugin's claimed needs by reading the policy file
+  before loading it — no need to reverse-engineer WASM bytes.
+
+**What the sidecar does NOT fix:**
+
+- ❌ A compromised signing key with full intent — the attacker can ship
+  a policy with `allowed_hosts = ["*"]` and the host enforces it. The
+  user can read the policy and refuse, but if they don't, it's
+  accepted. This is the irreducible trust root.
+- ❌ Plugin authors maliciously over-broadening their own policy — same
+  as above.
+- ❌ Bugs in the host's enforcement (e.g. `host_http` redirect handling).
+  The policy is the host's *input*, not its enforcement.
+- ❌ Provider-side data exfiltration via legitimate channels (e.g. a
+  bitwarden provider sending data to `bitwarden.com` itself).
+
+The user's superset model (extend always, optionally replace) gives up
+"user can always lock down further than the policy" in exchange for
+**simpler mental model** and **operational flexibility** (you can add a
+proxy host or work around a domain change without re-issuing a plugin).
+This is a deliberate trade-off — see issue #21 discussion.
