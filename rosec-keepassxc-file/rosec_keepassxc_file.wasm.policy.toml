@@ -1,0 +1,22 @@
+schema_version = 1
+kind = "keepassxc-file"
+name = "KeePassXC (file)"
+
+# No network access — the plugin reads a local .kdbx file.
+[network]
+allowed_hosts = []
+
+# Per-file scoping: only the user-specified database (and optional key file)
+# are readable via the host_file imports.
+[[filesystem.allowed_files]]
+host_template = "$option:path"
+mode = "ro"
+
+[[filesystem.allowed_files]]
+host_template = "$option:key_file"
+mode = "ro"
+optional = true
+
+[options]
+required = ["path"]
+optional = ["key_file"]

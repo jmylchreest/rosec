@@ -302,64 +302,74 @@ jobs:
         working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
 
-      - name: Copy WASM providers
+      - name: Copy WASM providers + policies
         run: |
           mkdir -p dist/providers
 
           # bitwarden-pm
           cp rosec-bitwarden-pm/target/wasm32-wasip1/release/rosec_bitwarden_pm.wasm \
              dist/providers/rosec_bitwarden_pm.wasm
+          cp rosec-bitwarden-pm/rosec_bitwarden_pm.wasm.policy.toml \
+             dist/providers/rosec_bitwarden_pm.wasm.policy.toml
 
           # bitwarden-sm
           cp rosec-bitwarden-sm/target/wasm32-wasip1/release/rosec_bitwarden_sm.wasm \
              dist/providers/rosec_bitwarden_sm.wasm
+          cp rosec-bitwarden-sm/rosec_bitwarden_sm.wasm.policy.toml \
+             dist/providers/rosec_bitwarden_sm.wasm.policy.toml
 
           # gnome-keyring
           cp rosec-gnome-keyring/target/wasm32-wasip1/release/rosec_gnome_keyring.wasm \
              dist/providers/rosec_gnome_keyring.wasm
+          cp rosec-gnome-keyring/rosec_gnome_keyring.wasm.policy.toml \
+             dist/providers/rosec_gnome_keyring.wasm.policy.toml
 
           # keepassxc-file
           cp rosec-keepassxc-file/target/wasm32-wasip1/release/rosec_keepassxc_file.wasm \
              dist/providers/rosec_keepassxc_file.wasm
+          cp rosec-keepassxc-file/rosec_keepassxc_file.wasm.policy.toml \
+             dist/providers/rosec_keepassxc_file.wasm.policy.toml
 
-      - name: Sign WASM providers
+      - name: Sign WASM providers (combined wasm || policy)
         env:
           WASM_SIGNING_KEY: ${{ secrets.WASM_SIGNING_KEY }}
         run: |
           cargo install rsign2 --quiet 2>/dev/null || true
-          # Write the private key from secret to a temp file
           KEYFILE=$(mktemp)
           echo "${WASM_SIGNING_KEY}" > "${KEYFILE}"
           trap 'rm -f "${KEYFILE}"' EXIT
 
+          # The .minisig covers (wasm_bytes || policy_bytes) so substituting
+          # either file invalidates the signature. We concatenate to a temp
+          # file, sign that, then move the produced .minisig to the wasm's
+          # canonical sidecar path.
           for wasm in dist/providers/*.wasm; do
-            rsign sign -s "${KEYFILE}" -W "${wasm}"
-            echo "Signed: ${wasm}"
+            policy="${wasm}.policy.toml"
+            if [[ ! -f "${policy}" ]]; then
+              echo "ERROR: missing policy file for ${wasm}" >&2
+              exit 1
+            fi
+            combined=$(mktemp)
+            cat "${wasm}" "${policy}" > "${combined}"
+            rsign sign -s "${KEYFILE}" -W "${combined}"
+            mv "${combined}.minisig" "${wasm}.minisig"
+            rm -f "${combined}"
+            echo "Signed: ${wasm} + ${policy}"
           done
 
       - name: Package signed WASM providers
         run: |
           VERSION=${{ needs.prepare.outputs.version }}
 
-          # bitwarden-pm
-          ARCHIVE="rosec-provider-bitwarden-pm-${VERSION}.wasm.tar.gz"
-          tar -czf "${ARCHIVE}" -C dist/providers rosec_bitwarden_pm.wasm rosec_bitwarden_pm.wasm.minisig
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
-
-          # bitwarden-sm
-          ARCHIVE="rosec-provider-bitwarden-sm-${VERSION}.wasm.tar.gz"
-          tar -czf "${ARCHIVE}" -C dist/providers rosec_bitwarden_sm.wasm rosec_bitwarden_sm.wasm.minisig
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
-
-          # gnome-keyring
-          ARCHIVE="rosec-provider-gnome-keyring-${VERSION}.wasm.tar.gz"
-          tar -czf "${ARCHIVE}" -C dist/providers rosec_gnome_keyring.wasm rosec_gnome_keyring.wasm.minisig
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
-
-          # keepassxc-file (experimental)
-          ARCHIVE="rosec-provider-keepassxc-file-${VERSION}.wasm.tar.gz"
-          tar -czf "${ARCHIVE}" -C dist/providers rosec_keepassxc_file.wasm rosec_keepassxc_file.wasm.minisig
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          for kind in bitwarden-pm bitwarden-sm gnome-keyring keepassxc-file; do
+            base="rosec_${kind//-/_}"
+            ARCHIVE="rosec-provider-${kind}-${VERSION}.wasm.tar.gz"
+            tar -czf "${ARCHIVE}" -C dist/providers \
+              "${base}.wasm" \
+              "${base}.wasm.policy.toml" \
+              "${base}.wasm.minisig"
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

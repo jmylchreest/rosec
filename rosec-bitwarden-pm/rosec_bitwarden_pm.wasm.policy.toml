@@ -1,0 +1,12 @@
+schema_version = 1
+kind = "bitwarden-pm"
+name = "Bitwarden Password Manager"
+
+# Cloud regions only by default. Self-hosted / proxy users add their host
+# via [provider.<id>] additional_hosts in rosec.toml.
+[network]
+allowed_hosts = ["*.bitwarden.com", "*.bitwarden.eu"]
+
+[options]
+required = ["email"]
+optional = ["region", "base_url", "api_url", "identity_url", "device_id"]

@@ -1,0 +1,10 @@
+schema_version = 1
+kind = "bitwarden-sm"
+name = "Bitwarden Secrets Manager"
+
+[network]
+allowed_hosts = ["*.bitwarden.com", "*.bitwarden.eu"]
+
+[options]
+required = ["organization_id"]
+optional = ["region", "server_url", "device_id"]
