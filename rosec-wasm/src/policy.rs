@@ -105,6 +105,16 @@ pub struct OptionsPolicy {
     pub required: Vec<String>,
     #[serde(default)]
     pub optional: Vec<String>,
+    /// Default values for optional options, applied via
+    /// [`PluginPolicy::apply_defaults`] before `resolve()` and before
+    /// forwarding to the guest. Templates support `$home`, `$xdg_data_home`,
+    /// `$xdg_config_home`; `$option:` refs are rejected to avoid dependency
+    /// cycles between option resolution.
+    ///
+    /// Defaults must reference keys declared in `optional` — putting a
+    /// default on a `required` key would mean it isn't really required.
+    #[serde(default)]
+    pub defaults: HashMap<String, String>,
 }
 
 /// Errors from policy load / parse / resolve.
@@ -128,6 +138,12 @@ pub enum PolicyError {
     UnknownTemplateVar(String, String),
     #[error("policy template '{0}' resolved to an empty path")]
     EmptyTemplate(String),
+    #[error("[options.defaults] entry '{0}' is not declared in [options].optional")]
+    DefaultOnUndeclaredOption(String),
+    #[error(
+        "[options.defaults] entry '{0}' is also declared required — defaults are only valid for optional options"
+    )]
+    DefaultOnRequiredOption(String),
 }
 
 /// Result of resolving templates against user options. Ready for
@@ -155,6 +171,37 @@ impl PluginPolicy {
             });
         }
         Ok(p)
+    }
+
+    /// Inject default values from `[options].defaults` for keys the user
+    /// hasn't supplied. Call this before [`Self::resolve`] and before
+    /// forwarding options to the guest, so both the policy resolver and
+    /// the plugin see the defaulted values.
+    ///
+    /// Default templates may reference `$home`, `$xdg_data_home`, and
+    /// `$xdg_config_home`; `$option:` refs are rejected so default
+    /// resolution can't form cycles.
+    pub fn apply_defaults(
+        &self,
+        options: &mut HashMap<String, serde_json::Value>,
+    ) -> Result<(), PolicyError> {
+        for (key, template) in &self.options.defaults {
+            if self.options.required.contains(key) {
+                return Err(PolicyError::DefaultOnRequiredOption(key.clone()));
+            }
+            if !self.options.optional.contains(key) {
+                return Err(PolicyError::DefaultOnUndeclaredOption(key.clone()));
+            }
+            if options.contains_key(key) {
+                continue;
+            }
+            // Empty options/known to forbid $option: refs in defaults.
+            let empty_opts: HashMap<String, serde_json::Value> = HashMap::new();
+            let empty_known: HashSet<&str> = HashSet::new();
+            let resolved = resolve_template(template, &empty_opts, &empty_known, false)?;
+            options.insert(key.clone(), serde_json::Value::String(resolved));
+        }
+        Ok(())
     }
 
     /// Resolve filesystem templates against user-supplied options, validating
@@ -500,6 +547,98 @@ mode = "ro"
         let r = p.resolve(&opts(&[])).unwrap();
         assert_eq!(r.allowed_paths.len(), 1);
         assert!(r.allowed_paths[0].0.starts_with("ro:"));
+    }
+
+    #[test]
+    fn applies_default_for_missing_optional() {
+        let toml = r#"
+schema_version = 1
+kind = "test"
+name = "Test"
+[options]
+required = []
+optional = ["dir"]
+[options.defaults]
+dir = "/var/lib/test"
+"#;
+        let p = PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap();
+        let mut o = opts(&[]);
+        p.apply_defaults(&mut o).unwrap();
+        assert_eq!(o.get("dir").and_then(|v| v.as_str()), Some("/var/lib/test"));
+    }
+
+    #[test]
+    fn user_value_overrides_default() {
+        let toml = r#"
+schema_version = 1
+kind = "test"
+name = "Test"
+[options]
+required = []
+optional = ["dir"]
+[options.defaults]
+dir = "/var/lib/test"
+"#;
+        let p = PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap();
+        let mut o = opts(&[("dir", "/custom/path")]);
+        p.apply_defaults(&mut o).unwrap();
+        assert_eq!(o.get("dir").and_then(|v| v.as_str()), Some("/custom/path"));
+    }
+
+    #[test]
+    fn default_on_required_rejected() {
+        let toml = r#"
+schema_version = 1
+kind = "test"
+name = "Test"
+[options]
+required = ["dir"]
+optional = []
+[options.defaults]
+dir = "/var/lib/test"
+"#;
+        let p = PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap();
+        let mut o = opts(&[]);
+        let err = p.apply_defaults(&mut o).unwrap_err();
+        assert!(matches!(err, PolicyError::DefaultOnRequiredOption(ref k) if k == "dir"));
+    }
+
+    #[test]
+    fn default_on_undeclared_rejected() {
+        let toml = r#"
+schema_version = 1
+kind = "test"
+name = "Test"
+[options]
+required = []
+optional = []
+[options.defaults]
+dir = "/var/lib/test"
+"#;
+        let p = PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap();
+        let mut o = opts(&[]);
+        let err = p.apply_defaults(&mut o).unwrap_err();
+        assert!(matches!(err, PolicyError::DefaultOnUndeclaredOption(ref k) if k == "dir"));
+    }
+
+    #[test]
+    fn default_template_rejects_option_ref() {
+        let toml = r#"
+schema_version = 1
+kind = "test"
+name = "Test"
+[options]
+required = []
+optional = ["a", "b"]
+[options.defaults]
+a = "$option:b"
+"#;
+        let p = PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap();
+        let mut o = opts(&[]);
+        // `$option:b` is rejected because the default-resolver passes
+        // empty known_options.
+        let err = p.apply_defaults(&mut o).unwrap_err();
+        assert!(matches!(err, PolicyError::UndeclaredOptionRef(_, _)));
     }
 
     #[test]

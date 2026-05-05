@@ -13,9 +13,12 @@ host_template = "$option:keyring_dir"
 guest_path = "/keyrings"
 mode = "ro"
 
-# `keyring_dir` is required under the v1 policy schema — earlier versions
-# fell back to "$HOME/.local/share/keyrings" silently. Users should set it
-# explicitly in rosec.toml (the default is the same path).
 [options]
-required = ["keyring_dir"]
-optional = ["keyrings"]
+required = []
+optional = ["keyring_dir", "keyrings"]
+
+# Default keyring location when the user hasn't set keyring_dir. The
+# default value is what host_template above resolves against, so the
+# default location is auto-allowed too — no special-case in the daemon.
+[options.defaults]
+keyring_dir = "$home/.local/share/keyrings"

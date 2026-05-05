@@ -94,6 +94,19 @@ optional      = true           # missing option is accepted
 [options]
 required = ["path"]            # user MUST set these
 optional = ["key_file"]        # user MAY set these
+
+# Optional: defaults for optional options. The daemon injects these into
+# the user's option map for any key the user hasn't supplied, before
+# template resolution and before forwarding to the guest. Defaults may
+# reference $home / $xdg_data_home / $xdg_config_home (but not $option:
+# to avoid resolution cycles).
+#
+# Important: a host_template that references a defaulted option (e.g.
+# $option:keyring_dir) will resolve to the default value, so the default
+# location is auto-allowed without any special-case in the daemon.
+[options.defaults]
+# example — the gnome-keyring policy uses:
+#   keyring_dir = "$home/.local/share/keyrings"
 ```
 
 ### Signature scheme
@@ -172,6 +185,12 @@ access don't enable the plugin.
 - **Unknown user option** — `warn!` once at startup
   (`"unknown option 'foo' for kind X, ignored"`) and continue. Lenient
   mode: typos are common; the security cost of an ignored option is zero.
+- **Optional option with a `[options.defaults]` entry** — daemon injects
+  the resolved default for any key the user hasn't supplied. The default
+  is then visible to both `[[filesystem.preopens]]` / `[[filesystem.allowed_files]]`
+  template resolution AND to the plugin via the option map. Default
+  templates may use `$home`, `$xdg_data_home`, `$xdg_config_home`;
+  `$option:` refs are rejected to prevent resolution cycles.
 
 ### Schema versioning
 

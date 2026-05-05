@@ -1744,6 +1744,13 @@ async fn build_single_provider(
             // validates required options and template references too.
             let (allowed_paths, allowed_files) = match &discovered.policy {
                 Some(policy) => {
+                    // Apply [options.defaults] BEFORE resolve and BEFORE the
+                    // guest receives the option map, so the defaulted value
+                    // (e.g. keyring_dir = $home/.local/share/keyrings) is
+                    // visible to template resolution AND to the plugin itself.
+                    policy.apply_defaults(&mut guest_options).map_err(|e| {
+                        anyhow::anyhow!("policy defaults for provider '{}': {e}", entry.id)
+                    })?;
                     policy.report_unknown_options(&entry.id, &guest_options);
                     let resolved = policy.resolve(&guest_options).map_err(|e| {
                         anyhow::anyhow!("policy resolve for provider '{}': {e}", entry.id)
