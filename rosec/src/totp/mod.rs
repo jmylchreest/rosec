@@ -45,11 +45,7 @@ pub async fn dispatch(cmd: TotpCommand) -> Result<()> {
         }
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // Shared helpers (display detection, prompter binary resolution, seed input)
-// ───────────────────────────────────────────────────────────────────────────
-
 pub(super) fn has_display() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
 }

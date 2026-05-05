@@ -122,8 +122,8 @@ fn main() -> ! {
 }
 
 fn run() -> Result<()> {
-    // Log environment for debugging D-Bus connectivity.
-    // TEMPORARY — remove before release.
+    // Surface DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR for incident debugging
+    // (debug builds only — `debug_log` is a no-op in release).
     let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default();
     let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
     debug_log(&format!(
@@ -204,7 +204,6 @@ fn get_target_uid() -> u32 {
         return uid;
     }
 
-    // Real UID.
     // SAFETY: getuid() is always safe — no pointers, no side effects.
     let ruid = unsafe { libc::getuid() };
     if ruid != 0 {
@@ -407,11 +406,7 @@ async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
         bail!("no providers were unlocked");
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
 // chauthtok mode — password change
-// ═══════════════════════════════════════════════════════════════════
-
 type ZeroVec = Zeroizing<Vec<u8>>;
 
 /// Read two NUL-terminated password strings from stdin.

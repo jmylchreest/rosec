@@ -144,7 +144,6 @@ impl SshManager {
                 continue;
             }
 
-            // Discover keys.
             let metas = match provider.list_ssh_keys().await {
                 Ok(m) => m,
                 Err(e) => {
@@ -156,7 +155,6 @@ impl SshManager {
             debug!(provider = %provider_id, count = metas.len(), "ssh rebuild: discovered keys");
 
             for meta in metas {
-                // Fetch private key material.
                 let material = match provider.get_ssh_private_key(&meta.item_id).await {
                     Ok(m) => m,
                     Err(e) => {

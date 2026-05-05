@@ -57,10 +57,8 @@ pub(crate) struct PromptRequest {
     pub(crate) hint: String,
     #[serde(default)]
     pub(crate) backend: String,
-    /// Label for the confirm button. Defaults to "Unlock".
     #[serde(default)]
     pub(crate) confirm_label: String,
-    /// Label for the cancel button. Defaults to "Cancel".
     #[serde(default)]
     pub(crate) cancel_label: String,
     /// Field list.  When absent a single hidden `password` field is implied

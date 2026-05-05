@@ -2,9 +2,6 @@
 //! in this binary (regular prompt, TOTP display, QR scan).
 
 use crate::request::ThemeConfig;
-
-// ── Layout constants ─────────────────────────────────────────────────────
-
 /// Outer/inner padding constants matching the `container().padding(4)` +
 /// `column().padding(14)` pattern used by every prompt window.
 pub(crate) const OUTER_PADDING: f32 = 4.0;
@@ -20,9 +17,6 @@ pub(crate) fn content_width(window_width: f32) -> f32 {
 pub(crate) fn line_height(font_size: f32) -> f32 {
     (font_size * 1.3).ceil()
 }
-
-// ── Text measurement ────────────────────────────────────────────────────
-
 /// Cosmic-text driven exact-pixel text measurement, tied to one window's
 /// theme + content width.
 ///
@@ -111,9 +105,6 @@ pub(crate) fn cosmic_font_family(name: &str) -> cosmic_text::Family<'_> {
     }
     cosmic_text::Family::Name(name)
 }
-
-// ── Colour / font ───────────────────────────────────────────────────────
-
 pub(crate) fn parse_color(value: &str, fallback: iced::Color) -> iced::Color {
     iced::Color::parse(value.trim()).unwrap_or(fallback)
 }
@@ -153,9 +144,6 @@ fn darken(c: iced::Color, f: f32) -> iced::Color {
         a: c.a,
     }
 }
-
-// ── Widget helpers ──────────────────────────────────────────────────────
-
 pub(crate) fn button_style(
     bg: iced::Color,
     fg: iced::Color,
@@ -236,9 +224,6 @@ pub(crate) fn pin_box_row<'a, M: 'a>(
         .width(Length::Shrink)
         .into()
 }
-
-// ── Inline rich-text spans ──────────────────────────────────────────────
-
 /// Parse a string with `**bold**` and `_italic_` markers into iced rich_text spans.
 ///
 /// Generic over the message type so the same parser feeds any iced app's

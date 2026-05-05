@@ -69,24 +69,17 @@ async fn main() -> Result<()> {
         Commands::Disable(args) => enable::cmd_disable(args),
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // Command implementations
-// ───────────────────────────────────────────────────────────────────────────
-
 pub(crate) async fn conn() -> Result<Connection> {
-    // 1. Explicit override via ROSEC_SOCKET env var.
     if let Ok(socket) = std::env::var("ROSEC_SOCKET") {
         let addr = format!("unix:path={socket}");
         return Ok(zbus::connection::Builder::address(&*addr)?.build().await?);
     }
 
-    // 2. Try the session bus.
     if let Ok(c) = Connection::session().await {
         return Ok(c);
     }
 
-    // 3. Fall back to the private bus socket at $XDG_RUNTIME_DIR/rosec/bus.
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         let socket = std::path::Path::new(&runtime_dir).join("rosec").join("bus");
         if socket.exists() {
@@ -95,7 +88,6 @@ pub(crate) async fn conn() -> Result<Connection> {
         }
     }
 
-    // Nothing worked.
     Err(anyhow::anyhow!(
         "cannot connect to rosecd: no session bus, ROSEC_SOCKET not set, \
          and $XDG_RUNTIME_DIR/rosec/bus not found"
@@ -193,7 +185,6 @@ pub(crate) async fn try_lazy_unlock(conn: &Connection, err: &zbus::Error) -> Res
 pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
     use futures_util::StreamExt as _;
 
-    // Build a Secret Service proxy for Unlock().
     let service_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -216,7 +207,6 @@ pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    // Build a proxy on the prompt object so we can subscribe to Completed.
     let prompt_proxy = zbus::Proxy::new(
         conn,
         "org.freedesktop.secrets",
@@ -229,10 +219,8 @@ pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
     // a race where Completed fires before we start listening.
     let mut completed_stream = prompt_proxy.receive_signal("Completed").await?;
 
-    // Tell the daemon to display the credential dialog.
     let _: () = prompt_proxy.call("Prompt", &("",)).await?;
 
-    // Await Completed or Ctrl+C.
     let dismissed = tokio::select! {
         msg = completed_stream.next() => {
             match msg {
@@ -577,8 +565,6 @@ pub(crate) async fn prompt_field(
 
 // (provider subcommand tree moved to rosec/src/provider/)
 
-// (status / sync subcommand moved to rosec/src/{status,sync}.rs)
-
 /// Ensure the daemon's cache is fresh by syncing providers in parallel.
 ///
 /// Syncs unlocked providers that haven't synced in the last 60 seconds.
@@ -879,8 +865,6 @@ fn glob_matches(item: &ItemSummary, attrs: &HashMap<String, String>) -> bool {
         wildmatch::WildMatch::new(pattern).matches(value)
     })
 }
-
-// (search subcommand moved to rosec/src/search.rs)
 
 /// Fetch Label and Attributes for an item into a structured summary.
 pub(crate) async fn fetch_item_data(

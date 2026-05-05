@@ -19,7 +19,6 @@ use zbus::fdo::RequestNameFlags;
 
 /// How the daemon is connected to a D-Bus bus.
 pub enum BusMode {
-    /// Connected to the standard session bus (normal operation).
     Session,
     /// Running an embedded private bus broker.
     Private {

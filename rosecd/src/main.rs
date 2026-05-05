@@ -71,7 +71,6 @@ async fn run() -> Result<()> {
 
     let providers: Vec<Arc<dyn Provider>> = build_providers(&config, &plugin_registry).await?;
 
-    // Build per-provider return_attr and collection maps from config.
     let return_attr_map: std::collections::HashMap<String, Vec<String>> = config
         .provider
         .iter()
@@ -158,8 +157,6 @@ async fn run() -> Result<()> {
         tracing::info!("SSH FUSE disabled by config (ssh_fuse = false)");
         None
     };
-
-    // SSH FUSE ready + SSH agent ready are logged inside SshManager::start().
 
     // Start the TOTP FUSE filesystem.  Returns None if disabled by config,
     // XDG_RUNTIME_DIR is unset, or FUSE is unavailable.
@@ -252,7 +249,6 @@ async fn run() -> Result<()> {
     let autolock_totp = totp_manager.clone();
     tokio::spawn(autolock_loop(autolock_state, autolock_ssh, autolock_totp));
 
-    // Wait for SIGTERM or SIGINT for graceful shutdown.
     shutdown_signal().await;
     tracing::info!("received shutdown signal, locking all providers before exit");
     if let Some(ref sm) = ssh_manager {
@@ -333,7 +329,6 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                 continue;
             }
 
-            // Compute effective interval: accelerate when cached.
             let fraction = if status.cached {
                 config
                     .provider
@@ -659,9 +654,6 @@ async fn shutdown_signal() {
         ctrl_c.await.ok();
     }
 }
-
-// ---------------------------------------------------------------------------
-
 /// Ask logind for the session that owns our PID via `GetSessionByPID`.
 ///
 /// Returns the session ID string (e.g. "3") on success, or `None` if logind
@@ -848,8 +840,6 @@ async fn logind_watcher(
     use zbus::Connection;
 
     let system_bus = Connection::system().await?;
-
-    // ── Discover graphical sessions ──────────────────────────────────────
     //
     // Find all graphical sessions (wayland/x11) for our UID.  We track their
     // lock state individually so providers are only locked when *every*
@@ -875,9 +865,6 @@ async fn logind_watcher(
             None => graphical.first().map(|(id, _)| id.clone()),
         },
     };
-
-    // ── Subscribe to signals ──────────────────────────────────────────────
-
     // PrepareForSleep — fires before suspend/hibernate (always honoured).
     let sleep_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
@@ -937,15 +924,10 @@ async fn logind_watcher(
         primary = primary_session_id.as_deref().unwrap_or("unknown"),
         "logind watcher started"
     );
-
-    // ── Helper: check if all tracked graphical sessions are locked ─────
     let all_sessions_locked =
         |locks: &HashMap<String, bool>| !locks.is_empty() && locks.values().all(|v| *v);
-
-    // ── Event loop ────────────────────────────────────────────────────────
     loop {
         tokio::select! {
-            // ── PrepareForSleep ───────────────────────────────────────────
             msg = sleep_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
@@ -972,8 +954,6 @@ async fn logind_watcher(
                     }
                 }
             }
-
-            // ── SessionRemoved (logout) ──────────────────────────────────
             msg = session_removed_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
@@ -1029,8 +1009,6 @@ async fn logind_watcher(
                     }
                 }
             }
-
-            // ── SessionNew — dynamically track new graphical sessions ────
             msg = session_new_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
@@ -1058,8 +1036,6 @@ async fn logind_watcher(
                     }
                 }
             }
-
-            // ── Lock signal — mark session as locked ─────────────────────
             msg = lock_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
@@ -1106,8 +1082,6 @@ async fn logind_watcher(
                     }
                 }
             }
-
-            // ── Unlock signal — mark session as unlocked ─────────────────
             msg = unlock_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
@@ -1459,7 +1433,6 @@ async fn config_watcher(
         .collect();
 
     loop {
-        // Wait for a notification.
         if rx.recv().await.is_none() {
             break;
         }
@@ -2050,8 +2023,6 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     let config: Config = toml::from_str(&content)?;
     Ok(config)
 }
-
-// ── Device ID persistence ────────────────────────────────────────
 //
 // Bitwarden APIs require a stable `deviceIdentifier`.  The WASM provider
 // cannot access the filesystem, so the host injects the device ID

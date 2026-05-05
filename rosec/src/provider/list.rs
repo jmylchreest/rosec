@@ -36,7 +36,6 @@ pub async fn run() -> Result<()> {
             return Ok(());
         }
 
-        // Look up which kinds are experimental so we can annotate them.
         let registry = rosec_wasm::discovery::scan_plugins(
             rosec_core::WasmPreference::default(),
             rosec_core::WasmVerify::default(),
@@ -53,7 +52,6 @@ pub async fn run() -> Result<()> {
             .unwrap_or_default()
             .as_secs();
 
-        // Build row data with sync strings for column width measurement.
         struct RowData {
             id: String,
             name: String,

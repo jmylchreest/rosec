@@ -4,11 +4,7 @@
 //! `--help` shows full help including examples (long_about + after_long_help).
 
 use clap::{Parser, Subcommand, ValueEnum};
-
-// ───────────────────────────────────────────────────────────────────────────
 // Top-level
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 #[command(
     name = "rosec",
@@ -221,11 +217,7 @@ NOTES:
             allowing gnome-keyring to resume handling Secret Service requests.")]
     Disable(DisableArgs),
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // Output format (shared)
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// Aligned columns (default for search/item list)
@@ -237,11 +229,7 @@ pub enum Format {
     /// Labelled sections (default for inspect)
     Human,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // search
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 pub struct SearchArgs {
     /// Sync providers before searching; also unlocks if needed
@@ -264,11 +252,7 @@ pub struct SearchArgs {
     #[arg(trailing_var_arg = true)]
     pub filters: Vec<String>,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // get
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 pub struct GetArgs {
     /// Sync providers before fetching
@@ -286,11 +270,7 @@ pub struct GetArgs {
     /// Item identifier: 16-char hex ID, key=value filter, or D-Bus object path
     pub item: String,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // totp
-// ───────────────────────────────────────────────────────────────────────────
-
 /// Container for `rosec totp [get|add]`.
 ///
 /// When invoked without a subcommand (`rosec totp <item>`), the trailing
@@ -340,11 +320,7 @@ pub struct TotpAddArgs {
     /// Item identifier: 16-char hex ID, key=value filter, or D-Bus object path
     pub item: String,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // inspect
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 pub struct InspectArgs {
     /// Also fetch and display sensitive attributes (password, totp, notes, etc.)
@@ -362,11 +338,7 @@ pub struct InspectArgs {
     /// Item identifier: 16-char hex ID or full D-Bus object path
     pub item: String,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // enable / disable
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 pub struct EnableArgs {
     /// Do not install/enable systemd user units
@@ -388,11 +360,7 @@ pub struct DisableArgs {
     #[arg(long)]
     pub no_systemd: bool,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // provider subcommands
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Subcommand)]
 pub enum ProviderCommands {
     /// List all configured providers and their state
@@ -533,11 +501,7 @@ pub struct ProviderRemovePasswordArgs {
     /// Password entry ID to remove
     pub entry_id: String,
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // config subcommands
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Print the current effective configuration as TOML
@@ -575,11 +539,7 @@ EXAMPLES:
         value: String,
     },
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // item subcommands
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Subcommand)]
 pub enum ItemCommands {
     /// List items (delegates to search)

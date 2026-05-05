@@ -298,7 +298,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
         );
     }
 
-    // Report detected providers.
     let existing = detect_existing_providers();
     if !existing.is_empty() {
         println!("Detected existing Secret Service providers:");
@@ -325,7 +324,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
         println!("unchanged {}", secrets_path.display());
     }
 
-    // Write gnome-keyring D-Bus mask (only with --mask).
     if mask {
         let has_gnome_keyring = existing.iter().any(|(n, _)| *n == "gnome-keyring");
         if has_gnome_keyring || force {
@@ -340,12 +338,10 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
         }
     }
 
-    // Mask gnome-keyring XDG autostart entries (only with --mask).
     if mask {
         mask_gnome_keyring_autostart()?;
     }
 
-    // Mask gnome-keyring systemd socket (only with --mask).
     if mask {
         mask_gnome_keyring_systemd_socket()?;
     }
@@ -377,7 +373,6 @@ pub fn cmd_enable(args: crate::cli::EnableArgs) -> Result<()> {
             println!("unchanged {}", socket_path.display());
         }
 
-        // Reload, then enable + start.
         run_systemctl(&["daemon-reload"]);
         run_systemctl(&["enable", "--now", "rosecd.service"]);
     }
@@ -479,5 +474,3 @@ pub fn cmd_disable(args: crate::cli::DisableArgs) -> Result<()> {
     }
     Ok(())
 }
-
-// Help text is now handled by clap derive in cli.rs.

@@ -36,11 +36,7 @@ pub async fn dispatch(action: Option<ItemCommands>) -> Result<()> {
         ItemCommands::Import(args) => import::run(args).await,
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // Shared helpers (TOML round-trip + editor)
-// ───────────────────────────────────────────────────────────────────────────
-
 /// Parsed result of an item TOML document.
 pub(super) struct ParsedItem {
     pub(super) label: String,

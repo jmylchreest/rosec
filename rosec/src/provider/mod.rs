@@ -46,11 +46,7 @@ pub async fn dispatch(action: Option<ProviderCommands>) -> Result<()> {
         ProviderCommands::ChangePassword(args) => change_password::run(&args.id).await,
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
 // Shared helpers
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy)]
 pub(super) enum OptionScope {
     Required,
