@@ -39,11 +39,13 @@ pub(crate) mod host_watch;
 pub mod keys;
 pub mod notifications;
 pub(crate) mod path_util;
+pub mod policy;
 pub mod protocol;
 mod provider;
 mod wasm_cred;
 
 pub use discovery::PluginRegistry;
+pub use policy::{PluginPolicy, PolicyError, ResolvedPolicy};
 pub use provider::{WasmProvider, WasmProviderConfig};
 
 /// Crate-wide test mutex for serializing tests that manipulate environment

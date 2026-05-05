@@ -209,6 +209,28 @@ pub struct ProviderEntry {
     #[serde(default)]
     pub options: HashMap<String, serde_json::Value>,
 
+    /// Override the plugin policy's network allow-list entirely.
+    ///
+    /// When set, the effective allow-list is `allowed_hosts ∪ additional_hosts`
+    /// — the plugin's bundled `policy.toml` is ignored for network. Use this
+    /// to lock a plugin down to specific endpoints (e.g. a single regional
+    /// API) tighter than the policy default. rosecd logs a `warn!` at startup
+    /// when this field is set, so the override is auditable.
+    ///
+    /// When `None`, the policy's `[network] allowed_hosts` applies.
+    #[serde(default)]
+    pub allowed_hosts: Option<Vec<String>>,
+
+    /// Additional network hosts added on top of the effective allow-list.
+    ///
+    /// Always extends the active set (whether sourced from the policy or from
+    /// `allowed_hosts` above). Use this to add a corporate proxy, a redirect
+    /// target after a domain change, or a regional endpoint the plugin's
+    /// bundled policy didn't anticipate. rosecd logs at `info!` listing the
+    /// added hosts.
+    #[serde(default)]
+    pub additional_hosts: Vec<String>,
+
     /// Ordered list of glob patterns selecting which sensitive attribute(s) to
     /// return as the "secret" for standard Secret Service `GetSecret` calls.
     ///
