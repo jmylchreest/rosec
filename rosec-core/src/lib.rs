@@ -32,12 +32,20 @@ pub type Attributes = HashMap<String, String>;
 // convention, separating provider/service-stamped attributes from arbitrary
 // client-supplied ones.
 
+/// Item identifier (first-class struct field).
 pub const ATTR_ID: &str = "id";
+
+/// Item display label (first-class struct field).
 pub const ATTR_LABEL: &str = "label";
+
+/// Creation timestamp (first-class struct field).
 pub const ATTR_CREATED: &str = "created";
+
+/// Last-modified timestamp (first-class struct field).
 pub const ATTR_MODIFIED: &str = "modified";
 
-/// Stamped by the service layer; exposed as a public, searchable attribute.
+/// Owning provider. Stamped by the service layer; exposed as a public,
+/// searchable attribute.
 pub const ATTR_PROVIDER: &str = "rosec:provider";
 
 /// Item type classification (e.g. "login", "note", "ssh-key"). Used by
@@ -68,11 +76,15 @@ pub const RESERVED_ATTRIBUTES: &[&str] = &[
 /// `ProviderError::NotSupported` if the provider lacks the required capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
+    /// Provider can sync with a remote source ([`Provider::sync`]).
     Sync,
+    /// Provider supports write operations (create, update, delete items).
     Write,
+    /// Provider exposes SSH keys ([`Provider::list_ssh_keys`], [`Provider::get_ssh_private_key`]).
     Ssh,
     /// Supports multiple unlock passwords wrapping the same vault key.
     KeyWrapping,
+    /// Provider supports password changes ([`Provider::change_password`]).
     PasswordChange,
     /// Provider supports offline cache export/restore (`export_cache`, `restore_cache`).
     ///
@@ -136,6 +148,7 @@ impl ItemType {
         }
     }
 
+    /// The canonical `rosec:type` attribute value for this type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Generic => "generic",
@@ -147,6 +160,7 @@ impl ItemType {
         }
     }
 
+    /// The default secret attribute name for this item type.
     pub fn default_secret_attr(&self) -> &'static str {
         match self {
             Self::Generic | Self::Note | Self::Identity => "secret",
@@ -182,6 +196,7 @@ impl std::str::FromStr for ItemType {
 /// A request to create a new vault item.
 #[derive(Debug, Clone)]
 pub struct NewItem {
+    /// Display label (required, non-empty).
     pub label: String,
     /// Item type hint.
     ///
@@ -228,6 +243,7 @@ impl NewItem {
 /// All fields are optional — only provided values are changed.
 #[derive(Debug, Clone, Default)]
 pub struct ItemUpdate {
+    /// New display label (None = no change).
     pub label: Option<String>,
     /// New item type (None = no change).
     ///
@@ -598,7 +614,10 @@ pub struct SshKeyMeta {
     /// Opaque item identifier, passed back to `get_ssh_private_key`.
     pub item_id: String,
 
+    /// Human-readable vault item name.
     pub item_name: String,
+
+    /// Provider that owns this key.
     pub provider_id: String,
 
     /// OpenSSH wire-format public key (the `authorized_keys` line), if known.
@@ -660,7 +679,9 @@ pub type SyncSucceededFn = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 /// run safely.
 #[derive(Clone, Default)]
 pub struct ProviderCallbacks {
+    /// Fired immediately after a successful unlock.
     pub on_unlocked: Option<CallbackFn>,
+    /// Fired immediately after a successful lock.
     pub on_locked: Option<CallbackFn>,
     /// Fired after a sync completes successfully.
     ///
