@@ -41,8 +41,15 @@ fn build_tls_config(tls_mode: &TlsMode) -> ureq::tls::TlsConfig {
     }
 }
 
+/// Build a `ureq::Agent` for guest HTTP requests.
+///
+/// Redirects are disabled so a 302 response from an allow-listed host cannot
+/// silently redirect the guest to an internal endpoint. The allow-host check
+/// in `http_request_impl` only sees the original URL — without this cap, a
+/// `Location:` header would bypass it.
 pub(crate) fn build_agent(tls_mode: &TlsMode) -> ureq::Agent {
     ureq::Agent::config_builder()
+        .max_redirects(0)
         .tls_config(build_tls_config(tls_mode))
         .build()
         .new_agent()
@@ -50,8 +57,7 @@ pub(crate) fn build_agent(tls_mode: &TlsMode) -> ureq::Agent {
 
 /// Build a `ureq::Agent` for readiness probes.
 ///
-/// Like [`build_agent`] but also disables redirects to prevent SSRF via an
-/// allowed host that 302-redirects to internal endpoints.
+/// Same redirect cap as [`build_agent`] for the same SSRF reason.
 pub(crate) fn build_probe_agent(tls_mode: &TlsMode) -> ureq::Agent {
     ureq::Agent::config_builder()
         .max_redirects(0)
