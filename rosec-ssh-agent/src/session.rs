@@ -123,7 +123,6 @@ impl Session for SshAgent {
             (entry.require_confirm, entry.item_name.clone())
         };
 
-        // Interactive confirmation for keys with ssh_confirm / ssh-confirm.
         if require_confirm {
             if let Some(ref cb) = self.confirm {
                 info!(

@@ -100,14 +100,12 @@ impl Snapshot {
             snap.dir_children.insert(ino, Vec::new());
         }
 
-        // root children
         let root = snap
             .dir_children
             .get_mut(&INO_ROOT)
             .expect("root initialised");
         root.push(("keys".to_string(), INO_KEYS, true));
         root.push(("config.d".to_string(), INO_CONFIG_D, true));
-        // keys/ children
         let keys = snap
             .dir_children
             .get_mut(&INO_KEYS)

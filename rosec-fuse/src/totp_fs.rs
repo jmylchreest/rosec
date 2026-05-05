@@ -37,7 +37,6 @@ const INO_DYNAMIC_START: u64 = 100;
 
 static STATIC_DIRS: &[u64] = &[INO_ROOT, INO_BY_NAME, INO_BY_ID];
 
-/// A TOTP entry stored in the snapshot.
 pub struct TotpEntry {
     pub item_id: String,
     pub item_name: String,
@@ -445,7 +444,6 @@ impl Filesystem for TotpFuse {
     }
 }
 
-/// Handle to the mounted TOTP FUSE filesystem.
 pub struct TotpMountHandle {
     session: Option<BackgroundSession>,
     pub fuse: Arc<TotpFuse>,

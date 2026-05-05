@@ -25,7 +25,6 @@ pub struct KeyEntry {
     /// Human-readable name of the vault item this key came from.
     pub item_name: String,
 
-    /// Provider that owns this key.
     pub provider_id: String,
 
     /// The private key (zeroized on drop via `ssh_key::PrivateKey`).
@@ -167,7 +166,6 @@ impl KeyStore {
         self.entries.len()
     }
 
-    /// True if the store has no keys.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

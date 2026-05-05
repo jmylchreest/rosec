@@ -23,7 +23,6 @@ pub struct ConfigSnippet {
     /// Normalised filename (without `.conf` extension).
     pub filename_stem: String,
 
-    /// Complete file content.
     pub content: String,
 }
 
@@ -166,7 +165,6 @@ fn format_revision(time: Option<SystemTime>) -> String {
 
 /// Minimal ISO 8601 UTC timestamp formatter (avoids pulling in chrono here).
 fn format_unix_timestamp(secs: u64) -> String {
-    // Days from epoch
     let days = secs / 86400;
     let time_of_day = secs % 86400;
     let hour = time_of_day / 3600;

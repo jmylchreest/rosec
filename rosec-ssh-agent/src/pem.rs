@@ -72,7 +72,6 @@ mod tests {
     fn extract_keys_with_garbage_around() {
         // Not a real key — just ensure the function doesn't panic on garbage PEM.
         let text = "some prefix\n-----BEGIN OPENSSH PRIVATE KEY-----\ngarbage\n-----END OPENSSH PRIVATE KEY-----\nsome suffix";
-        // parse will fail on the garbage — we expect zero keys, no panic
         let keys = extract_keys(text);
         assert!(keys.is_empty());
     }
