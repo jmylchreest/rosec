@@ -1702,32 +1702,12 @@ async fn build_single_provider(
                 .unwrap_or(&entry.id)
                 .to_string();
 
-            // User-specified allowed_hosts override manifest defaults.
-            let explicit_hosts = entry.options.get("allowed_hosts").and_then(|v| v.as_str());
-            let mut allowed_hosts: Vec<String> = explicit_hosts
-                .map(|s| s.split(',').map(|h| h.trim().to_string()).collect())
-                .unwrap_or_else(|| discovered.manifest.default_allowed_hosts.clone());
-
-            // When using defaults (no explicit allowed_hosts), auto-derive
-            // hostnames from URL-valued options so self-hosted servers work
-            // without requiring a manual allowed_hosts override.
-            if explicit_hosts.is_none() {
-                let derived: Vec<String> = ["base_url", "api_url", "identity_url"]
-                    .iter()
-                    .filter_map(|k| entry.options.get(*k).and_then(|v| v.as_str()))
-                    .filter_map(extract_host_from_url)
-                    .filter(|h| !allowed_hosts.contains(h))
-                    .collect();
-                allowed_hosts.extend(derived);
-            }
-
-            // Forward all options except host-consumed ones to the guest.
-            // Any string value that starts with `~/` is expanded against
-            // `$HOME` here — once, at the daemon-side boundary — so all
-            // downstream consumers (compute_allowed_files, the guest itself,
-            // any future path-aware option) see resolved paths without each
-            // re-implementing tilde handling.  The on-disk config is left
-            // untouched so it stays portable across users.
+            // Forward all options except the legacy "name"/"allowed_hosts"
+            // string-shorthand options to the guest. Any string value that
+            // starts with `~/` is expanded against `$HOME` here — once, at
+            // the daemon-side boundary — so all downstream consumers see
+            // resolved paths without each re-implementing tilde handling.
+            // The on-disk config is left untouched so it stays portable.
             let mut guest_options: std::collections::HashMap<String, serde_json::Value> = entry
                 .options
                 .iter()
@@ -1758,11 +1738,69 @@ async fn build_single_provider(
                 .entry("device_id".to_string())
                 .or_insert_with(|| serde_json::Value::String(load_or_create_device_id()));
 
-            // Compute WASI filesystem paths to pre-open for the sandbox.
-            let allowed_paths = compute_wasi_allowed_paths(kind, &guest_options);
+            // Build allowed_paths / allowed_files from the policy when present;
+            // fall back to the legacy kind-string gates only under the dev path
+            // (wasm_verify=disabled with no .policy.toml). policy.resolve()
+            // validates required options and template references too.
+            let (allowed_paths, allowed_files) = match &discovered.policy {
+                Some(policy) => {
+                    policy.report_unknown_options(&entry.id, &guest_options);
+                    let resolved = policy.resolve(&guest_options).map_err(|e| {
+                        anyhow::anyhow!("policy resolve for provider '{}': {e}", entry.id)
+                    })?;
+                    (resolved.allowed_paths, resolved.allowed_files)
+                }
+                None => (
+                    legacy_compute_wasi_allowed_paths(kind, &guest_options),
+                    legacy_compute_allowed_files(kind, &guest_options),
+                ),
+            };
 
-            // Per-file scoped reads via host_file (used by keepassxc-file).
-            let allowed_files = compute_allowed_files(kind, &guest_options);
+            // Effective allowed_hosts:
+            //   policy_or_manifest_baseline  ↦  user.allowed_hosts replaces it (loud warn)
+            //                                ↦  user.additional_hosts always extends (info)
+            let baseline: Vec<String> = match &discovered.policy {
+                Some(policy) => policy.network.allowed_hosts.clone(),
+                None => discovered.manifest.default_allowed_hosts.clone(),
+            };
+            let mut allowed_hosts: Vec<String> = match &entry.allowed_hosts {
+                Some(replacement) => {
+                    tracing::warn!(
+                        provider = %entry.id,
+                        kind = %kind,
+                        count = replacement.len(),
+                        "user config replaced policy network.allowed_hosts via allowed_hosts"
+                    );
+                    replacement.clone()
+                }
+                None => baseline,
+            };
+
+            // Always-extending user knob, plus auto-derive hostnames from
+            // URL-valued options so self-hosted servers work without manual
+            // override (only when the user hasn't explicitly replaced).
+            if entry.allowed_hosts.is_none() {
+                let derived: Vec<String> = ["base_url", "api_url", "identity_url"]
+                    .iter()
+                    .filter_map(|k| entry.options.get(*k).and_then(|v| v.as_str()))
+                    .filter_map(extract_host_from_url)
+                    .filter(|h| !allowed_hosts.contains(h))
+                    .collect();
+                allowed_hosts.extend(derived);
+            }
+            if !entry.additional_hosts.is_empty() {
+                tracing::info!(
+                    provider = %entry.id,
+                    kind = %kind,
+                    added = ?entry.additional_hosts,
+                    "extending allowed_hosts with user additional_hosts"
+                );
+                for h in &entry.additional_hosts {
+                    if !allowed_hosts.contains(h) {
+                        allowed_hosts.push(h.clone());
+                    }
+                }
+            }
 
             let wasm_config = rosec_wasm::WasmProviderConfig {
                 id: entry.id.clone(),
@@ -1799,15 +1837,13 @@ fn extract_host_from_url(url_str: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(str::to_string))
 }
 
-/// Compute WASI filesystem paths to pre-open for a plugin.
+/// Legacy kind-string-keyed gate for filesystem preopens.
 ///
-/// The WASI sandbox blocks all host filesystem access unless directories are
-/// explicitly pre-opened.  This function inspects the plugin kind and options
-/// to determine which host paths the guest needs.
-///
-/// Paths are returned as `(src, dest)` pairs where `src` is the host path
-/// (prefixed with `ro:` for read-only) and `dest` is the guest-visible path.
-fn compute_wasi_allowed_paths(
+/// Used only when a plugin has no `.policy.toml` sidecar AND
+/// `wasm_verify = "disabled"`. Both conditions together imply "developer
+/// trust the wasm" mode, the only path that bypasses the policy. Will be
+/// removed once `wasm_verify="disabled"` is dropped.
+fn legacy_compute_wasi_allowed_paths(
     kind: &str,
     options: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<(String, PathBuf)> {
@@ -1840,13 +1876,9 @@ fn compute_wasi_allowed_paths(
     paths
 }
 
-/// Compute per-file scoped paths for the `host_file` host imports.
-///
-/// Currently only `keepassxc-file` uses this — its `path` option points to
-/// the user's `.kdbx` database, which is the only file the guest can read.
-/// `options` is expected to already have any `~/` expansion applied (done
-/// once at the daemon-side boundary in [`build_single_provider`]).
-fn compute_allowed_files(
+/// Legacy kind-string-keyed gate for `host_file` per-file scoping.
+/// Same dev-mode-only fallback as [`legacy_compute_wasi_allowed_paths`].
+fn legacy_compute_allowed_files(
     kind: &str,
     options: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<PathBuf> {
