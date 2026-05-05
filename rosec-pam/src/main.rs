@@ -163,9 +163,10 @@ fn ensure_session_bus_env() {
         return;
     }
 
-    // Determine the target UID.  PAM sets PAM_USER but it's not always
-    // in our environment.  Fall back to the real UID, then the effective UID.
-    let uid = get_target_uid();
+    let uid = match get_target_uid() {
+        Some(u) => u,
+        None => return,
+    };
     debug_log(&format!("target uid={uid}"));
 
     let runtime_dir = format!("/run/user/{uid}");
@@ -193,26 +194,31 @@ fn ensure_session_bus_env() {
 /// Get the UID of the user we're trying to unlock for.
 ///
 /// Strategy:
-/// 1. `PAM_USER` env var → getpwnam → uid (most reliable in PAM context)
+/// 1. `PAM_USER` env var → getpwnam → uid (most reliable in PAM context).
 /// 2. Real UID of the process (works when GDM runs the session worker
-///    with the user's real UID)
-/// 3. Effective UID as last resort
-fn get_target_uid() -> u32 {
+///    with the user's real UID).
+/// 3. Refuse if running as root with no `PAM_USER` — guessing here
+///    would attempt to unlock root's vaults using the user's password,
+///    or worse, redirect to a different user's session bus.
+fn get_target_uid() -> Option<u32> {
     if let Ok(user) = std::env::var("PAM_USER")
         && let Some(uid) = username_to_uid(&user)
     {
-        return uid;
+        return Some(uid);
     }
 
     // SAFETY: getuid() is always safe — no pointers, no side effects.
     let ruid = unsafe { libc::getuid() };
     if ruid != 0 {
-        return ruid;
+        return Some(ruid);
     }
 
-    // Effective UID as last resort (may be root in GDM context).
-    // SAFETY: geteuid() is always safe — no pointers, no side effects.
-    unsafe { libc::geteuid() }
+    // euid=0 with no PAM_USER — we have no safe way to identify the target.
+    eprintln!(
+        "rosec-pam-unlock: refusing to operate (euid=0, PAM_USER unset). \
+         Configure pam_exec to forward PAM_USER (default for pam_unix)."
+    );
+    None
 }
 
 /// Look up a username and return its UID, or `None` if not found.
