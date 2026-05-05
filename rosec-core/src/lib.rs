@@ -9,6 +9,7 @@ pub mod config;
 pub mod config_edit;
 pub mod credential;
 pub mod dedup;
+pub mod limits;
 pub mod machine_key;
 pub mod oauth;
 pub mod process;

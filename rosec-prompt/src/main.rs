@@ -79,17 +79,14 @@ fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter("warn").init();
 
-    // Cap stdin so a misbehaving caller cannot drive us into unbounded
-    // allocation by holding stdin open. 64 KiB covers the largest realistic
-    // request (theme + many fields + info text) with comfortable headroom.
-    const MAX_REQUEST: u64 = 64 * 1024;
+    use rosec_core::limits::MAX_PROMPT_REQUEST_BYTES;
     let mut raw = String::new();
     io::stdin()
         .lock()
-        .take(MAX_REQUEST + 1)
+        .take(MAX_PROMPT_REQUEST_BYTES + 1)
         .read_to_string(&mut raw)?;
-    if raw.len() as u64 > MAX_REQUEST {
-        eprintln!("prompt request exceeds {MAX_REQUEST} bytes");
+    if raw.len() as u64 > MAX_PROMPT_REQUEST_BYTES {
+        eprintln!("prompt request exceeds {MAX_PROMPT_REQUEST_BYTES} bytes");
         std::process::exit(2);
     }
 

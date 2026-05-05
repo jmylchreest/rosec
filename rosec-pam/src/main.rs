@@ -232,15 +232,21 @@ fn username_to_uid(name: &str) -> Option<u32> {
 /// Read the password from stdin as provided by `pam_exec` with `expose_authtok`.
 ///
 /// pam_exec sends the password null-terminated on stdin. We read until EOF
-/// or the first null byte, whichever comes first.
+/// or the first null byte, whichever comes first, capped at
+/// [`MAX_PASSWORD_PAYLOAD_BYTES`] so a misbehaving caller cannot drive us
+/// into unbounded allocation by holding stdin open.
 fn read_password_from_stdin() -> Result<Zeroizing<Vec<u8>>> {
+    use rosec_core::limits::MAX_PASSWORD_PAYLOAD_BYTES;
     let mut buf = Zeroizing::new(Vec::with_capacity(256));
 
-    // Read all available stdin. pam_exec closes the write end after
-    // sending the password, so read_to_end will return once done.
-    std::io::stdin()
+    let stdin = std::io::stdin();
+    let mut limited = stdin.lock().take(MAX_PASSWORD_PAYLOAD_BYTES + 1);
+    limited
         .read_to_end(&mut buf)
         .context("read_to_end on stdin")?;
+    if buf.len() as u64 > MAX_PASSWORD_PAYLOAD_BYTES {
+        bail!("password payload exceeds {MAX_PASSWORD_PAYLOAD_BYTES} bytes");
+    }
 
     // Strip trailing null byte if present (pam_exec null-terminates).
     if buf.last() == Some(&0) {
@@ -413,21 +419,18 @@ type ZeroVec = Zeroizing<Vec<u8>>;
 ///
 /// Protocol: `<old_password>\0<new_password>\0<EOF>`.
 fn read_two_passwords_from_stdin() -> Result<(ZeroVec, ZeroVec)> {
+    use rosec_core::limits::MAX_PASSWORD_PAYLOAD_BYTES;
     use std::io::Read as _;
-    // Cap the read so a misconfigured or malicious caller cannot drive us
-    // into unbounded allocation by holding stdin open. PAM_MAX_RESP_SIZE
-    // is 512; 4 KiB covers two passwords with NUL separators and headroom.
-    const MAX_LEN: u64 = 4096;
     // Zeroizing wraps the combined buffer so the concatenated passwords are
     // scrubbed on drop — the sliced-out copies below get their own Zeroizing.
     let mut buf = Zeroizing::new(Vec::with_capacity(512));
     let stdin = std::io::stdin();
-    let mut limited = stdin.lock().take(MAX_LEN + 1);
+    let mut limited = stdin.lock().take(MAX_PASSWORD_PAYLOAD_BYTES + 1);
     limited
         .read_to_end(&mut buf)
         .context("read chauthtok payload from stdin")?;
-    if buf.len() as u64 > MAX_LEN {
-        bail!("chauthtok payload exceeds {MAX_LEN} bytes");
+    if buf.len() as u64 > MAX_PASSWORD_PAYLOAD_BYTES {
+        bail!("chauthtok payload exceeds {MAX_PASSWORD_PAYLOAD_BYTES} bytes");
     }
 
     // Find the first NUL separator.
