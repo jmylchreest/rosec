@@ -22,6 +22,12 @@ use zeroize::Zeroize;
 /// An individual SSH key entry in the store.
 #[derive(Clone)]
 pub struct KeyEntry {
+    /// Provider-scoped ID of the vault item this key came from. Combined
+    /// with `provider_id` this forms a stable identity used to detect
+    /// "same key, different vault item" swaps during the sign-confirm
+    /// flow (see [`Session::sign`](crate::session::SshAgent::sign)).
+    pub item_id: String,
+
     /// Human-readable name of the vault item this key came from.
     pub item_name: String,
 
@@ -175,8 +181,10 @@ impl KeyStore {
 /// Build a [`KeyEntry`] from a parsed [`PrivateKey`] and vault item metadata.
 ///
 /// Returns `None` if the public key cannot be serialised to OpenSSH format.
+#[allow(clippy::too_many_arguments)]
 pub fn build_entry(
     private_key: PrivateKey,
+    item_id: String,
     item_name: String,
     provider_id: String,
     ssh_hosts: Vec<String>,
@@ -189,6 +197,7 @@ pub fn build_entry(
     let public_key_openssh = public_key.to_openssh().ok()?;
 
     Some(KeyEntry {
+        item_id,
         item_name,
         provider_id,
         private_key,

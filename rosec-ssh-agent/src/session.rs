@@ -47,6 +47,67 @@ impl std::fmt::Debug for SshAgent {
 }
 
 impl SshAgent {
+    /// Look up a key entry by fingerprint and project its identity fields.
+    /// Drops the read lock before returning so callers can safely await.
+    fn read_identity(&self, fingerprint: &str) -> Result<KeyIdentity, AgentError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| other_err("key store lock poisoned"))?;
+        let entry = store
+            .get_by_fingerprint(fingerprint)
+            .ok_or_else(|| other_err("key not found"))?;
+        Ok(KeyIdentity {
+            require_confirm: entry.require_confirm,
+            provider_id: entry.provider_id.clone(),
+            item_id: entry.item_id.clone(),
+            item_name: entry.item_name.clone(),
+        })
+    }
+
+    /// Re-acquire the lock, verify the entry still matches `expected`, and
+    /// sign in a single critical section. Returns
+    /// `"key changed during confirmation"` if any identity field differs from
+    /// what the user originally confirmed — defending against a "same key,
+    /// different vault item" race where the user sees a confirm dialog for
+    /// key A but the slot has rotated to key B by the time they click Allow.
+    fn check_identity_and_sign(
+        &self,
+        fingerprint: &str,
+        expected: &KeyIdentity,
+        data: &[u8],
+    ) -> Result<Signature, AgentError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| other_err("key store lock poisoned"))?;
+        let entry = store
+            .get_by_fingerprint(fingerprint)
+            .ok_or_else(|| other_err("key removed during confirmation"))?;
+
+        if entry.require_confirm != expected.require_confirm
+            || entry.provider_id != expected.provider_id
+            || entry.item_id != expected.item_id
+        {
+            warn!(
+                fingerprint = %fingerprint,
+                expected_provider = %expected.provider_id,
+                expected_item_id = %expected.item_id,
+                actual_provider = %entry.provider_id,
+                actual_item_id = %entry.item_id,
+                "sign: key identity changed during confirmation, denying"
+            );
+            return Err(other_err(
+                "key changed during confirmation, denying for safety",
+            ));
+        }
+
+        entry
+            .private_key
+            .try_sign(data)
+            .map_err(|e| other_err(format!("signing failed: {e}")))
+    }
+
     pub fn new(store: Arc<RwLock<KeyStore>>, socket_path: PathBuf) -> Self {
         Self {
             store,
@@ -84,6 +145,17 @@ fn other_err(msg: impl Into<String>) -> AgentError {
     AgentError::other(io::Error::other(msg.into()))
 }
 
+/// Identity captured at the first lookup of a sign request, used to detect a
+/// "same fingerprint, different vault item" swap during the async confirmation
+/// callback. If any field differs on the second lookup the sign is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KeyIdentity {
+    require_confirm: bool,
+    provider_id: String,
+    item_id: String,
+    item_name: String,
+}
+
 #[ssh_agent_lib::async_trait]
 impl Session for SshAgent {
     async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
@@ -107,47 +179,35 @@ impl Session for SshAgent {
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let fingerprint = request.pubkey.fingerprint(HashAlg::Sha256).to_string();
 
-        // Read the key entry under a short-lived lock.  We extract what we
-        // need (confirm flag, item name) then drop the guard so the async
-        // confirmation callback can run without holding the lock.
-        let (require_confirm, item_name) = {
-            let store = self
-                .store
-                .read()
-                .map_err(|_| other_err("key store lock poisoned"))?;
+        // First-pass lookup: capture identity for the confirm dialog and the
+        // post-callback identity check. Lock is released before any await.
+        let identity = self.read_identity(&fingerprint)?;
 
-            let entry = store
-                .get_by_fingerprint(&fingerprint)
-                .ok_or_else(|| other_err("key not found"))?;
-
-            (entry.require_confirm, entry.item_name.clone())
-        };
-
-        if require_confirm {
+        if identity.require_confirm {
             if let Some(ref cb) = self.confirm {
                 info!(
                     fingerprint = %fingerprint,
-                    item = %item_name,
+                    item = %identity.item_name,
                     "sign request requires confirmation"
                 );
-                let allowed = cb(fingerprint.clone(), item_name.clone()).await;
+                let allowed = cb(fingerprint.clone(), identity.item_name.clone()).await;
                 if !allowed {
                     warn!(
                         fingerprint = %fingerprint,
-                        item = %item_name,
+                        item = %identity.item_name,
                         "sign request denied by user"
                     );
                     return Err(other_err("sign request denied by user"));
                 }
                 info!(
                     fingerprint = %fingerprint,
-                    item = %item_name,
+                    item = %identity.item_name,
                     "sign request confirmed by user"
                 );
             } else {
                 warn!(
                     fingerprint = %fingerprint,
-                    item = %item_name,
+                    item = %identity.item_name,
                     "sign request for key with ssh_confirm=true but no confirmation callback set, denying"
                 );
                 return Err(other_err(
@@ -158,27 +218,15 @@ impl Session for SshAgent {
 
         debug!(
             fingerprint = %fingerprint,
-            item = %item_name,
+            item = %identity.item_name,
             data_len = request.data.len(),
             "sign"
         );
 
-        // Re-acquire the lock for signing (the key must still be present).
-        let store = self
-            .store
-            .read()
-            .map_err(|_| other_err("key store lock poisoned"))?;
-
-        let entry = store
-            .get_by_fingerprint(&fingerprint)
-            .ok_or_else(|| other_err("key removed during confirmation"))?;
-
-        let signature = entry
-            .private_key
-            .try_sign(&request.data)
-            .map_err(|e| other_err(format!("signing failed: {e}")))?;
-
-        Ok(signature)
+        // Second-pass: re-fetch under the lock and verify identity is unchanged
+        // before signing. Refuses if a different vault item has taken over the
+        // slot during the async confirmation gap.
+        self.check_identity_and_sign(&fingerprint, &identity, &request.data)
     }
 
     /// Override the default `handle()` to intercept extension requests.

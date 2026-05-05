@@ -184,6 +184,7 @@ impl SshManager {
 
                 match build_entry(
                     private_key,
+                    meta.item_id.clone(),
                     meta.item_name.clone(),
                     provider_id.clone(),
                     meta.ssh_hosts.clone(),
