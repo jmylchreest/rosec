@@ -34,7 +34,7 @@ use crate::protocol::{
 /// for heavily-tuned databases).  Too short causes spurious traps mid-KDF;
 /// too long lets a misbehaving plugin pin a host thread.  3 minutes is
 /// generous for legitimate slow paths and still bounded.
-const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Configuration for constructing a `WasmProvider`.
 #[derive(Debug, Clone)]
@@ -1378,7 +1378,7 @@ impl Provider for WasmProvider {
 }
 
 /// Query capabilities from the guest, leak into `&'static [Capability]`.
-fn query_capabilities(plugin: &mut Plugin, provider_id: &str) -> &'static [Capability] {
+pub(crate) fn query_capabilities(plugin: &mut Plugin, provider_id: &str) -> &'static [Capability] {
     if !plugin.function_exists("capabilities") {
         return &[];
     }
@@ -1403,7 +1403,7 @@ fn query_capabilities(plugin: &mut Plugin, provider_id: &str) -> &'static [Capab
 }
 
 /// Query attribute descriptors from the guest, leak into `&'static [AttributeDescriptor]`.
-fn query_attribute_descriptors(
+pub(crate) fn query_attribute_descriptors(
     plugin: &mut Plugin,
     provider_id: &str,
 ) -> &'static [AttributeDescriptor] {
@@ -1436,7 +1436,7 @@ fn query_attribute_descriptors(
 }
 
 /// Query auth fields from the guest, leak into `&'static [AuthField]`.
-fn query_auth_fields(plugin: &mut Plugin, provider_id: &str) -> &'static [AuthField] {
+pub(crate) fn query_auth_fields(plugin: &mut Plugin, provider_id: &str) -> &'static [AuthField] {
     if !plugin.function_exists("auth_fields") {
         return &[];
     }
@@ -1457,7 +1457,10 @@ fn query_auth_fields(plugin: &mut Plugin, provider_id: &str) -> &'static [AuthFi
 }
 
 /// Query registration info from the guest, leak strings into `&'static`.
-fn query_registration_info(plugin: &mut Plugin, provider_id: &str) -> Option<RegistrationInfo> {
+pub(crate) fn query_registration_info(
+    plugin: &mut Plugin,
+    provider_id: &str,
+) -> Option<RegistrationInfo> {
     if !plugin.function_exists("registration_info") {
         return None;
     }
@@ -1487,7 +1490,7 @@ fn query_registration_info(plugin: &mut Plugin, provider_id: &str) -> Option<Reg
 }
 
 /// Query readiness probes from the guest (called during `new()`).
-fn query_readiness_probes(
+pub(crate) fn query_readiness_probes(
     plugin: &mut Plugin,
     provider_id: &str,
 ) -> Vec<crate::protocol::ReadinessProbe> {
@@ -1631,7 +1634,7 @@ pub(crate) fn evaluate_probe(
 /// `init` function, and check the response.
 ///
 /// `context` is used in error messages (e.g. `"init"`, `"re-init"`).
-fn init_guest(
+pub(crate) fn init_guest(
     plugin: &mut Plugin,
     config: &WasmProviderConfig,
     context: &str,

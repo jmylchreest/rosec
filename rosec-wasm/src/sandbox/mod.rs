@@ -11,4 +11,5 @@
 //!     applied at worker thread startup.
 
 pub(crate) mod policy_to_ruleset;
+pub(crate) mod wasm_worker;
 pub(crate) mod worker;
