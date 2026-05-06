@@ -388,7 +388,7 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                                 provider_failures.remove(&provider_id);
                             } else {
                                 let pf = provider_failures.entry(provider_id.clone()).or_insert(0);
-                                log_background_failure(pf, &provider_id, "sync", &e);
+                                log_background_failure(pf, Some(&provider_id), "sync", &e);
                             }
                         }
                     }
@@ -429,7 +429,7 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                                         provider_failures.entry(provider_id.clone()).or_insert(0);
                                     log_background_failure(
                                         pf,
-                                        &provider_id,
+                                        Some(&provider_id),
                                         "forced sync (cached recovery)",
                                         &e,
                                     );
@@ -454,7 +454,7 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                     consecutive_failures = 0;
                 }
                 Err(err) => {
-                    log_background_failure(&mut consecutive_failures, "", "cache rebuild", &err);
+                    log_background_failure(&mut consecutive_failures, None, "cache rebuild", &err);
                 }
             }
         } else {
@@ -572,25 +572,30 @@ async fn autolock_loop(
 /// Logs warnings for the first 3 failures, a suppression notice on the 4th,
 /// and silently skips further warnings. Errors starting with `"locked::"` are
 /// logged at debug level since they indicate an expected locked-provider state.
+///
+/// `provider_id = None` is used by the cross-provider safety-net rebuild,
+/// which has no single provider to attribute to; the log line shows
+/// `provider="(all providers)"` rather than an empty value.
 fn log_background_failure(
     consecutive: &mut u32,
-    provider_id: &str,
+    provider_id: Option<&str>,
     operation: &str,
     error: &dyn std::fmt::Display,
 ) {
+    let scope = provider_id.unwrap_or("(all providers)");
     let err_str = error.to_string();
     if err_str.starts_with("locked::") {
-        tracing::debug!(provider = %provider_id, "background {operation} skipped — provider locked");
+        tracing::debug!(provider = %scope, "background {operation} skipped — provider locked");
         return;
     }
     *consecutive += 1;
-    if *consecutive <= 3 {
-        tracing::warn!(provider = %provider_id, attempt = *consecutive, "background {operation} failed: {error}");
-    } else if *consecutive == 4 {
+    let attempt = *consecutive;
+    if attempt <= 3 {
+        tracing::warn!(provider = %scope, attempt, "background {operation} failed: {error}");
+    } else if attempt == 4 {
         tracing::warn!(
-            provider = %provider_id,
-            "background {operation} has failed {} times, suppressing further warnings",
-            *consecutive
+            provider = %scope,
+            "background {operation} has failed {attempt} times, suppressing further warnings",
         );
     }
 }
