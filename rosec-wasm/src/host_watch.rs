@@ -7,6 +7,10 @@
 //! `sync()` call, which defers the change until the next external sync
 //! trigger.
 //!
+//! Events flow through `crossbeam_channel` rather than `tokio::sync::mpsc`
+//! so the WASM worker thread (a plain `std::thread`, not a tokio runtime)
+//! can drain them via `select!` alongside its call request channel.
+//!
 //! This module exposes one host import to guests:
 //!
 //! | Function          | Input (offset → string) | Output |
@@ -27,10 +31,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crossbeam_channel as mpsc;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::host_file::HOST_USER_MODULE;
@@ -58,9 +62,9 @@ struct WatchState {
     /// `register_watch` call has happened yet (so we don't pay the cost
     /// of spawning the inotify thread for providers that don't use it).
     watcher: Option<RecommendedWatcher>,
-    /// Where to deliver events.  The receiver lives in `WasmProvider`'s
-    /// dispatcher task.
-    tx: mpsc::UnboundedSender<WatchEvent>,
+    /// Where to deliver events.  The receiver lives on the WasmWorker
+    /// thread that owns the `Plugin`.
+    tx: mpsc::Sender<WatchEvent>,
 }
 
 /// Build the watch host functions and return them alongside the receiver
@@ -71,7 +75,7 @@ struct WatchState {
 /// `host_file::build_file_host_functions`.
 pub(crate) fn build_watch_host_functions(
     allowed_files: &[PathBuf],
-) -> (Vec<Function>, mpsc::UnboundedReceiver<WatchEvent>) {
+) -> (Vec<Function>, mpsc::Receiver<WatchEvent>) {
     let allowed: HashSet<PathBuf> = allowed_files
         .iter()
         .map(|p| {
@@ -80,7 +84,7 @@ pub(crate) fn build_watch_host_functions(
         })
         .collect();
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded();
 
     let user_data: UserData<WatchState> = UserData::new(WatchState {
         allowed,

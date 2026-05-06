@@ -288,7 +288,7 @@ impl WasmProvider {
     ) -> Result<
         (
             Plugin,
-            tokio::sync::mpsc::UnboundedReceiver<crate::host_watch::WatchEvent>,
+            crossbeam_channel::Receiver<crate::host_watch::WatchEvent>,
         ),
         ProviderError,
     > {
@@ -1876,37 +1876,49 @@ fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta
 fn spawn_watch_dispatcher(
     provider_id: String,
     plugin: Arc<Mutex<Plugin>>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::host_watch::WatchEvent>,
+    rx: crossbeam_channel::Receiver<crate::host_watch::WatchEvent>,
 ) -> tokio::task::JoinHandle<()> {
     use std::collections::HashMap;
     const DEBOUNCE: Duration = Duration::from_millis(500);
 
-    tokio::spawn(async move {
+    // Watch events come from notify on a sync thread. spawn_blocking gives
+    // us a tokio handle to abort while the dispatcher stays sync — no
+    // tokio::time machinery, no async-mutex contention. Plugin access uses
+    // blocking_lock since we hold a JoinHandle to abort on Drop, and
+    // dispatch latency dominates lock-contention.
+    tokio::task::spawn_blocking(move || {
         loop {
-            let Some(first) = rx.recv().await else {
-                debug!(provider = %provider_id, "host_watch dispatcher: channel closed, exiting");
-                return;
+            let first = match rx.recv() {
+                Ok(e) => e,
+                Err(_) => {
+                    debug!(provider = %provider_id, "host_watch dispatcher: channel closed, exiting");
+                    return;
+                }
             };
+
             // Coalesce: keep the most recent kind seen for each path within
             // the debounce window.
             let mut pending: HashMap<String, String> = HashMap::new();
             pending.insert(first.path.clone(), first.kind.clone());
 
-            let deadline = tokio::time::Instant::now() + DEBOUNCE;
+            let deadline = std::time::Instant::now() + DEBOUNCE;
             loop {
-                match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(evt)) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(remaining) {
+                    Ok(evt) => {
                         pending.insert(evt.path, evt.kind);
                     }
-                    Ok(None) => break,
-                    Err(_) => break, // deadline reached
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             }
 
             for (path, kind) in pending {
                 let payload = crate::host_watch::WatchEvent { path, kind };
-                let plugin = plugin.clone();
-                let mut p = plugin.lock().await;
+                let mut p = plugin.blocking_lock();
                 if !p.function_exists("on_path_changed") {
                     continue;
                 }
