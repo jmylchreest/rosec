@@ -112,6 +112,43 @@ build-wasm:
 test:
   cargo test --workspace --locked
 
+# profile-build emits target/profiling/rosecd: release-optimised with
+# line-table debug info, suitable for samply / perf / heaptrack. Runtime
+# cost vs the plain `release` profile is unmeasurable.
+
+# Build rosecd at release-speed with profiling symbols (target/profiling/)
+profile-build:
+  cargo build --profile=profiling -p rosecd
+
+# console-build emits the same with the `console` feature, enabling
+# console-subscriber so tokio-console can attach. RUSTFLAGS=--cfg
+# tokio_unstable is set automatically. Runtime cost: ~5-10 % per task —
+# fine for diagnosis, don't ship.
+
+# Build rosecd with tokio-console support (target/profiling/, --features=console)
+console-build:
+  RUSTFLAGS="--cfg tokio_unstable" cargo build --profile=profiling -p rosecd --features=console
+
+# profile-record attaches samply to the running rosecd for `duration`
+# seconds (default 30). Runs samply under sudo because rosecd sets
+# PR_SET_DUMPABLE=0; without root the kernel refuses ptrace_may_access.
+# Output opens in the Firefox profiler.
+#
+#   just profile-record         # 30 s
+#   just profile-record 60      # 60 s
+
+# Sample CPU of running rosecd via samply (sudo) for DURATION seconds
+profile-record duration="30":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  PID=$(pgrep -x rosecd || true)
+  if [[ -z "$PID" ]]; then
+    echo "error: rosecd is not running" >&2
+    exit 1
+  fi
+  echo "Recording rosecd (PID $PID) for {{ duration }}s …"
+  sudo samply record -p "$PID" --duration "{{ duration }}"
+
 # sign-wasm signs the .wasm + .wasm.policy.toml pairs with WASM_SIGNING_KEY
 # and stages the result (incl. .wasm.minisig) under dist/providers/ — same
 # layout the release workflow ships. The .minisig covers

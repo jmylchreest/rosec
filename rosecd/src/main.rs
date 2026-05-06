@@ -16,6 +16,25 @@ use rosec_secret_service::server::register_objects_with_full_config;
 use rosec_secret_service::session::SessionManager;
 use zbus::fdo::RequestNameFlags;
 
+/// Wire up the tracing subscriber stack. With `--features=console`, also
+/// install the `console-subscriber` layer so `tokio-console` can attach
+/// to inspect runtime task state. Without it, this is the same env-filter
+/// + fmt subscriber as before.
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,fuser=warn,ssh_agent_lib=warn,extism::plugin=warn".into());
+
+    let registry = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(env_filter));
+
+    #[cfg(feature = "console")]
+    let registry = registry.with(console_subscriber::spawn());
+
+    registry.init();
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -35,13 +54,7 @@ async fn run() -> Result<()> {
     // output is not polluted by log lines on stdout.
     let config_path = parse_config_path();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,fuser=warn,ssh_agent_lib=warn,extism::plugin=warn".into()
-            }),
-        )
-        .init();
+    init_tracing();
 
     tracing::info!("rosecd v{}", env!("CARGO_PKG_VERSION"));
 

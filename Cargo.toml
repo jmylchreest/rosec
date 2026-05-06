@@ -87,3 +87,14 @@ husky-rs = "0.3"
 [patch.crates-io]
 ssh-key = { git = "https://github.com/RustCrypto/SSH", branch = "stable", package = "ssh-key" }
 ssh-encoding = { git = "https://github.com/RustCrypto/SSH", branch = "stable", package = "ssh-encoding" }
+
+# Release with line-table debug info retained, so external profilers
+# (samply, perf, heaptrack) produce accurate function-name + line-number
+# stacks. Build cost is a few extra MiB on disk; runtime is identical to
+# `release`.
+#
+# Use via:  cargo build --profile=profiling
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
