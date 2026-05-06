@@ -53,6 +53,24 @@ pub fn harden_introspectable() {
 #[cfg(not(unix))]
 pub fn harden_introspectable() {}
 
+/// Subset of [`harden`] for processes that must spawn setuid helpers
+/// (currently only rosecd, which calls `fusermount3` to mount the SSH and
+/// TOTP FUSE filesystems).
+///
+/// Skips `PR_SET_NO_NEW_PRIVS` because that flag — once set — bars every
+/// subsequent `execve` from gaining privileges via setuid bits, and
+/// `fusermount3` (the only path FUSE provides for unprivileged user
+/// mounts) is setuid root. Keeping NoNewPrivs unset is the same trade-off
+/// the systemd unit already encodes.
+#[cfg(unix)]
+pub fn harden_setuid_capable() {
+    set_not_dumpable();
+    lock_memory();
+}
+
+#[cfg(not(unix))]
+pub fn harden_setuid_capable() {}
+
 #[cfg(unix)]
 fn set_no_new_privs() {
     // SAFETY: prctl(PR_SET_NO_NEW_PRIVS) takes a single flag argument and

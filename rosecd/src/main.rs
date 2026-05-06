@@ -45,10 +45,10 @@ async fn run() -> Result<()> {
 
     tracing::info!("rosecd v{}", env!("CARGO_PKG_VERSION"));
 
-    // Security hardening: PR_SET_NO_NEW_PRIVS, PR_SET_DUMPABLE=0, mlockall.
-    // Called immediately after logging is initialised so warnings are visible,
-    // but before any providers are constructed or secrets are touched.
-    rosec_core::sandbox::harden();
+    // Security hardening: PR_SET_DUMPABLE=0 + mlockall. NoNewPrivs is
+    // intentionally NOT set here — fusermount3 is setuid root, and rosecd
+    // spawns it to mount the SSH and TOTP FUSE filesystems.
+    rosec_core::sandbox::harden_setuid_capable();
 
     let config = load_config(&config_path)?;
     tracing::info!("loaded config from {}", config_path.display());

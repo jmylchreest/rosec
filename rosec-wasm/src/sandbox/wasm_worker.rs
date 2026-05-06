@@ -263,6 +263,19 @@ fn worker_thread_main(
     main_loop(plugin, watch_rx, &call_rx, &config, &label);
 }
 
+/// Resolve the directory wasmtime uses for its module cache. Mirrors
+/// wasmtime's own logic: `$XDG_CACHE_HOME/wasmtime` if set, else
+/// `$HOME/.cache/wasmtime`. Returns `None` when neither is available
+/// (e.g. very stripped systemd unit) — the worker proceeds without
+/// granting the path, accepting the recompile-each-time cost.
+fn wasmtime_cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(xdg).join("wasmtime"));
+    }
+    let home = std::env::var_os("HOME").filter(|s| !s.is_empty())?;
+    Some(std::path::PathBuf::from(home).join(".cache/wasmtime"))
+}
+
 /// Apply the per-provider Landlock ruleset to the calling thread.
 fn apply_landlock(config: &crate::WasmProviderConfig) -> Result<(), anyhow::Error> {
     // The translator needs PluginPolicy + ResolvedPolicy. The daemon
@@ -305,6 +318,17 @@ fn apply_landlock(config: &crate::WasmProviderConfig) -> Result<(), anyhow::Erro
     }
     for f in &config.allowed_files {
         paths.push(PathRule::ro(f.clone()));
+    }
+
+    // wasmtime's module cache lives under $XDG_CACHE_HOME (or ~/.cache).
+    // JIT compilation persists artefacts there; without RW access wasmtime
+    // logs a warning and recompiles on every load. Best-effort: skip if
+    // neither variable resolves to a path we can use.
+    if let Some(cache_dir) = wasmtime_cache_dir() {
+        paths.push(PathRule {
+            path: cache_dir,
+            mode: FsMode::Rw,
+        });
     }
 
     let ports: Vec<ConnectPort> = if config.allowed_hosts.is_empty() {

@@ -17,4 +17,4 @@ pub mod landlock;
 pub mod process;
 pub mod spawn;
 
-pub use process::{harden, harden_introspectable, set_not_dumpable};
+pub use process::{harden, harden_introspectable, harden_setuid_capable, set_not_dumpable};
