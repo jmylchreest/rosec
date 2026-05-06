@@ -694,6 +694,15 @@ impl ServiceState {
                 cmd.env(key, value);
             }
 
+            // Propagate the daemon's sandbox decisions into the child's env
+            // so rosec-prompt's per-binary Landlock honours the operator's
+            // config without rosec-prompt needing to read rosec.toml.
+            for (k, v) in
+                rosec_core::sandbox::spawn::sandbox_env_for_subprocess(&self.live_config().sandbox)
+            {
+                cmd.env(k, v);
+            }
+
             if !has_display {
                 cmd.arg("--tty");
             }
@@ -869,6 +878,13 @@ impl ServiceState {
         // Inject display vars discovered from the systemd user manager.
         for (key, value) in &display_env {
             cmd.env(key, value);
+        }
+
+        // Propagate sandbox decisions to the child (see spawn_prompt above).
+        for (k, v) in
+            rosec_core::sandbox::spawn::sandbox_env_for_subprocess(&self.live_config().sandbox)
+        {
+            cmd.env(k, v);
         }
 
         if !has_display {

@@ -151,7 +151,10 @@ async fn run() -> Result<()> {
     // continues without SSH agent support.
     let ssh_manager: Option<Arc<ssh::SshManager>> = if config.service.ssh_fuse {
         let state_for_ssh = Arc::clone(&state);
-        let confirm_cb = ssh::build_confirm_callback(move || state_for_ssh.prompt_config());
+        let confirm_cb = ssh::build_confirm_callback(move || {
+            let cfg = state_for_ssh.live_config();
+            (cfg.prompt.clone(), cfg.sandbox.clone())
+        });
         ssh::SshManager::start(confirm_cb).await.map(Arc::new)
     } else {
         tracing::info!("SSH FUSE disabled by config (ssh_fuse = false)");

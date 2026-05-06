@@ -15,7 +15,40 @@ pub struct Config {
     #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
+    pub sandbox: SandboxConfig,
+    #[serde(default)]
     pub provider: Vec<ProviderEntry>,
+}
+
+/// Daemon-side controls for kernel-level sandboxing (Landlock). Read at
+/// startup; the daemon propagates the resolved decisions into spawned
+/// subprocesses' environment via `ROSEC_DISABLE_LANDLOCK` /
+/// `ROSEC_LANDLOCK_RO_PATHS`. The env vars are subprocess-only — the
+/// daemon never reads them itself, since a long-running service is more
+/// abuse-prone via env than via config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Enable kernel-level Landlock confinement. Defaults to `true`.
+    /// Set to `false` to opt out — useful when debugging missing-path
+    /// errors on a non-standard distro layout.
+    #[serde(default = "default_true")]
+    pub landlock_enabled: bool,
+
+    /// Additional read-only paths to add to every Landlock ruleset
+    /// (daemon-side WASM workers and spawned subprocesses). Use for
+    /// non-standard install prefixes (`/opt/...`) or chrooted setups.
+    /// `/nix/store` is auto-detected and does not need to be listed.
+    #[serde(default)]
+    pub extra_ro_paths: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            landlock_enabled: true,
+            extra_ro_paths: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

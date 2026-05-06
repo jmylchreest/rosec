@@ -314,10 +314,10 @@ fn resolve_prompt_binary() -> Option<String> {
 /// for confirmation — the whole point of ssh_confirm is to defeat silent
 /// abuse, so a headless fallback that signs anyway makes the option a no-op.
 pub fn build_confirm_callback(
-    get_config: impl Fn() -> PromptConfig + Send + Sync + 'static,
+    get_config: impl Fn() -> (PromptConfig, rosec_core::config::SandboxConfig) + Send + Sync + 'static,
 ) -> ConfirmCallback {
     Arc::new(move |fingerprint: String, item_name: String| {
-        let cfg = get_config();
+        let (cfg, sandbox_cfg) = get_config();
         Box::pin(async move {
             // Resolve prompt binary and theme from the live config.
             let program = match cfg.backend.as_str() {
@@ -376,6 +376,12 @@ pub fn build_confirm_callback(
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())
                 .kill_on_drop(true);
+
+            // Propagate sandbox decisions to the prompt subprocess so
+            // its per-binary Landlock matches the operator's config.
+            for (k, v) in rosec_core::sandbox::spawn::sandbox_env_for_subprocess(&sandbox_cfg) {
+                cmd.env(k, v);
+            }
 
             if !has_display {
                 cmd.arg("--tty");
