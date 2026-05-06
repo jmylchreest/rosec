@@ -112,6 +112,83 @@ build-wasm:
 test:
   cargo test --workspace --locked
 
+# sign-wasm signs the .wasm + .wasm.policy.toml pairs with WASM_SIGNING_KEY
+# and stages the result (incl. .wasm.minisig) under dist/providers/ — same
+# layout the release workflow ships. The .minisig covers
+# (wasm_bytes || policy_bytes), so substituting either file invalidates it.
+#
+# Copy dist/providers/* to your provider install dir to exercise the
+# wasm_verify = "required" code path locally.
+#
+# Requires:
+#   - WASM_SIGNING_KEY env var: contents of an rsign/minisign secret-key file
+#   - rsign2 in PATH (cargo install rsign2)
+#   - 'just build-wasm' has produced the .wasm artefacts
+
+# Sign + stage WASM providers (uses WASM_SIGNING_KEY env var)
+sign-wasm:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  if [[ -z "${WASM_SIGNING_KEY:-}" ]]; then
+    echo "error: WASM_SIGNING_KEY is not set." >&2
+    echo "" >&2
+    echo "Set it to the contents of an rsign/minisign secret-key file:" >&2
+    echo "  export WASM_SIGNING_KEY=\"\$(cat path/to/rosec-wasm-signing.key)\"" >&2
+    echo "  just sign-wasm" >&2
+    echo "" >&2
+    echo "The corresponding public key is embedded in" >&2
+    echo "rosec-wasm/src/keys/mod.rs (WASM_SIGNING_PUBKEY)." >&2
+    exit 1
+  fi
+
+  if ! command -v rsign >/dev/null 2>&1; then
+    echo "error: 'rsign' not found in PATH — install with: cargo install rsign2" >&2
+    exit 1
+  fi
+
+  KEYFILE=$(mktemp)
+  trap 'rm -f "${KEYFILE}"' EXIT
+  printf '%s' "${WASM_SIGNING_KEY}" > "${KEYFILE}"
+
+  install -d -m 755 dist/providers
+
+  for crate in {{ _wasm_crates }}; do
+    stem="${crate//-/_}"
+    wasm_src="${crate}/target/wasm32-wasip1/release/${stem}.wasm"
+    policy_src="${crate}/${stem}.wasm.policy.toml"
+
+    if [[ ! -f "${wasm_src}" ]]; then
+      echo "error: ${wasm_src} not found — run 'just build-wasm' first" >&2
+      exit 1
+    fi
+    if [[ ! -f "${policy_src}" ]]; then
+      echo "error: ${policy_src} not found — provider crate is missing its policy" >&2
+      exit 1
+    fi
+
+    wasm_dst="dist/providers/${stem}.wasm"
+    policy_dst="dist/providers/${stem}.wasm.policy.toml"
+    sig_dst="dist/providers/${stem}.wasm.minisig"
+
+    install -m 644 "${wasm_src}" "${wasm_dst}"
+    install -m 644 "${policy_src}" "${policy_dst}"
+
+    combined=$(mktemp)
+    cat "${wasm_dst}" "${policy_dst}" > "${combined}"
+    rsign sign -s "${KEYFILE}" -W "${combined}"
+    mv "${combined}.minisig" "${sig_dst}"
+    rm -f "${combined}"
+
+    echo "signed: ${wasm_dst} (+ ${policy_dst##*/}, ${sig_dst##*/})"
+  done
+
+  echo ""
+  echo "Output staged in dist/providers/ — to test wasm_verify = \"required\":"
+  echo "  install -d -m 755 \"{{ _plugin_dir }}\""
+  echo "  install -m 644 dist/providers/* \"{{ _plugin_dir }}/\""
+  echo "  systemctl --user restart rosecd"
+
 # ---------------------------------------------------------------------------
 # User-local install (no sudo)
 #
