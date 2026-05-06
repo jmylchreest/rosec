@@ -7,11 +7,10 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine;
-use extism::{Manifest, Plugin, Wasm};
+use extism::Plugin;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 use rosec_core::{
@@ -92,9 +91,13 @@ pub struct WasmProviderConfig {
 /// is `Send + Sync` but `call` takes `&mut self`.
 pub struct WasmProvider {
     config: WasmProviderConfig,
-    plugin: Arc<Mutex<Plugin>>,
-    /// Stored manifest for plugin recreation after a WASM trap.
-    manifest: Manifest,
+    /// Owns the extism `Plugin` on a dedicated `std::thread`. All guest
+    /// calls dispatch through `worker.call_json*` rather than locking a
+    /// shared Plugin in tokio land — that pattern blocked tokio workers
+    /// for the full duration of long calls (Argon2 unlock = 30-60s).
+    /// The worker also drains `host_watch` events and applies per-provider
+    /// Landlock at thread startup.
+    worker: Arc<crate::sandbox::wasm_worker::WasmWorker>,
     /// Capabilities queried once from the guest at construction time.
     /// Leaked so we can return `&'static [Capability]` from the trait.
     capabilities: &'static [Capability],
@@ -112,12 +115,6 @@ pub struct WasmProvider {
     callbacks: std::sync::RwLock<ProviderCallbacks>,
     /// Cached timestamp of the last successful sync.
     last_sync_time: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
-    /// Set `true` after a failed plugin recreation.  Prevents an infinite
-    /// trap → recreate → trap loop.  While poisoned, all plugin calls
-    /// immediately return `ProviderError::Unavailable` without touching
-    /// the WASM instance.  Cleared on next successful `unlock` (which
-    /// recreates the plugin from scratch anyway).
-    poisoned: std::sync::atomic::AtomicBool,
     /// Cache encryption key — derived from password + machine_key + provider_id
     /// during unlock.  Held in memory while unlocked so that sync() can update
     /// the cache without needing the password again.  Zeroized on lock().
@@ -134,22 +131,6 @@ pub struct WasmProvider {
     /// Present when the provider is unlocked and declares `Capability::Notifications`.
     /// Dropped on lock (cancels the WebSocket connection).
     notifications_handle: std::sync::Mutex<Option<crate::notifications::NotificationsHandle>>,
-    /// Background dispatcher for `host_watch` events.  Drains the receiver
-    /// returned by `build_watch_host_functions` and calls into the guest's
-    /// `on_path_changed` export.  Replaced whenever the underlying plugin
-    /// is recreated (since each plugin instance owns its own watcher).
-    /// Aborted on drop so the task terminates cleanly with the provider.
-    watch_dispatcher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl Drop for WasmProvider {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = self.watch_dispatcher.lock()
-            && let Some(handle) = guard.take()
-        {
-            handle.abort();
-        }
-    }
 }
 
 impl std::fmt::Debug for WasmProvider {
@@ -184,253 +165,38 @@ impl WasmProvider {
             }
         }
 
-        // Load from the verified bytes captured at discovery, not from disk.
-        let wasm = Wasm::data((*config.wasm_bytes).clone());
-        let mut manifest = Manifest::new([wasm])
-            .with_allowed_hosts(config.allowed_hosts.iter().cloned())
-            .with_timeout(GUEST_CALL_TIMEOUT)
-            // Limit WASM linear memory to 256 MiB (4096 pages × 64 KiB/page).
-            // Prevents a misbehaving plugin from consuming unbounded host memory.
-            .with_memory_max(4096);
-
-        // Pre-open filesystem paths so the WASI sandbox can access them.
-        if config.allowed_paths.is_empty() {
-            debug!(provider = %config.id, "no WASI allowed_paths configured");
-        }
-        for (src, dest) in &config.allowed_paths {
-            debug!(
-                provider = %config.id,
-                src = %src,
-                dest = %dest.display(),
-                "pre-opening WASI path",
-            );
-            manifest = manifest.with_allowed_path(src.clone(), dest);
-        }
+        // The worker thread builds the Plugin under per-provider Landlock,
+        // calls init_guest, eagerly queries the metadata slices, and starts
+        // multiplexing call requests + watch events. Block-waits on the
+        // worker's init signal before returning.
+        let (worker, init) = crate::sandbox::wasm_worker::WasmWorker::spawn(config.clone())?;
 
         debug!(
             provider = %config.id,
-            allowed_hosts = ?config.allowed_hosts,
-            allowed_paths = config.allowed_paths.len(),
-            "WASM manifest configured",
-        );
-
-        // Clone the manifest before consuming it so we can recreate the
-        // plugin after a WASM trap (which corrupts the instance).
-        let manifest = manifest;
-        let mut host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
-        host_fns.extend(crate::host_file::build_file_host_functions(
-            &config.allowed_files,
-        ));
-        let (watch_fns, watch_rx) =
-            crate::host_watch::build_watch_host_functions(&config.allowed_files);
-        host_fns.extend(watch_fns);
-        let mut plugin = Plugin::new(&manifest, host_fns, true).map_err(|e| {
-            ProviderError::Other(anyhow::anyhow!(
-                "failed to load WASM plugin '{}': {e}",
-                config.wasm_path,
-            ))
-        })?;
-
-        init_guest(&mut plugin, &config, "init")?;
-
-        let capabilities = query_capabilities(&mut plugin, &config.id);
-        let attribute_descriptors = query_attribute_descriptors(&mut plugin, &config.id);
-        let auth_fields = query_auth_fields(&mut plugin, &config.id);
-        let registration_info = query_registration_info(&mut plugin, &config.id);
-        let readiness_probes = query_readiness_probes(&mut plugin, &config.id);
-
-        debug!(
-            provider = %config.id,
-            caps = ?capabilities,
-            attrs = attribute_descriptors.len(),
-            auth = auth_fields.len(),
-            reg = registration_info.is_some(),
-            probes = readiness_probes.len(),
+            caps = ?init.capabilities,
+            attrs = init.attribute_descriptors.len(),
+            auth = init.auth_fields.len(),
+            reg = init.registration_info.is_some(),
+            probes = init.readiness_probes.len(),
             "WASM provider initialised",
         );
 
-        let plugin = Arc::new(Mutex::new(plugin));
-        let dispatcher = spawn_watch_dispatcher(config.id.clone(), plugin.clone(), watch_rx);
-
         Ok(Self {
             config,
-            plugin,
-            manifest,
-            capabilities,
-            attribute_descriptors,
-            auth_fields,
-            registration_info,
-            readiness_probes,
+            worker: Arc::new(worker),
+            capabilities: init.capabilities,
+            attribute_descriptors: init.attribute_descriptors,
+            auth_fields: init.auth_fields,
+            registration_info: init.registration_info,
+            readiness_probes: init.readiness_probes,
             callbacks: std::sync::RwLock::new(ProviderCallbacks::default()),
             last_sync_time: std::sync::Mutex::new(None),
-            poisoned: std::sync::atomic::AtomicBool::new(false),
             cache_key: std::sync::Mutex::new(None),
             cached: std::sync::atomic::AtomicBool::new(false),
             last_cache_write: std::sync::Mutex::new(None),
             last_cache_blob_hash: std::sync::Mutex::new(None),
             notifications_handle: std::sync::Mutex::new(None),
-            watch_dispatcher: std::sync::Mutex::new(Some(dispatcher)),
         })
-    }
-
-    /// Recreate the WASM plugin from the stored manifest after a trap.
-    ///
-    /// After a WASM trap (timeout, OOM, host function error, guest panic),
-    /// the plugin's linear memory and globals are left in a corrupted state.
-    /// Extism's `Plugin::reset()` only clears allocation metadata, not the
-    /// actual WASM memory.  The only reliable recovery is to create a fresh
-    /// Plugin instance and re-run `init`.
-    ///
-    /// The recreated plugin starts in a locked state (no auth).
-    fn recreate_plugin(
-        manifest: &Manifest,
-        config: &WasmProviderConfig,
-    ) -> Result<
-        (
-            Plugin,
-            crossbeam_channel::Receiver<crate::host_watch::WatchEvent>,
-        ),
-        ProviderError,
-    > {
-        let mut host_fns = crate::host_http::build_http_host_functions(&config.tls_mode);
-        host_fns.extend(crate::host_file::build_file_host_functions(
-            &config.allowed_files,
-        ));
-        let (watch_fns, watch_rx) =
-            crate::host_watch::build_watch_host_functions(&config.allowed_files);
-        host_fns.extend(watch_fns);
-        let mut plugin = Plugin::new(manifest, host_fns, true).map_err(|e| {
-            ProviderError::Other(anyhow::anyhow!(
-                "failed to recreate WASM plugin '{}': {e}",
-                config.wasm_path,
-            ))
-        })?;
-
-        init_guest(&mut plugin, config, "re-init")?;
-
-        Ok((plugin, watch_rx))
-    }
-
-    /// Recreate the plugin after a failed `plugin.call()`.
-    ///
-    /// In the Extism protocol, guest application errors (wrong password,
-    /// not found, etc.) are returned as `Ok` responses with `resp.ok == false`
-    /// in the JSON body.  An `Err` from `plugin.call()` only occurs when
-    /// something went wrong at the WASM execution level: a trap (timeout,
-    /// OOM, host function error, guest panic), a serialization failure, or
-    /// a missing function.
-    ///
-    /// In all of these cases the plugin's linear memory and globals may be
-    /// in an undefined state.  Rather than trying to classify which errors
-    /// are "real" traps via brittle string matching on wasmtime internals,
-    /// we unconditionally recreate the plugin after any `plugin.call()`
-    /// failure.  This is safe because:
-    ///
-    /// - The plugin restarts in a clean locked state (same as fresh boot)
-    /// - Serialization / missing-function errors won't be fixed by retrying
-    ///   with the same plugin anyway
-    /// - The cost (~50-100ms) is acceptable for an error path
-    fn recreate_after_call_error(&self, plugin: &mut Plugin, err: &ProviderError) {
-        warn!(
-            provider = %self.config.id,
-            error = %err,
-            "WASM plugin call failed, recreating instance",
-        );
-        match Self::recreate_plugin(&self.manifest, &self.config) {
-            Ok((new_plugin, watch_rx)) => {
-                *plugin = new_plugin;
-                self.poisoned
-                    .store(false, std::sync::atomic::Ordering::Release);
-                // Replace the watch dispatcher: the old one's sender is dropped
-                // when the old plugin's host fns are dropped, so the old task
-                // will exit naturally.  Spawn a fresh task bound to the new plugin.
-                let dispatcher =
-                    spawn_watch_dispatcher(self.config.id.clone(), self.plugin.clone(), watch_rx);
-                if let Ok(mut guard) = self.watch_dispatcher.lock()
-                    && let Some(old) = guard.replace(dispatcher)
-                {
-                    old.abort();
-                }
-                debug!(
-                    provider = %self.config.id,
-                    "plugin instance recreated successfully (now locked)",
-                );
-            }
-            Err(recreate_err) => {
-                self.poisoned
-                    .store(true, std::sync::atomic::Ordering::Release);
-                error!(
-                    provider = %self.config.id,
-                    "failed to recreate plugin, instance is poisoned: {recreate_err}",
-                );
-            }
-        }
-    }
-
-    /// Return `Err(Unavailable)` if the plugin is poisoned (recreation
-    /// failed after a previous WASM trap).
-    fn check_poisoned(&self) -> Result<(), ProviderError> {
-        if self.poisoned.load(std::sync::atomic::Ordering::Acquire) {
-            Err(ProviderError::Unavailable(
-                "WASM plugin is poisoned after failed recreation".into(),
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Call a guest function with JSON input, recreating the plugin if
-    /// `plugin.call()` failed (indicating a WASM trap or execution error).
-    fn call_json<I: Serialize, O: serde::de::DeserializeOwned>(
-        &self,
-        plugin: &mut Plugin,
-        func: &str,
-        input: &I,
-    ) -> Result<O, ProviderError> {
-        self.check_poisoned()?;
-        let (result, outcome) = call_guest_json(plugin, func, input);
-        if outcome == CallOutcome::PluginCallFailed
-            && let Err(ref e) = result
-        {
-            self.recreate_after_call_error(plugin, e);
-        }
-        result
-    }
-
-    /// Call a guest function with sensitive JSON input, recreating the
-    /// plugin if `plugin.call()` failed.  Zeroizes the serialized input
-    /// regardless of success or failure.
-    fn call_json_sensitive<I: Serialize, O: serde::de::DeserializeOwned>(
-        &self,
-        plugin: &mut Plugin,
-        func: &str,
-        input: &I,
-    ) -> Result<O, ProviderError> {
-        self.check_poisoned()?;
-        let (result, outcome) = call_guest_json_sensitive(plugin, func, input);
-        if outcome == CallOutcome::PluginCallFailed
-            && let Err(ref e) = result
-        {
-            self.recreate_after_call_error(plugin, e);
-        }
-        result
-    }
-
-    /// Call a guest function with no input, recreating the plugin if
-    /// `plugin.call()` failed.
-    fn call_json_no_input<O: serde::de::DeserializeOwned>(
-        &self,
-        plugin: &mut Plugin,
-        func: &str,
-    ) -> Result<O, ProviderError> {
-        self.check_poisoned()?;
-        let (result, outcome) = call_guest_json_no_input(plugin, func);
-        if outcome == CallOutcome::PluginCallFailed
-            && let Err(ref e) = result
-        {
-            self.recreate_after_call_error(plugin, e);
-        }
-        result
     }
 
     /// Evaluate all readiness probes before attempting unlock.
@@ -475,12 +241,7 @@ impl WasmProvider {
         let max_delay = Duration::from_secs(30);
         let mut delay = initial_delay;
 
-        let allowed_hosts: Vec<String> = self
-            .manifest
-            .allowed_hosts
-            .as_deref()
-            .unwrap_or_default()
-            .to_vec();
+        let allowed_hosts: Vec<String> = self.config.allowed_hosts.clone();
 
         let mut last_failure = String::new();
         for attempt in 1..=max_attempts {
@@ -588,14 +349,19 @@ impl WasmProvider {
         };
         // guard is dropped here — safe to await.
 
-        let mut plugin = self.plugin.lock().await;
-        let mut restore_req = RestoreCacheRequest { blob_b64 };
-        // Use the *sensitive* call helper so the serialised JSON (which
-        // contains the entire decrypted vault as base64) is zeroized after
-        // dispatch.  Then explicitly scrub the source String we own.
-        let resp: SimpleResponse =
-            self.call_json_sensitive(&mut plugin, "restore_cache", &restore_req)?;
-        restore_req.blob_b64.zeroize();
+        // The serialised JSON contains the entire decrypted vault as base64;
+        // the sensitive helper zeroizes it after dispatch. We then scrub the
+        // owned source string before the closure returns.
+        let resp: SimpleResponse = self
+            .worker
+            .call(move |plugin| {
+                let mut req = RestoreCacheRequest { blob_b64 };
+                let out =
+                    call_guest_json_sensitive::<_, SimpleResponse>(plugin, "restore_cache", &req);
+                req.blob_b64.zeroize();
+                out
+            })
+            .await?;
 
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
@@ -629,15 +395,25 @@ impl WasmProvider {
     /// Best-effort: logs warnings on failure but does not propagate errors
     /// (cache is a nice-to-have, not a hard requirement for the unlock/sync
     /// path to succeed).
-    fn try_export_cache(&self, plugin: &mut Plugin) {
+    async fn try_export_cache(&self) {
         use crate::protocol::ExportCacheResponse;
         use sha2::{Digest, Sha256};
 
-        if !plugin.function_exists("export_cache") {
-            return;
-        }
-
-        let resp: ExportCacheResponse = match call_guest_json_no_input(plugin, "export_cache").0 {
+        let resp: Option<ExportCacheResponse> = match self
+            .worker
+            .call(|plugin| {
+                if !plugin.function_exists("export_cache") {
+                    return (
+                        Ok::<Option<ExportCacheResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) =
+                    call_guest_json_no_input::<ExportCacheResponse>(plugin, "export_cache");
+                (result.map(Some), outcome)
+            })
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -646,6 +422,10 @@ impl WasmProvider {
                 );
                 return;
             }
+        };
+
+        let Some(resp) = resp else {
+            return;
         };
 
         if !resp.ok {
@@ -765,7 +545,7 @@ impl WasmProvider {
 
         let config = crate::notifications::NotificationsConfig {
             provider_id: self.config.id.clone(),
-            plugin: Arc::clone(&self.plugin),
+            worker: Arc::clone(&self.worker),
             readiness_probes: self.readiness_probes.clone(),
             allowed_hosts: self.config.allowed_hosts.clone(),
             tls_mode_probe: self.config.tls_mode_probe.clone(),
@@ -876,8 +656,7 @@ impl Provider for WasmProvider {
     }
 
     async fn status(&self) -> Result<ProviderStatus, ProviderError> {
-        let mut plugin = self.plugin.lock().await;
-        let resp: StatusResponse = self.call_json_no_input(&mut plugin, "status")?;
+        let resp: StatusResponse = self.worker.call_json_no_input("status").await?;
         Ok(ProviderStatus {
             locked: resp.locked,
             last_sync: resp
@@ -976,10 +755,16 @@ impl Provider for WasmProvider {
         };
 
         let has_registration = req.registration_fields.is_some();
-        let mut plugin = self.plugin.lock().await;
 
-        let result: Result<SimpleResponse, ProviderError> =
-            self.call_json_sensitive(&mut plugin, "unlock", &req);
+        // Argon2 unlock can run for tens of seconds; dispatching to the worker
+        // thread keeps the daemon's tokio runtime responsive throughout.
+        let req_for_call = req.clone();
+        let result: Result<SimpleResponse, ProviderError> = self
+            .worker
+            .call(move |plugin| {
+                call_guest_json_sensitive::<_, SimpleResponse>(plugin, "unlock", &req_for_call)
+            })
+            .await;
 
         // If the guest requires registration and none was provided, try
         // loading stored credentials from a previous session.
@@ -1004,23 +789,27 @@ impl Provider for WasmProvider {
                                 .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
                                 .collect();
 
-                            let mut retry_req = UnlockRequest {
+                            let retry_req = UnlockRequest {
                                 password: password_ref.as_str().to_owned(),
                                 registration_fields: Some(reg_fields_plain),
                                 auth_fields: None,
                             };
 
-                            let retry_result: Result<SimpleResponse, ProviderError> =
-                                self.call_json_sensitive(&mut plugin, "unlock", &retry_req);
-
-                            retry_req.password.zeroize();
-                            if let Some(ref mut fields) = retry_req.registration_fields {
-                                for v in fields.values_mut() {
-                                    v.zeroize();
-                                }
-                            }
-
-                            retry_result
+                            self.worker
+                                .call(move |plugin| {
+                                    let mut retry_req = retry_req;
+                                    let out = call_guest_json_sensitive::<_, SimpleResponse>(
+                                        plugin, "unlock", &retry_req,
+                                    );
+                                    retry_req.password.zeroize();
+                                    if let Some(ref mut fields) = retry_req.registration_fields {
+                                        for v in fields.values_mut() {
+                                            v.zeroize();
+                                        }
+                                    }
+                                    out
+                                })
+                                .await
                         }
                         Ok(None) => {
                             debug!(
@@ -1109,7 +898,7 @@ impl Provider for WasmProvider {
             if has_offline_cache {
                 info!(provider = %self.config.id, "deriving cache key for offline cache");
                 self.derive_and_store_cache_key(password_ref.as_str());
-                self.try_export_cache(&mut plugin);
+                self.try_export_cache().await;
             }
 
             // Start real-time notifications (if the guest supports it).
@@ -1141,8 +930,7 @@ impl Provider for WasmProvider {
         // Stop notifications first (drops WebSocket before clearing auth).
         self.stop_notifications();
 
-        let mut plugin = self.plugin.lock().await;
-        let resp: SimpleResponse = self.call_json_no_input(&mut plugin, "lock")?;
+        let resp: SimpleResponse = self.worker.call_json_no_input("lock").await?;
         if resp.ok {
             // Zeroize cache key and reset cache state.
             *self.cache_key.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1187,11 +975,25 @@ impl Provider for WasmProvider {
         // the access token was refreshed during recovery.
         let was_cached = self.cached.load(std::sync::atomic::Ordering::Relaxed);
 
-        let mut plugin = self.plugin.lock().await;
-        if !plugin.function_exists("sync") {
-            return Err(ProviderError::NotSupported);
-        }
-        let resp: SimpleResponse = self.call_json_no_input(&mut plugin, "sync")?;
+        // Probe + call in a single worker round-trip; NotSupported is
+        // signalled by the inner `Ok(None)`.
+        let resp: SimpleResponse = match self
+            .worker
+            .call(|plugin| {
+                if !plugin.function_exists("sync") {
+                    return (
+                        Ok::<Option<SimpleResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) = call_guest_json_no_input::<SimpleResponse>(plugin, "sync");
+                (result.map(Some), outcome)
+            })
+            .await?
+        {
+            Some(r) => r,
+            None => return Err(ProviderError::NotSupported),
+        };
         if resp.ok {
             // Sync succeeded — data confirmed live.
             self.cached
@@ -1202,12 +1004,8 @@ impl Provider for WasmProvider {
             }
 
             if self.offline_cache_enabled() {
-                self.try_export_cache(&mut plugin);
+                self.try_export_cache().await;
             }
-
-            // Drop the plugin lock before starting notifications (which
-            // needs to acquire it to call get_notification_config).
-            drop(plugin);
 
             // (Re)start notifications if we just recovered from cached mode
             // (token was refreshed) or if no notification task is running.
@@ -1235,8 +1033,7 @@ impl Provider for WasmProvider {
     }
 
     async fn list_items(&self) -> Result<Vec<ItemMeta>, ProviderError> {
-        let mut plugin = self.plugin.lock().await;
-        let resp: ItemListResponse = self.call_json_no_input(&mut plugin, "list_items")?;
+        let resp: ItemListResponse = self.worker.call_json_no_input("list_items").await?;
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1251,8 +1048,7 @@ impl Provider for WasmProvider {
         let req = SearchRequest {
             attributes: attrs.clone(),
         };
-        let mut plugin = self.plugin.lock().await;
-        let resp: ItemListResponse = self.call_json(&mut plugin, "search", &req)?;
+        let resp: ItemListResponse = self.worker.call_json("search", req).await?;
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1265,9 +1061,8 @@ impl Provider for WasmProvider {
 
     async fn get_item_attributes(&self, id: &str) -> Result<ItemAttributes, ProviderError> {
         let req = ItemIdRequest { id: id.to_owned() };
-        let mut plugin = self.plugin.lock().await;
         let resp: ItemAttributesResponse =
-            self.call_json(&mut plugin, "get_item_attributes", &req)?;
+            self.worker.call_json("get_item_attributes", req).await?;
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1282,8 +1077,7 @@ impl Provider for WasmProvider {
             id: id.to_owned(),
             attr: attr.to_owned(),
         };
-        let mut plugin = self.plugin.lock().await;
-        let resp: SecretAttrResponse = self.call_json(&mut plugin, "get_secret_attr", &req)?;
+        let resp: SecretAttrResponse = self.worker.call_json("get_secret_attr", req).await?;
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1297,11 +1091,23 @@ impl Provider for WasmProvider {
     }
 
     async fn list_ssh_keys(&self) -> Result<Vec<SshKeyMeta>, ProviderError> {
-        let mut plugin = self.plugin.lock().await;
-        if !plugin.function_exists("list_ssh_keys") {
+        let resp: Option<SshKeyListResponse> = self
+            .worker
+            .call(|plugin| {
+                if !plugin.function_exists("list_ssh_keys") {
+                    return (
+                        Ok::<Option<SshKeyListResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) =
+                    call_guest_json_no_input::<SshKeyListResponse>(plugin, "list_ssh_keys");
+                (result.map(Some), outcome)
+            })
+            .await?;
+        let Some(resp) = resp else {
             return Ok(Vec::new());
-        }
-        let resp: SshKeyListResponse = self.call_json_no_input(&mut plugin, "list_ssh_keys")?;
+        };
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1316,12 +1122,26 @@ impl Provider for WasmProvider {
         let req = SshPrivateKeyRequest {
             item_id: id.to_owned(),
         };
-        let mut plugin = self.plugin.lock().await;
-        if !plugin.function_exists("get_ssh_private_key") {
+        let resp: Option<SshPrivateKeyResponse> = self
+            .worker
+            .call(move |plugin| {
+                if !plugin.function_exists("get_ssh_private_key") {
+                    return (
+                        Ok::<Option<SshPrivateKeyResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) = call_guest_json::<_, SshPrivateKeyResponse>(
+                    plugin,
+                    "get_ssh_private_key",
+                    &req,
+                );
+                (result.map(Some), outcome)
+            })
+            .await?;
+        let Some(resp) = resp else {
             return Err(ProviderError::NotSupported);
-        }
-        let resp: SshPrivateKeyResponse =
-            self.call_json(&mut plugin, "get_ssh_private_key", &req)?;
+        };
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
@@ -1341,8 +1161,6 @@ impl Provider for WasmProvider {
     /// If the guest does not export the function, falls back to the trait
     /// default (`Ok(true)` — assume changed, trigger a full sync).
     async fn check_remote_changed(&self) -> Result<bool, ProviderError> {
-        // Build the ISO-8601 timestamp from the cached last_sync_time before
-        // acquiring the plugin lock to avoid holding two locks simultaneously.
         let iso8601 = match self.last_synced_at() {
             Some(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
             None => {
@@ -1353,18 +1171,33 @@ impl Provider for WasmProvider {
 
         self.wait_for_readiness(true).await?;
 
-        let mut plugin = self.plugin.lock().await;
-        if !plugin.function_exists("check_remote_changed") {
-            // No guest support — assume changed (safe default).
-            return Ok(true);
-        }
-
         let req = crate::protocol::CheckRemoteChangedRequest {
             last_synced_iso8601: iso8601,
         };
 
-        let resp: crate::protocol::CheckRemoteChangedResponse =
-            self.call_json(&mut plugin, "check_remote_changed", &req)?;
+        let resp: Option<crate::protocol::CheckRemoteChangedResponse> = self
+            .worker
+            .call(move |plugin| {
+                if !plugin.function_exists("check_remote_changed") {
+                    return (
+                        Ok::<Option<crate::protocol::CheckRemoteChangedResponse>, ProviderError>(
+                            None,
+                        ),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) = call_guest_json::<
+                    _,
+                    crate::protocol::CheckRemoteChangedResponse,
+                >(plugin, "check_remote_changed", &req);
+                (result.map(Some), outcome)
+            })
+            .await?;
+
+        let Some(resp) = resp else {
+            // No guest support — assume changed (safe default).
+            return Ok(true);
+        };
 
         if !resp.ok {
             // On guest error, assume changed so the host falls back to full sync.
@@ -1764,7 +1597,7 @@ pub(crate) fn call_guest_json<I: Serialize, O: DeserializeOwned>(
 /// Like [`call_guest_json`] but zeroizes the serialized input bytes after
 /// the call completes, regardless of success or failure.  Use this for
 /// any guest call whose input contains passwords or other sensitive data.
-fn call_guest_json_sensitive<I: Serialize, O: DeserializeOwned>(
+pub(crate) fn call_guest_json_sensitive<I: Serialize, O: DeserializeOwned>(
     plugin: &mut Plugin,
     func: &str,
     input: &I,
@@ -1868,89 +1701,6 @@ fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta
 /// Spawn a tokio task that drains `host_watch` events and dispatches them
 /// into the guest's `on_path_changed` export.
 ///
-/// Events are coalesced inside a 500 ms quiet window before each dispatch:
-/// a single editor save typically fires 3-5 inotify events (Modify, Create,
-/// Chmod, etc.) and we only want one guest call per logical change.
-///
-/// The task exits when the receiver returns `None` — which happens once the
-/// last `WatchEvent` sender is dropped (i.e. the plugin holding the watch
-/// host fns has been dropped).  The handle is also `abort()`ed in
-/// `WasmProvider::Drop`.
-fn spawn_watch_dispatcher(
-    provider_id: String,
-    plugin: Arc<Mutex<Plugin>>,
-    rx: crossbeam_channel::Receiver<crate::host_watch::WatchEvent>,
-) -> tokio::task::JoinHandle<()> {
-    use std::collections::HashMap;
-    const DEBOUNCE: Duration = Duration::from_millis(500);
-
-    // Watch events come from notify on a sync thread. spawn_blocking gives
-    // us a tokio handle to abort while the dispatcher stays sync — no
-    // tokio::time machinery, no async-mutex contention. Plugin access uses
-    // blocking_lock since we hold a JoinHandle to abort on Drop, and
-    // dispatch latency dominates lock-contention.
-    tokio::task::spawn_blocking(move || {
-        loop {
-            let first = match rx.recv() {
-                Ok(e) => e,
-                Err(_) => {
-                    debug!(provider = %provider_id, "host_watch dispatcher: channel closed, exiting");
-                    return;
-                }
-            };
-
-            // Coalesce: keep the most recent kind seen for each path within
-            // the debounce window.
-            let mut pending: HashMap<String, String> = HashMap::new();
-            pending.insert(first.path.clone(), first.kind.clone());
-
-            let deadline = std::time::Instant::now() + DEBOUNCE;
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match rx.recv_timeout(remaining) {
-                    Ok(evt) => {
-                        pending.insert(evt.path, evt.kind);
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-
-            for (path, kind) in pending {
-                let payload = crate::host_watch::WatchEvent { path, kind };
-                let mut p = plugin.blocking_lock();
-                if !p.function_exists("on_path_changed") {
-                    continue;
-                }
-                let json = match serde_json::to_vec(&payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(provider = %provider_id, error = %e, "host_watch: serialize failed");
-                        continue;
-                    }
-                };
-                debug!(
-                    provider = %provider_id,
-                    path = %payload.path,
-                    kind = %payload.kind,
-                    "host_watch: dispatching on_path_changed",
-                );
-                if let Err(e) = p.call::<&[u8], &[u8]>("on_path_changed", &json) {
-                    debug!(
-                        provider = %provider_id,
-                        path = %payload.path,
-                        error = %e,
-                        "on_path_changed call failed",
-                    );
-                }
-            }
-        }
-    })
-}
-
 fn to_ssh_key_meta(w: WasmSshKeyMeta, provider_id: &str) -> SshKeyMeta {
     SshKeyMeta {
         item_id: w.item_id,

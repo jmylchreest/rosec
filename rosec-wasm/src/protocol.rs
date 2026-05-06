@@ -38,7 +38,7 @@ pub struct StatusResponse {
 ///
 /// `Debug` is manually implemented to redact `password`,
 /// `registration_fields`, and `auth_fields` (which may contain secrets).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct UnlockRequest {
     /// The user's master password.
     pub password: String,

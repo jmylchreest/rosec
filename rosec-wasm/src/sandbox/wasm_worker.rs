@@ -12,11 +12,6 @@
 //! it once at worker-thread start gives a kernel-enforced sandbox around
 //! every guest call without disturbing the rest of the daemon.
 
-// Wired into WasmProvider in a follow-up commit. Public surface and
-// internal plumbing both compile; see #[allow(dead_code)] on the items
-// that the upcoming refactor will reference.
-#![allow(dead_code)]
-
 use std::panic::AssertUnwindSafe;
 use std::thread;
 use std::time::Duration;
@@ -25,14 +20,17 @@ use anyhow::anyhow;
 use crossbeam_channel as cb;
 use extism::{Manifest, Plugin, Wasm};
 use rosec_core::ProviderError;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::oneshot;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::host_watch::WatchEvent;
 use crate::protocol::ReadinessProbe;
 use crate::provider::{
-    GUEST_CALL_TIMEOUT, init_guest, query_attribute_descriptors, query_auth_fields,
-    query_capabilities, query_readiness_probes, query_registration_info,
+    CallOutcome, GUEST_CALL_TIMEOUT, call_guest_json, call_guest_json_no_input, init_guest,
+    query_attribute_descriptors, query_auth_fields, query_capabilities, query_readiness_probes,
+    query_registration_info,
 };
 
 /// Capacity of the call-request channel between async callers and the
@@ -47,7 +45,11 @@ const CALL_CHANNEL_CAPACITY: usize = 16;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// A boxed unit of work the worker executes against `&mut Plugin`.
-type CallFn = Box<dyn FnOnce(&mut Plugin) + Send + 'static>;
+/// The `&mut bool` is the closure's signal back to the worker that the
+/// Plugin needs recreation after this call (set when a wasmtime trap
+/// corrupts the instance). The worker rebuilds the Plugin between
+/// requests; subsequent calls land on a fresh instance.
+type CallFn = Box<dyn FnOnce(&mut Plugin, &mut bool) + Send + 'static>;
 
 /// One-time outputs the worker emits after init: the eagerly-queried
 /// guest metadata plus a flag indicating whether `on_path_changed` is
@@ -118,18 +120,26 @@ impl WasmWorker {
     /// Dispatch a closure to the worker thread; await its result.
     ///
     /// The closure runs with exclusive `&mut Plugin` on the worker's
-    /// dedicated thread. Long-running guest work (Argon2, network calls)
-    /// no longer pins a tokio worker — the daemon's runtime stays
-    /// responsive.
+    /// dedicated thread, returning a tuple of `(result, CallOutcome)`. The
+    /// outcome tells the worker whether a wasmtime trap occurred — on
+    /// `PluginCallFailed` the worker rebuilds the Plugin between requests
+    /// so subsequent calls land on a fresh instance.
+    ///
+    /// Long-running guest work (Argon2, network calls) no longer pins a
+    /// tokio worker — the daemon's runtime stays responsive.
     pub(crate) async fn call<T, F>(&self, f: F) -> Result<T, ProviderError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut Plugin) -> T + Send + 'static,
+        F: FnOnce(&mut Plugin) -> (Result<T, ProviderError>, CallOutcome) + Send + 'static,
     {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(Box::new(move |p| {
-                let _ = reply_tx.send(f(p));
+            .send(Box::new(move |plugin, needs_recreate| {
+                let (result, outcome) = f(plugin);
+                if outcome == CallOutcome::PluginCallFailed {
+                    *needs_recreate = true;
+                }
+                let _ = reply_tx.send(result);
             }))
             .map_err(|_| {
                 ProviderError::Unavailable(format!("wasm worker '{}' has stopped", self.label))
@@ -139,7 +149,32 @@ impl WasmWorker {
                 "wasm worker '{}' dropped reply (panic during call)",
                 self.label
             ))
-        })
+        })?
+    }
+
+    /// Convenience wrapper around [`Self::call`] for the canonical pattern:
+    /// serialize JSON input, dispatch via `plugin.call`, deserialize JSON
+    /// output. Used by most Provider trait methods.
+    pub(crate) async fn call_json<I, O>(
+        &self,
+        func: &'static str,
+        input: I,
+    ) -> Result<O, ProviderError>
+    where
+        I: Serialize + Send + 'static,
+        O: DeserializeOwned + Send + 'static,
+    {
+        self.call(move |plugin| call_guest_json::<I, O>(plugin, func, &input))
+            .await
+    }
+
+    /// Convenience for guest calls that take no JSON input.
+    pub(crate) async fn call_json_no_input<O>(&self, func: &'static str) -> Result<O, ProviderError>
+    where
+        O: DeserializeOwned + Send + 'static,
+    {
+        self.call(move |plugin| call_guest_json_no_input::<O>(plugin, func))
+            .await
     }
 }
 
@@ -190,7 +225,7 @@ fn worker_thread_main(
     }
 
     // 2. Build the Plugin and run guest init.
-    let (mut plugin, mut watch_rx) = match build_plugin(&config) {
+    let (mut plugin, watch_rx) = match build_plugin(&config) {
         Ok(p) => p,
         Err(e) => {
             let _ = init_tx.send(Err(format!("plugin build: {e}")));
@@ -225,7 +260,7 @@ fn worker_thread_main(
     drop(init_tx);
 
     // 4. Service requests until the call channel closes (Drop of WasmWorker).
-    main_loop(plugin, &mut watch_rx, &call_rx, &config, &label);
+    main_loop(plugin, watch_rx, &call_rx, &config, &label);
 }
 
 /// Apply the per-provider Landlock ruleset to the calling thread.
@@ -290,49 +325,103 @@ fn apply_landlock(config: &crate::WasmProviderConfig) -> Result<(), anyhow::Erro
 /// the caller closures see — no cross-thread synchronisation needed.
 fn main_loop(
     mut plugin: Plugin,
-    watch_rx: &mut cb::Receiver<WatchEvent>,
+    mut watch_rx: cb::Receiver<WatchEvent>,
     call_rx: &cb::Receiver<CallFn>,
     config: &crate::WasmProviderConfig,
     label: &str,
 ) {
     loop {
-        cb::select! {
-            recv(call_rx) -> msg => {
-                match msg {
-                    Ok(call) => {
-                        run_call(&mut plugin, call, label);
-                    }
-                    Err(_) => {
-                        debug!(worker = %label, "call channel closed, exiting");
-                        return;
-                    }
+        // Two-step: select! borrows the receivers, the match arm has owned
+        // access. Action carries the work out so we can mutate plugin /
+        // watch_rx freely below.
+        enum Action {
+            Call(CallFn),
+            Watch(WatchEvent),
+            CallClosed,
+            WatchClosed,
+        }
+        let action = cb::select! {
+            recv(call_rx) -> msg => match msg {
+                Ok(c) => Action::Call(c),
+                Err(_) => Action::CallClosed,
+            },
+            recv(&watch_rx) -> msg => match msg {
+                Ok(e) => Action::Watch(e),
+                Err(_) => Action::WatchClosed,
+            },
+        };
+
+        match action {
+            Action::Call(call) => {
+                let mut needs_recreate = false;
+                run_call(&mut plugin, call, &mut needs_recreate, label);
+                if needs_recreate {
+                    recreate_in_place(&mut plugin, &mut watch_rx, config, label);
                 }
             }
-            recv(watch_rx) -> msg => {
-                match msg {
-                    Ok(first) => {
-                        let _ = process_watch_burst(&mut plugin, first, watch_rx, &config.id);
-                    }
-                    Err(_) => {
-                        // watch_rx closed — keep serving call_rx, the
-                        // plugin may not use the watch channel at all.
-                    }
-                }
+            Action::Watch(first) => {
+                let _ = process_watch_burst(&mut plugin, first, &watch_rx, &config.id);
+            }
+            Action::CallClosed => {
+                debug!(worker = %label, "call channel closed, exiting");
+                return;
+            }
+            Action::WatchClosed => {
+                // Watch sender dropped — plugin doesn't use watches, or
+                // the host fns were rebuilt. Keep serving calls.
+                let (drained_tx, drained_rx) = cb::bounded::<WatchEvent>(0);
+                drop(drained_tx);
+                watch_rx = drained_rx;
             }
         }
     }
 }
 
 /// Run a single dispatched closure under `catch_unwind` so a panicking
-/// call does not take the worker thread down.
-fn run_call(plugin: &mut Plugin, call: CallFn, label: &str) {
-    if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| call(plugin))) {
+/// call does not take the worker thread down. The closure signals trap
+/// detection by setting `*needs_recreate = true`.
+fn run_call(plugin: &mut Plugin, call: CallFn, needs_recreate: &mut bool, label: &str) {
+    let plugin_ptr = plugin as *mut Plugin;
+    let recreate_ptr = needs_recreate as *mut bool;
+    if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        // SAFETY: pointers are valid for the duration of catch_unwind; we
+        // own &mut Plugin and &mut bool from the caller's stack frame.
+        unsafe { call(&mut *plugin_ptr, &mut *recreate_ptr) }
+    })) {
         let msg = panic
             .downcast_ref::<&'static str>()
             .map(|s| s.to_string())
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "(non-string panic)".into());
         error!(worker = %label, panic = %msg, "wasm worker call panicked");
+    }
+}
+
+/// Rebuild the Plugin in place after a wasmtime trap. Replaces both the
+/// Plugin and the watch receiver (a fresh Plugin owns a fresh watch
+/// channel — the old one's sender is dropped when the old host fns drop).
+///
+/// On rebuild failure the worker keeps the old (corrupted) Plugin and logs.
+/// The next call will fail again, the daemon's hot-reload path can rotate
+/// the provider if it cares to.
+fn recreate_in_place(
+    plugin: &mut Plugin,
+    watch_rx: &mut cb::Receiver<WatchEvent>,
+    config: &crate::WasmProviderConfig,
+    label: &str,
+) {
+    info!(worker = %label, "recreating plugin after wasmtime trap");
+    match build_plugin(config) {
+        Ok((new_plugin, new_watch_rx)) => {
+            *plugin = new_plugin;
+            *watch_rx = new_watch_rx;
+            if let Err(e) = init_guest(plugin, config, "re-init") {
+                warn!(worker = %label, error = %e, "re-init after recreate failed");
+            }
+        }
+        Err(e) => {
+            warn!(worker = %label, error = %e, "plugin recreate failed");
+        }
     }
 }
 

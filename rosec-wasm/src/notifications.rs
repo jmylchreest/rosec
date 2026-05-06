@@ -19,13 +19,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
 use crate::protocol::{
     NotificationAction, NotificationActionKind, NotificationConfigResponse, NotificationFrame,
     WebSocketSubscription,
 };
+use crate::sandbox::wasm_worker::WasmWorker;
 
 /// Handle to a running notifications background task.
 ///
@@ -43,9 +44,9 @@ pub struct NotificationsHandle {
 pub struct NotificationsConfig {
     /// Provider ID (used in log messages).
     pub provider_id: String,
-    /// WASM plugin handle for `get_notification_config` and `parse_notification`
-    /// guest calls.
-    pub plugin: Arc<Mutex<extism::Plugin>>,
+    /// WASM worker used to dispatch `get_notification_config` and
+    /// `parse_notification` guest calls onto the provider's dedicated thread.
+    pub(crate) worker: Arc<WasmWorker>,
     /// Readiness probes evaluated before each (re)connect attempt.
     pub readiness_probes: Vec<crate::protocol::ReadinessProbe>,
     /// Allowed hosts for probe evaluation.
@@ -122,19 +123,16 @@ async fn notifications_loop(config: NotificationsConfig, mut cancel_rx: watch::R
             }
         }
 
-        let subscription = {
-            let mut plugin = config.plugin.lock().await;
-            match get_subscription_from_guest(&mut plugin, provider_id) {
-                Some(sub) => sub,
-                None => {
-                    // Guest returned no subscription — give up entirely
-                    // (not a transient failure).
-                    info!(
-                        provider = %provider_id,
-                        "notifications: guest returned no subscription config, disabling"
-                    );
-                    return;
-                }
+        let subscription = match get_subscription_from_worker(&config.worker, provider_id).await {
+            Some(sub) => sub,
+            None => {
+                // Guest returned no subscription — give up entirely
+                // (not a transient failure).
+                info!(
+                    provider = %provider_id,
+                    "notifications: guest returned no subscription config, disabling"
+                );
+                return;
             }
         };
 
@@ -244,14 +242,12 @@ async fn run_session(
                                 len = text.len(),
                                 "notifications: received frame"
                             );
-                            let action = {
-                                let mut plugin = config.plugin.lock().await;
-                                parse_frame_via_guest(
-                                    &mut plugin,
-                                    provider_id,
-                                    text,
-                                )
-                            };
+                            let action = parse_frame_via_worker(
+                                &config.worker,
+                                provider_id,
+                                text.to_string(),
+                            )
+                            .await;
                             match action {
                                 NotificationActionKind::Sync => {
                                     debug!(
@@ -285,26 +281,33 @@ async fn run_session(
     }
 }
 
-fn get_subscription_from_guest(
-    plugin: &mut extism::Plugin,
+async fn get_subscription_from_worker(
+    worker: &WasmWorker,
     provider_id: &str,
 ) -> Option<WebSocketSubscription> {
-    if !plugin.function_exists("get_notification_config") {
-        debug!(
-            provider = %provider_id,
-            "notifications: guest does not export get_notification_config"
-        );
-        return None;
-    }
-
-    let (result, _outcome) = crate::provider::call_guest_json_no_input::<NotificationConfigResponse>(
-        plugin,
-        "get_notification_config",
-    );
+    let provider_id_for_log = provider_id.to_string();
+    let result = worker
+        .call(move |plugin| {
+            if !plugin.function_exists("get_notification_config") {
+                debug!(
+                    provider = %provider_id_for_log,
+                    "notifications: guest does not export get_notification_config"
+                );
+                return (
+                    Ok::<_, rosec_core::ProviderError>(None::<NotificationConfigResponse>),
+                    crate::provider::CallOutcome::Clean,
+                );
+            }
+            let (result, outcome) = crate::provider::call_guest_json_no_input::<
+                NotificationConfigResponse,
+            >(plugin, "get_notification_config");
+            (result.map(Some), outcome)
+        })
+        .await;
 
     match result {
-        Ok(resp) if resp.ok => resp.subscription,
-        Ok(resp) => {
+        Ok(Some(resp)) if resp.ok => resp.subscription,
+        Ok(Some(resp)) => {
             warn!(
                 provider = %provider_id,
                 error = ?resp.error,
@@ -312,6 +315,7 @@ fn get_subscription_from_guest(
             );
             None
         }
+        Ok(None) => None,
         Err(e) => {
             warn!(
                 provider = %provider_id,
@@ -324,23 +328,29 @@ fn get_subscription_from_guest(
 }
 
 /// Classify a raw WS frame via the guest's `parse_notification` export.
-fn parse_frame_via_guest(
-    plugin: &mut extism::Plugin,
+async fn parse_frame_via_worker(
+    worker: &WasmWorker,
     provider_id: &str,
-    text: &str,
+    text: String,
 ) -> NotificationActionKind {
-    if !plugin.function_exists("parse_notification") {
-        return NotificationActionKind::Ignore;
-    }
-
-    let frame = NotificationFrame {
-        text: text.to_string(),
-    };
-
-    let (result, _outcome) = crate::provider::call_guest_json::<
-        NotificationFrame,
-        NotificationAction,
-    >(plugin, "parse_notification", &frame);
+    let result = worker
+        .call(move |plugin| {
+            if !plugin.function_exists("parse_notification") {
+                return (
+                    Ok::<_, rosec_core::ProviderError>(NotificationAction {
+                        action: NotificationActionKind::Ignore,
+                    }),
+                    crate::provider::CallOutcome::Clean,
+                );
+            }
+            let frame = NotificationFrame { text };
+            crate::provider::call_guest_json::<NotificationFrame, NotificationAction>(
+                plugin,
+                "parse_notification",
+                &frame,
+            )
+        })
+        .await;
 
     match result {
         Ok(action) => action.action,
