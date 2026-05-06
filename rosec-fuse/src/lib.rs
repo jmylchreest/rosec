@@ -24,6 +24,7 @@
 pub mod config;
 mod fs;
 pub mod naming;
+pub mod sandbox;
 pub mod ssh_fs;
 pub mod totp_fs;
 

@@ -20,8 +20,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use fuser::{
     AccessFlags, BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request, SessionACL,
+    FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request,
 };
 use rosec_core::totp::TotpParams;
 use tracing::warn;
@@ -493,15 +493,8 @@ pub fn totp_mount(mountpoint: &Path) -> anyhow::Result<TotpMountHandle> {
     let fuse = Arc::new(TotpFuse::new());
 
     let mut config = Config::default();
-    // Defence-in-depth mount flags. TOTP "files" only contain ASCII digits.
-    config.mount_options = vec![
-        MountOption::RO,
-        MountOption::NoSuid,
-        MountOption::NoDev,
-        MountOption::NoExec,
-        MountOption::FSName("rosec-totp".to_string()),
-    ];
-    config.acl = SessionACL::Owner;
+    config.mount_options = crate::sandbox::mount_options("rosec-totp");
+    config.acl = crate::sandbox::ACL;
 
     let fs_wrapper = ArcFs(Arc::clone(&fuse));
     let session = fuser::spawn_mount2(fs_wrapper, mountpoint, &config)

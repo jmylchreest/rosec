@@ -66,7 +66,7 @@ fn main() -> Result<()> {
         }
     }
 
-    rosec_core::process::harden();
+    rosec_core::sandbox::harden();
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!(

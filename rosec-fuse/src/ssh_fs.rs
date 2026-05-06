@@ -27,8 +27,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use fuser::{
     AccessFlags, BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request, SessionACL,
+    FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request,
 };
 use rosec_ssh_agent::KeyEntry;
 use tracing::{debug, warn};
@@ -564,19 +564,8 @@ pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHand
     let fuse = Arc::new(SshFuse::new(agent_sock.clone(), keys_by_name_dir));
 
     let mut config = Config::default();
-    // Defence-in-depth mount flags. The kernel applies NoSuid by default for
-    // non-root FUSE mounts, but listing the flags here explicitly survives
-    // changes to that default and documents intent. SSH .pub key files and
-    // generated ssh_config snippets are never executable, never devices,
-    // never setuid.
-    config.mount_options = vec![
-        MountOption::RO,
-        MountOption::NoSuid,
-        MountOption::NoDev,
-        MountOption::NoExec,
-        MountOption::FSName("rosec-ssh".to_string()),
-    ];
-    config.acl = SessionACL::Owner;
+    config.mount_options = crate::sandbox::mount_options("rosec-ssh");
+    config.acl = crate::sandbox::ACL;
 
     let fs_wrapper = ArcFs(Arc::clone(&fuse));
     let session = fuser::spawn_mount2(fs_wrapper, mountpoint, &config)

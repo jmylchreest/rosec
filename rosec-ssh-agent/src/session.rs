@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -124,17 +123,14 @@ impl SshAgent {
 
     /// Bind the Unix socket and start accepting connections.
     pub async fn listen(self) -> anyhow::Result<()> {
-        // Tighten umask around bind so the socket is created at 0o600
-        // atomically — closes the bind→chmod race window. The explicit
-        // set_permissions below is kept as defense-in-depth.
-        let old_umask = unsafe { libc::umask(0o077) };
-        let bind_result = tokio::net::UnixListener::bind(&self.socket_path);
-        unsafe { libc::umask(old_umask) };
+        let bind_result = crate::sandbox::bind_with_tight_umask(|| {
+            tokio::net::UnixListener::bind(&self.socket_path)
+        });
 
         let listener =
             bind_result.with_context(|| format!("bind SSH agent socket {:?}", self.socket_path))?;
 
-        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+        crate::sandbox::lock_socket_perms(&self.socket_path)
             .with_context(|| format!("chmod 0600 {:?}", self.socket_path))?;
 
         listen(listener, self).await.context("SSH agent listener")

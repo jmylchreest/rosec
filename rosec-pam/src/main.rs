@@ -98,7 +98,7 @@ enum Mode {
 
 fn main() -> ! {
     // Apply process hardening before stdin is read or D-Bus is touched.
-    rosec_core::process::harden();
+    rosec_core::sandbox::harden();
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         eprintln!(

@@ -12,9 +12,9 @@ pub mod dedup;
 pub mod limits;
 pub mod machine_key;
 pub mod oauth;
-pub mod process;
 pub mod prompt;
 pub mod router;
+pub mod sandbox;
 pub mod totp;
 
 /// Crate-wide mutex used by tests that mutate `XDG_DATA_HOME`.

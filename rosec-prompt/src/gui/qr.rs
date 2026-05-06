@@ -174,7 +174,7 @@ fn capture_screenshot() -> Result<Vec<u8>, String> {
 /// identification, so PR_SET_DUMPABLE=0 must be deferred). Once the portal
 /// returns, set PR_SET_DUMPABLE=0 before the PNG enters our memory.
 pub(crate) fn run_screenshot_helper() -> ! {
-    rosec_core::process::harden_introspectable();
+    rosec_core::sandbox::harden_introspectable();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -195,7 +195,7 @@ pub(crate) fn run_screenshot_helper() -> ! {
             .map_err(|e| format!("portal response failed: {e}"))?;
         let uri = response.uri().to_string();
         let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
-        rosec_core::process::set_not_dumpable();
+        rosec_core::sandbox::set_not_dumpable();
         let bytes = std::fs::read(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
         let _ = std::fs::remove_file(file_path);
         Ok::<Vec<u8>, String>(bytes)

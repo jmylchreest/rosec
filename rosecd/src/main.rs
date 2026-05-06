@@ -48,7 +48,7 @@ async fn run() -> Result<()> {
     // Security hardening: PR_SET_NO_NEW_PRIVS, PR_SET_DUMPABLE=0, mlockall.
     // Called immediately after logging is initialised so warnings are visible,
     // but before any providers are constructed or secrets are touched.
-    rosec_core::process::harden();
+    rosec_core::sandbox::harden();
 
     let config = load_config(&config_path)?;
     tracing::info!("loaded config from {}", config_path.display());

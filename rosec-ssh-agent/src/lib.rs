@@ -29,6 +29,7 @@
 
 pub mod keystore;
 pub mod pem;
+pub mod sandbox;
 pub mod session;
 
 pub use keystore::{KeyEntry, KeyStore};
