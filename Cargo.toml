@@ -39,6 +39,7 @@ iced = { version = "0.13.1", default-features = false, features = ["tiny-skia", 
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
 wait-timeout = "0.2"
 landlock = "0.4.4"
+crossbeam-channel = "0.5"
 toml = "1.0.3"
 sha1 = "0.10.6"
 sha2 = "0.10.9"

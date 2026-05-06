@@ -42,6 +42,7 @@ pub(crate) mod path_util;
 pub mod policy;
 pub mod protocol;
 mod provider;
+mod sandbox;
 mod wasm_cred;
 
 pub use discovery::PluginRegistry;
