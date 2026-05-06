@@ -47,12 +47,14 @@ pub fn restrict(mode: Mode) {
 
 fn base_paths() -> Vec<PathRule> {
     vec![
-        // Shared libraries (libc, iced/winit deps, dbus, etc.). PathBeneath
-        // descends recursively, so a single prefix covers the whole tree.
+        // Shared libraries: /lib + /lib64 + /usr/lib (covered via /usr in
+        // GUI mode; explicit here for TTY mode).
         PathRule::ro("/usr/lib"),
         PathRule::ro("/lib"),
         PathRule::ro("/usr/lib64"),
         PathRule::ro("/lib64"),
+        // ld.so config — covered via /etc in GUI mode but TTY mode
+        // narrows /etc to specific files only.
         PathRule::ro("/etc/ld.so.cache"),
         PathRule::ro("/etc/ld.so.preload"),
         // Self-introspection: /proc/self/exe for current_exe()-based
@@ -84,28 +86,27 @@ fn add_gui_paths(paths: &mut Vec<PathRule>) {
     paths.push(PathRule::ro("/sys/dev"));
     paths.push(PathRule::ro("/sys/class/drm"));
 
-    // Font / icon / theme data.
-    paths.push(PathRule::ro("/usr/share/fonts"));
-    paths.push(PathRule::ro("/usr/share/icons"));
-    paths.push(PathRule::ro("/usr/share/themes"));
-    paths.push(PathRule::ro("/usr/share/mime"));
-    paths.push(PathRule::ro("/etc/fonts"));
+    // The GUI stack reads a long tail of distro data: fonts, icons,
+    // themes, mime, X11 (including xkb compose files in
+    // /usr/share/X11/locale/), glib schemas, locale data. Rather than
+    // play whack-a-mole with each new ENOENT (the xkbcommon "No Compose
+    // file" error was the first one we hit), grant ro access to the
+    // whole /usr tree — it's distro-managed read-only system data, no
+    // user secrets there.
+    paths.push(PathRule::ro("/usr"));
+
+    // /etc holds fontconfig + locale aliases + ld.so.cache + xkb defaults.
+    // Some files here are sensitive (/etc/shadow) but UNIX perms already
+    // gate those for non-root processes. ro at /etc as a layer is fine.
+    paths.push(PathRule::ro("/etc"));
 
     // Mesa / wgpu shader caches (writable).
     if let Some(home) = std::env::var_os("HOME") {
         let home = std::path::PathBuf::from(home);
         paths.push(PathRule::rw(home.join(".cache")));
         paths.push(PathRule::ro(home.join(".config")));
-        paths.push(PathRule::ro(home.join(".local/share/fonts")));
-        paths.push(PathRule::ro(home.join(".local/share/icons")));
-        paths.push(PathRule::ro(home.join(".local/share/themes")));
+        paths.push(PathRule::ro(home.join(".local/share")));
     }
-
-    // Exec paths for clipboard helpers spawned by the TOTP path. Subprocess
-    // inheritance means they need read access to their own binaries + libs;
-    // libs are already covered by /usr/lib above, so just the binaries.
-    paths.push(PathRule::ro("/usr/bin"));
-    paths.push(PathRule::ro("/bin"));
 
     // D-Bus session bus (portal access for the screenshot helper re-exec).
     if let Some(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()
