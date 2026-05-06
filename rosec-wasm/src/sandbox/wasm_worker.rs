@@ -40,8 +40,8 @@ use crate::provider::{
 const CALL_CHANNEL_CAPACITY: usize = 16;
 
 /// Quiet window inside which contiguous watch events for the same path
-/// collapse into a single `on_path_changed` dispatch. Mirrors what the
-/// previous `spawn_watch_dispatcher` did in tokio land.
+/// collapse into a single `on_path_changed` dispatch. A typical editor save
+/// fires 3-5 inotify events within tens of ms; we want one guest call.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// A boxed unit of work the worker executes against `&mut Plugin`.
