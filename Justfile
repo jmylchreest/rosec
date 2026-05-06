@@ -146,8 +146,15 @@ profile-record duration="30":
     echo "error: rosecd is not running" >&2
     exit 1
   fi
+  # Resolve samply against the caller's PATH (sudo strips PATH, so plain
+  # `sudo samply` would fail when samply lives in ~/.cargo/bin).
+  SAMPLY=$(command -v samply || true)
+  if [[ -z "$SAMPLY" ]]; then
+    echo "error: 'samply' not found in PATH — install with: cargo install samply" >&2
+    exit 1
+  fi
   echo "Recording rosecd (PID $PID) for {{ duration }}s …"
-  sudo samply record -p "$PID" --duration "{{ duration }}"
+  sudo "$SAMPLY" record -p "$PID" --duration "{{ duration }}"
 
 # sign-wasm signs the .wasm + .wasm.policy.toml pairs with WASM_SIGNING_KEY
 # and stages the result (incl. .wasm.minisig) under dist/providers/ — same
