@@ -169,6 +169,8 @@ impl<R: Send + 'static> Drop for Worker<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// A trivial test resource: a counter we can mutate from closures.
@@ -264,5 +266,36 @@ mod tests {
         let results = futures_util::future::join_all(handles).await;
         // All 32 ran; final state is one of the values 0..32.
         assert_eq!(results.len(), 32);
+    }
+
+    /// `current_thread` flavor gives one tokio worker. If a long sync
+    /// closure on the dedicated thread were somehow pinning that tokio
+    /// worker, the concurrent tokio task could not progress until the
+    /// closure returned.
+    #[tokio::test(flavor = "current_thread")]
+    async fn long_sync_call_does_not_block_tokio_runtime() {
+        let w = spawn_counter();
+        let start = std::time::Instant::now();
+
+        let long_call = w.call(|c| {
+            std::thread::sleep(Duration::from_millis(200));
+            c.0 = 1;
+            c.0
+        });
+
+        // Concurrent tokio work that finishes quickly *if* the runtime is
+        // not blocked. tokio::time::sleep yields, so it can interleave.
+        let concurrent = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            start.elapsed()
+        };
+
+        let (long_res, concurrent_elapsed) = tokio::join!(long_call, concurrent);
+        assert_eq!(long_res.unwrap(), 1);
+        // If the worker had pinned the tokio thread, this would be ~200ms.
+        assert!(
+            concurrent_elapsed < Duration::from_millis(150),
+            "tokio task waited {concurrent_elapsed:?} — worker is blocking the runtime",
+        );
     }
 }
