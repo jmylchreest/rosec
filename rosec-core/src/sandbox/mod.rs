@@ -12,6 +12,7 @@
 //! policy-derived ruleset) live in those crates' own `sandbox` modules
 //! and call into the helpers here.
 
+pub mod landlock;
 pub mod process;
 
 pub use process::{harden, harden_introspectable, set_not_dumpable};

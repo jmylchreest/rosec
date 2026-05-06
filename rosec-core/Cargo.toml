@@ -17,6 +17,7 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
+landlock = { workspace = true }
 
 # Credential storage crypto
 aes = { workspace = true }
