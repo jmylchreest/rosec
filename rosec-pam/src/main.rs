@@ -32,6 +32,8 @@ use std::os::unix::io::FromRawFd as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 use zeroize::Zeroizing;
 
+mod sandbox;
+
 /// Exit codes for pam_exec. PAM_SUCCESS = 0, PAM_IGNORE = 25.
 /// We use PAM_SUCCESS on success and PAM_IGNORE on any failure so that
 /// the `optional` module never blocks login.
@@ -108,6 +110,11 @@ fn main() -> ! {
         );
         std::process::exit(0);
     }
+
+    // Confine to the small set of paths/sockets this helper needs (see
+    // sandbox.rs). Best-effort — older kernels degrade rather than fail
+    // because PAM helpers must never block login.
+    sandbox::restrict();
 
     let mode = if std::env::args().any(|a| a == "--chauthtok") {
         Mode::Chauthtok

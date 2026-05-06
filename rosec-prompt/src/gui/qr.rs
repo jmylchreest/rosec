@@ -175,6 +175,7 @@ fn capture_screenshot() -> Result<Vec<u8>, String> {
 /// returns, set PR_SET_DUMPABLE=0 before the PNG enters our memory.
 pub(crate) fn run_screenshot_helper() -> ! {
     rosec_core::sandbox::harden_introspectable();
+    crate::sandbox::restrict(crate::sandbox::Mode::ScreenshotHelper);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -46,6 +46,7 @@ mod gui;
 mod helpers;
 mod output;
 mod request;
+mod sandbox;
 mod tty;
 
 use std::io::{self, Read};
@@ -109,9 +110,15 @@ fn main() -> Result<()> {
     let has_display =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
+    // Apply Landlock with the mode-specific ruleset BEFORE running the
+    // selected mode. GUI mode unlocks more paths (compositor, GPU, fonts)
+    // than TTY. The screenshot-helper short-circuit above applies its own
+    // ruleset inside gui::run_screenshot_helper().
     if has_display {
+        sandbox::restrict(sandbox::Mode::Gui);
         gui::run(request)
     } else {
+        sandbox::restrict(sandbox::Mode::Tty);
         tty::run(request)
     }
 }
