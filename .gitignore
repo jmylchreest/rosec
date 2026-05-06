@@ -12,6 +12,16 @@
 # Logs
 *.log
 
+# Profiler output (samply / perf / sign-wasm staging)
+profile.json
+profile.json.gz
+*.cpuprofile
+*.heapprofile
+perf.data
+perf.data.old
+flamegraph.svg
+dist/
+
 # Syncthing
 .syncthing.*
 

@@ -153,8 +153,25 @@ profile-record duration="30":
     echo "error: 'samply' not found in PATH — install with: cargo install samply" >&2
     exit 1
   fi
-  echo "Recording rosecd (PID $PID) for {{ duration }}s …"
-  sudo "$SAMPLY" record -p "$PID" --duration "{{ duration }}"
+  OUT="${TMPDIR:-/tmp}/rosecd-profile-$(date +%Y%m%d-%H%M%S).json"
+  echo "Recording rosecd (PID $PID) for {{ duration }}s → $OUT"
+  # samply's --duration is ignored in attach mode (it records until
+  # interrupted). Drive the run length externally with `timeout
+  # --signal=INT`: when the timer fires, samply receives SIGINT,
+  # finalises the recording, writes the file, and exits cleanly.
+  # exit 124 from timeout means "duration elapsed" — expected, not an error.
+  sudo timeout --signal=INT --foreground "{{ duration }}" "$SAMPLY" record --save-only -o "$OUT" -p "$PID" || rc=$?
+  if [[ "${rc:-0}" -ne 0 && "${rc:-0}" -ne 124 ]]; then
+    echo "error: samply exited with $rc" >&2
+    exit "$rc"
+  fi
+  # samply writes the file as root; chown back so the user can load it
+  # without sudo and so cleanup doesn't need elevated permissions.
+  sudo chown "$USER" "$OUT"
+  echo ""
+  echo "View with one of:"
+  echo "  samply load $OUT                                # local: opens default browser"
+  echo "  upload to https://profiler.firefox.com/         # Firefox or Chrome required (Safari can't import)"
 
 # sign-wasm signs the .wasm + .wasm.policy.toml pairs with WASM_SIGNING_KEY
 # and stages the result (incl. .wasm.minisig) under dist/providers/ — same
