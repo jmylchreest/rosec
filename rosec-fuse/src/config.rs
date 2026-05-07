@@ -13,9 +13,7 @@ use std::time::SystemTime;
 
 use rosec_ssh_agent::KeyEntry;
 
-use crate::naming::sanitise_filename;
-
-use crate::naming::normalise_item_name;
+use crate::naming::{normalise_item_name, sanitise_filename};
 
 /// A generated SSH config snippet.
 #[derive(Debug, Clone)]
