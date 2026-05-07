@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+#[derive(Default)]
 pub struct LockPolicy {
     /// Timestamp of the last client activity (D-Bus method call).
     last_activity: Mutex<Option<SystemTime>>,
@@ -26,21 +27,9 @@ pub struct LockPolicy {
     sync_in_progress: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl Default for LockPolicy {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl LockPolicy {
     pub fn new() -> Self {
-        Self {
-            last_activity: Mutex::new(None),
-            unlocked_since: Mutex::new(None),
-            unlocked_since_map: Mutex::new(HashMap::new()),
-            unlock_in_progress: tokio::sync::Mutex::new(()),
-            sync_in_progress: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     /// Record that client activity has occurred (resets idle timer).

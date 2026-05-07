@@ -13,26 +13,11 @@ use crate::service::SecretService;
 use crate::session::SessionManager;
 use crate::state::ServiceState;
 
-#[derive(Debug)]
-pub struct ObjectPaths {
-    pub service: String,
-    pub collection_default: String,
-}
-
-impl ObjectPaths {
-    pub fn new() -> Self {
-        Self {
-            service: "/org/freedesktop/secrets".to_string(),
-            collection_default: "/org/freedesktop/secrets/collection/default".to_string(),
-        }
-    }
-}
-
-impl Default for ObjectPaths {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Spec-defined D-Bus object paths the Secret Service implementation
+/// registers under. Plain `&'static str` because the values are baked
+/// into the protocol — there is nothing to configure.
+pub const SERVICE_PATH: &str = "/org/freedesktop/secrets";
+pub const DEFAULT_COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/default";
 
 pub async fn register_objects(
     conn: &Connection,
@@ -117,11 +102,10 @@ pub async fn re_register_top_level_objects(
 /// through this function, so adding a new interface only requires changing
 /// one place.
 async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> zbus::Result<()> {
-    let paths = ObjectPaths::new();
     let server = conn.object_server();
 
     server
-        .at(paths.service.clone(), SecretService::new(Arc::clone(state)))
+        .at(SERVICE_PATH, SecretService::new(Arc::clone(state)))
         .await?;
     server
         .at("/org/rosec/Daemon", RosecManagement::new(Arc::clone(state)))
@@ -152,7 +136,7 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
     };
     server
         .at(
-            paths.collection_default.clone(),
+            DEFAULT_COLLECTION_PATH,
             SecretCollection::new(collection_state.clone()),
         )
         .await?;

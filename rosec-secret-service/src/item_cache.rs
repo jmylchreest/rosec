@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 use rosec_core::ItemMeta;
 
+#[derive(Default)]
 pub struct ItemCache {
     /// Currently-mounted D-Bus items, keyed by object path.
     pub items: Arc<Mutex<HashMap<String, ItemMeta>>>,
@@ -39,20 +40,9 @@ pub struct ItemCache {
     pub metadata_cache: Arc<Mutex<HashMap<String, ItemMeta>>>,
 }
 
-impl Default for ItemCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ItemCache {
     pub fn new() -> Self {
-        Self {
-            items: Arc::new(Mutex::new(HashMap::new())),
-            registered_items: Arc::new(Mutex::new(HashSet::new())),
-            last_sync: Arc::new(Mutex::new(None)),
-            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Clear the registered-items set (used during bus migration so the
