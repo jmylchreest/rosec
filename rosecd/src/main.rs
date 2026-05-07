@@ -1759,38 +1759,22 @@ async fn build_single_provider(
                 .entry("device_id".to_string())
                 .or_insert_with(|| serde_json::Value::String(load_or_create_device_id()));
 
-            // Build allowed_paths / allowed_files from the policy when present;
-            // fall back to the legacy kind-string gates only under the dev path
-            // (wasm_verify=disabled with no .policy.toml). policy.resolve()
-            // validates required options and template references too.
-            let (allowed_paths, allowed_files) = match &discovered.policy {
-                Some(policy) => {
-                    // Apply [options.defaults] BEFORE resolve and BEFORE the
-                    // guest receives the option map, so the defaulted value
-                    // (e.g. keyring_dir = $home/.local/share/keyrings) is
-                    // visible to template resolution AND to the plugin itself.
-                    policy.apply_defaults(&mut guest_options).map_err(|e| {
-                        anyhow::anyhow!("policy defaults for provider '{}': {e}", entry.id)
-                    })?;
-                    policy.report_unknown_options(&entry.id, &guest_options);
-                    let resolved = policy.resolve(&guest_options).map_err(|e| {
-                        anyhow::anyhow!("policy resolve for provider '{}': {e}", entry.id)
-                    })?;
-                    (resolved.allowed_paths, resolved.allowed_files)
-                }
-                None => (
-                    legacy_compute_wasi_allowed_paths(kind, &guest_options),
-                    legacy_compute_allowed_files(kind, &guest_options),
-                ),
-            };
+            // Apply [options.defaults] BEFORE resolve and BEFORE the guest
+            // receives the option map, so the defaulted value (e.g.
+            // keyring_dir = $home/.local/share/keyrings) is visible to template
+            // resolution AND to the plugin itself.
+            let policy = &discovered.policy;
+            policy
+                .apply_defaults(&mut guest_options)
+                .map_err(|e| anyhow::anyhow!("policy defaults for provider '{}': {e}", entry.id))?;
+            policy.report_unknown_options(&entry.id, &guest_options);
+            let resolved = policy
+                .resolve(&guest_options)
+                .map_err(|e| anyhow::anyhow!("policy resolve for provider '{}': {e}", entry.id))?;
 
             // Effective allowed_hosts:
-            //   policy_or_manifest_baseline  ↦  user.allowed_hosts replaces it (loud warn)
-            //                                ↦  user.additional_hosts always extends (info)
-            let baseline: Vec<String> = match &discovered.policy {
-                Some(policy) => policy.network.allowed_hosts.clone(),
-                None => discovered.manifest.default_allowed_hosts.clone(),
-            };
+            //   policy baseline             ↦  user.allowed_hosts replaces it (loud warn)
+            //                               ↦  user.additional_hosts always extends (info)
             let mut allowed_hosts: Vec<String> = match &entry.allowed_hosts {
                 Some(replacement) => {
                     tracing::warn!(
@@ -1801,7 +1785,7 @@ async fn build_single_provider(
                     );
                     replacement.clone()
                 }
-                None => baseline,
+                None => policy.network.allowed_hosts.clone(),
             };
 
             // Always-extending user knob, plus auto-derive hostnames from
@@ -1837,8 +1821,8 @@ async fn build_single_provider(
                 wasm_path: discovered.wasm_path.display().to_string(),
                 wasm_bytes: discovered.wasm_bytes.clone(),
                 allowed_hosts,
-                allowed_paths,
-                allowed_files,
+                allowed_paths: resolved.allowed_paths,
+                allowed_files: resolved.allowed_files,
                 options: guest_options,
                 offline_cache: entry.offline_cache,
                 tls_mode: entry.tls_mode.clone(),
@@ -1863,66 +1847,6 @@ fn extract_host_from_url(url_str: &str) -> Option<String> {
     url::Url::parse(url_str)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
-}
-
-/// Legacy kind-string-keyed gate for filesystem preopens.
-///
-/// Used only when a plugin has no `.policy.toml` sidecar AND
-/// `wasm_verify = "disabled"`. Both conditions together imply "developer
-/// trust the wasm" mode, the only path that bypasses the policy. Will be
-/// removed once `wasm_verify="disabled"` is dropped.
-fn legacy_compute_wasi_allowed_paths(
-    kind: &str,
-    options: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<(String, PathBuf)> {
-    let mut paths = Vec::new();
-
-    if kind == "gnome-keyring" {
-        // Mirror the guest's default: keyring_dir option, or $HOME/.local/share/keyrings
-        let keyring_dir = options
-            .get("keyring_dir")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| {
-                options
-                    .get("home_dir")
-                    .and_then(|v| v.as_str())
-                    .map(|h| format!("{h}/.local/share/keyrings"))
-            })
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| format!("{h}/.local/share/keyrings"))
-            });
-
-        if let Some(dir) = keyring_dir {
-            let dest = PathBuf::from(&dir);
-            paths.push((format!("ro:{dir}"), dest));
-        }
-    }
-
-    paths
-}
-
-/// Legacy kind-string-keyed gate for `host_file` per-file scoping.
-/// Same dev-mode-only fallback as [`legacy_compute_wasi_allowed_paths`].
-fn legacy_compute_allowed_files(
-    kind: &str,
-    options: &std::collections::HashMap<String, serde_json::Value>,
-) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-
-    if kind == "keepassxc-file"
-        && let Some(p) = options.get("path").and_then(|v| v.as_str())
-    {
-        files.push(PathBuf::from(p));
-        // Optional key file used as a second factor.
-        if let Some(k) = options.get("key_file").and_then(|v| v.as_str()) {
-            files.push(PathBuf::from(k));
-        }
-    }
-
-    files
 }
 
 /// Expand `~/` for any string-valued option.  Non-string values pass through

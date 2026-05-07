@@ -5,7 +5,9 @@ title: WASM policy sidecar
 
 # WASM policy sidecar
 
-Status: **design accepted; implementation pending** (tracked in issue #21).
+Status: **implemented**. Plugin-author/user CLI tooling
+(`rosec-package-wasm`, `rosec-validate-plugin`) is tracked separately
+in [#22](https://github.com/jmylchreest/rosec/issues/22).
 
 ## Problem
 
@@ -53,7 +55,7 @@ matters for two reasons:
 ```
 provider-name.wasm
 provider-name.wasm.policy.toml
-provider-name.wasm.minisig          # signs (BLAKE3(wasm) || BLAKE3(policy))
+provider-name.wasm.minisig          # signs (wasm_bytes || policy_bytes)
 ```
 
 All three files **must** live in the same directory. Distributions ship
@@ -112,12 +114,16 @@ optional = ["key_file"]        # user MAY set these
 ### Signature scheme
 
 ```
-sigdata = blake3(wasm_bytes) || blake3(policy_bytes) || schema_version_byte
+sigdata = wasm_bytes || policy_bytes
 sig     = minisign(signing_key, sigdata)
 ```
 
-Substituting either file invalidates the signature. A single `.minisig`
-covers both, simplifying distribution.
+The `.minisig` covers the raw concatenation of both files; minisign
+hashes the input internally (BLAKE2b), so a separate pre-hash stage
+buys nothing. The schema version is part of `policy_bytes` (it lives
+in the TOML body), so substituting a different version invalidates
+the signature without needing a separate version byte. A single
+`.minisig` covers both files, simplifying distribution.
 
 ### User overrides (via `rosec.toml`)
 
@@ -155,27 +161,34 @@ access don't enable the plugin.
 
 1. `discovery::scan_plugins` reads the sidecar `.policy.toml` and the
    sibling `.minisig`.
-2. `verify_plugin_and_policy(wasm, policy)` computes the combined BLAKE3
-   hash and verifies the minisign signature.
-3. `DiscoveredPlugin` gains `policy: PluginPolicy`.
-4. `compute_wasi_allowed_paths` / `compute_allowed_files` in
-   `rosecd/src/main.rs` are replaced by
-   `policy.resolve(&user_options) -> ResolvedPolicy`. The
-   `kind == "..."` hardcoded gate is removed.
+2. `verify_plugin` concatenates `(wasm_bytes || policy_bytes)` and asks
+   minisign to verify the signature against the embedded
+   `WASM_SIGNING_PUBKEY`.
+3. `DiscoveredPlugin` carries `policy: PluginPolicy` (always present —
+   no `Option`; both verify modes require the sidecar).
+4. The kind-string gates in `rosecd/src/main.rs` are gone. Filesystem
+   preopens and per-file allow-lists are produced exclusively by
+   `policy.resolve(&user_options) -> ResolvedPolicy`.
 5. `WasmProviderConfig.allowed_hosts` is the effective set per the table
-   above.
-6. `plugin_manifest()` is downgraded to informational. It can still
-   declare `attribute_descriptors`, `auth_fields`, etc., but its
-   `default_allowed_hosts` field is dropped from the trust path.
+   above (`policy.network.allowed_hosts` ∪ user overrides).
+6. `plugin_manifest()` is informational only. Plugins can still declare
+   `attribute_descriptors`, `auth_fields`, `id_derivation_key`, etc.,
+   but `default_allowed_hosts` is no longer consulted by the host.
 
 ### Fallback behaviour
 
-| `wasm_verify` | sidecar present | result |
-|---|---|---|
-| `required` (default) | yes | verify combined signature; load with policy |
-| `required` (default) | no | reject with `"plugin missing required policy file"` |
-| `disabled` (dev) | yes | load with policy, signature ignored |
-| `disabled` (dev) | no | load with **manifest-declared** allow-lists, `warn!` loudly — `disabled` means "trust the wasm" |
+The `.policy.toml` sidecar is **always required**. `wasm_verify =
+"disabled"` only bypasses the cryptographic signature check; it does
+not skip the policy. There is no manifest-declared fallback path —
+historic kind-string gates have been removed.
+
+| `wasm_verify` | sidecar present | `.minisig` present | result |
+|---|---|---|---|
+| `required` (default) | yes | yes | verify combined signature; load with policy |
+| `required` (default) | yes | no | reject (`"signature file not found"`) |
+| `required` (default) | no | — | reject (`"policy file not found"`) |
+| `disabled` (dev) | yes | — | load with policy, signature ignored, `warn!` loudly |
+| `disabled` (dev) | no | — | reject (`"policy file not found"` — disabled skips the signature check, not the policy) |
 
 ### Required and unknown options
 
@@ -208,51 +221,52 @@ message rather than a silently-relaxed sandbox.
 
 ### Migration
 
-**Hard cutover** at the next minor release (likely 0.1.0). All in-tree
-providers (bitwarden-pm, bitwarden-sm, keepassxc-file, gnome-keyring)
-get policy files committed in this work and re-signed. Third-party
-plugins must re-issue with a sidecar to remain loadable.
+**Hard cutover.** All in-tree providers (bitwarden-pm, bitwarden-sm,
+keepassxc-file, gnome-keyring) ship a `*.wasm.policy.toml` alongside
+their `.wasm` and the combined `.minisig`. Third-party plugins must
+re-issue with a sidecar to remain loadable.
 
 The user base is small enough that the disruption cost is low and the
 "soft migration with deprecation warning" path would extend the
 vulnerability window for too little gain.
 
-## Code surface
+## Code surface (as implemented)
 
-- new `rosec-wasm/src/policy.rs` (~250 lines: parse, validate, resolve
-  templates, combined-signature verification)
-- `rosec-wasm/src/discovery.rs`: extend `VerifyOutcome`; require sidecar
-  presence under `Required` mode; add `policy: PluginPolicy` to
-  `DiscoveredPlugin`
-- `rosecd/src/main.rs`: replace `compute_wasi_allowed_paths` /
-  `compute_allowed_files` with `policy.resolve(&user_options)`;
-  compute effective `allowed_hosts` from policy + user
-  `allowed_hosts` / `additional_hosts`
-- `rosec-wasm/src/provider.rs`: stop reading manifest's
-  `default_allowed_hosts` for trust; treat as informational
-- `rosec-core/src/config.rs`: add per-provider
+- `rosec-wasm/src/policy.rs` — schema, parse, schema-version refusal,
+  `[options.defaults]` injection, template resolver, signature input
+  builder.
+- `rosec-wasm/src/discovery.rs` — sidecar mandatory in both verify
+  modes; `DiscoveredPlugin.policy: PluginPolicy` (non-optional);
+  `VerifyOutcome::{Verified, NotVerified, Rejected}`.
+- `rosecd/src/main.rs` — `build_single_provider` runs
+  `policy.apply_defaults` → `report_unknown_options` →
+  `policy.resolve` to populate `WasmProviderConfig.allowed_paths` /
+  `allowed_files`; computes effective `allowed_hosts` from
+  policy + user `allowed_hosts` / `additional_hosts`. No kind-string
+  gates remain.
+- `rosec-core/src/config.rs` — per-provider
   `allowed_hosts: Option<Vec<String>>` and
-  `additional_hosts: Vec<String>` fields
-- new `rosec-tools` crate containing:
-  - `rosec-package-wasm` — for plugin authors: bundle wasm + policy →
-    `.minisig`, validates schema first
-  - `rosec-validate-plugin` — for users: verifies signature, prints
-    policy summary, dry-runs template resolution against the current
-    user config. Also exposed as `rosec provider validate <kind>` for
-    discoverability
-- in-tree provider repos: add `*.policy.toml` files, update CI to sign
-  both files together
-- documentation updates in `wasm-provider-guide.md` to replace
-  "WASM author declares allowed_hosts" examples with "policy sidecar"
-  examples
+  `additional_hosts: Vec<String>` fields.
+- In-tree provider crates ship `*.wasm.policy.toml` files.
+- `Justfile` `sign-wasm` recipe stages
+  `dist/providers/{stem}.wasm{,.policy.toml,.minisig}` for local
+  testing of the `wasm_verify = "required"` path.
+
+### Deferred / follow-up
+
+- `rosec-package-wasm` (plugin-author bundling, key rotation) and
+  `rosec-validate-plugin` / `rosec provider validate <kind>`
+  (user-side inspection and dry-run) are tracked in
+  [#22](https://github.com/jmylchreest/rosec/issues/22). The
+  day-to-day signing flow is currently the `just sign-wasm` recipe.
 
 ## Threat model
 
 **What the sidecar fixes:**
 
-- ✅ The brittle `kind == "..."` hardcoded gates in
-  `compute_wasi_allowed_paths` and `compute_allowed_files` are replaced
-  with a per-plugin declarative policy file.
+- ✅ The brittle `kind == "..."` hardcoded gates that previously lived
+  in `rosecd/src/main.rs` for filesystem preopens and per-file
+  scoping are gone — replaced entirely by `policy.resolve()`.
 - ✅ `plugin_manifest()` self-declared `default_allowed_hosts` is no
   longer trusted.
 - ✅ Substitution of `.wasm` or `.policy.toml` without re-signing is

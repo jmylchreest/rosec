@@ -219,10 +219,14 @@ pub enum ReadinessProbe {
 
 ### Security constraint
 
-Probe targets are validated against the Extism manifest's `allowed_hosts`
-list using the same glob matching Extism uses.  A probe whose hostname
-doesn't match `allowed_hosts` is rejected at evaluation time.  This
-prevents a malicious guest from probing arbitrary internal hosts.
+Probe targets are validated against the host's effective
+`allowed_hosts` list (sourced from the policy sidecar's
+`[network].allowed_hosts`, optionally extended or replaced by the user
+via `rosec.toml`) using the same glob matching Extism uses. A probe
+whose hostname doesn't match is rejected at evaluation time. This
+prevents a malicious guest from probing arbitrary internal hosts. See
+[WASM policy sidecar](./wasm-policy-sidecar.md) for how the
+allow-list is sourced.
 
 **Glob wildcard semantics:** The `glob` crate's `*` matches `.` characters,
 so `*.example.com` is a _deep_ wildcard — it matches `foo.example.com`
@@ -390,10 +394,12 @@ The poisoned-but-recovered mutex in the old instance is never used again.
    files or Extism variables.
 
 4. **Respect `allowed_hosts`.**
-   Only make HTTP requests to hosts declared in the manifest's
-   `allowed_hosts`.  Extism enforces this at the host function level, but
-   the guest should also validate URLs defensively.  Prefer exact hostnames
-   over wildcards — `*` matches `.` so `*.example.com` matches arbitrary
+   Only make HTTP requests to hosts declared in your policy sidecar's
+   `[network].allowed_hosts` (see
+   [WASM policy sidecar](./wasm-policy-sidecar.md)).  The host
+   enforces this at the host function level, but the guest should
+   also validate URLs defensively.  Prefer exact hostnames over
+   wildcards — `*` matches `.` so `*.example.com` matches arbitrary
    subdomain depth (see "Security constraint" above).
 
 ## Offline cache

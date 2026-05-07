@@ -33,10 +33,12 @@ use crate::policy::{self, PluginPolicy};
 use crate::protocol::{PluginManifest, PluginOptionDescriptor};
 
 /// Bundle of files captured during scan: wasm bytes (after signature
-/// verification) and the parsed policy sidecar when present.
+/// verification) and the parsed policy sidecar. The policy is always
+/// present — `disabled` mode only bypasses the cryptographic signature
+/// check, never the declarative policy.
 struct VerifiedPlugin {
     wasm_bytes: Vec<u8>,
-    policy: Option<PluginPolicy>,
+    policy: PluginPolicy,
 }
 
 /// Maximum `.wasm` file size accepted during probing (10 MiB).
@@ -65,10 +67,10 @@ pub struct DiscoveredPlugin {
     /// re-reading from disk (closing the verify-then-load TOCTOU window).
     pub wasm_bytes: Arc<Vec<u8>>,
     /// Signed policy sidecar declaring this plugin's network/filesystem
-    /// surface. `None` only in `wasm_verify = "disabled"` legacy mode where
-    /// no `.policy.toml` was found alongside the wasm; in that case the
-    /// daemon falls back to `plugin_manifest()`-declared allow-lists.
-    pub policy: Option<PluginPolicy>,
+    /// surface. Always present — both `required` and `disabled` modes
+    /// load the `.policy.toml`; `disabled` only skips the cryptographic
+    /// signature check.
+    pub policy: PluginPolicy,
     /// The manifest returned by `plugin_manifest()`.
     pub manifest: PluginManifest,
 }
@@ -212,34 +214,9 @@ fn scan_directory(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let (outcome, verified) = verify_plugin(&path, verify);
-        debug!(
-            wasm = %wasm_name,
-            path = %path.display(),
-            ?source,
-            ?outcome,
-            "scan_plugins: signature verification result",
-        );
-        match outcome {
-            VerifyOutcome::Verified => {
-                info!(
-                    wasm = %wasm_name,
-                    path = %path.display(),
-                    ?source,
-                    verified = true,
-                    "WASM plugin signature verified",
-                );
-            }
-            VerifyOutcome::NotVerified { reason } => {
-                debug!(
-                    wasm = %wasm_name,
-                    path = %path.display(),
-                    ?source,
-                    reason = %reason,
-                    "WASM plugin loaded without signature verification",
-                );
-            }
-            VerifyOutcome::Rejected { reason } => {
+        let (outcome, VerifiedPlugin { wasm_bytes, policy }) = match verify_plugin(&path, verify) {
+            Ok(v) => v,
+            Err(reason) => {
                 warn!(
                     wasm = %wasm_name,
                     path = %path.display(),
@@ -249,19 +226,22 @@ fn scan_directory(
                 );
                 continue;
             }
-        }
-
-        // wasm_bytes/policy populated for Verified and NotVerified.
-        let VerifiedPlugin { wasm_bytes, policy } = match verified {
-            Some(v) => v,
-            None => {
-                warn!(
-                    wasm = %wasm_name,
-                    "internal error: verify_plugin returned None for non-rejected outcome"
-                );
-                continue;
-            }
         };
+        match &outcome {
+            VerifyOutcome::Verified => info!(
+                wasm = %wasm_name,
+                path = %path.display(),
+                ?source,
+                "WASM plugin signature verified",
+            ),
+            VerifyOutcome::NotVerified { reason } => debug!(
+                wasm = %wasm_name,
+                path = %path.display(),
+                ?source,
+                reason = %reason,
+                "WASM plugin loaded without signature verification",
+            ),
+        }
         let wasm_bytes = Arc::new(wasm_bytes);
 
         // Step 2: probe the plugin (fuel-limited, size-capped) using the
@@ -273,13 +253,11 @@ fn scan_directory(
 
                 // Catch policy/manifest kind mismatch — cheaper here than
                 // discovering it later when WasmProvider tries to load.
-                if let Some(p) = &policy
-                    && p.kind != kind
-                {
+                if policy.kind != kind {
                     warn!(
                         wasm = %wasm_name,
                         manifest_kind = %kind,
-                        policy_kind = %p.kind,
+                        policy_kind = %policy.kind,
                         "policy declares a different kind than plugin_manifest, skipping"
                     );
                     continue;
@@ -358,16 +336,15 @@ fn should_replace(
     }
 }
 
-/// Outcome of signature verification.
+/// Outcome of signature verification on the success path. Failures are
+/// returned as `Err(reason)` from [`verify_plugin`].
 #[derive(Debug)]
 enum VerifyOutcome {
     /// Signature present and verified.
     Verified,
-    /// Verification was not performed (disabled).
-    /// The plugin may still be loaded.
+    /// Verification was not performed (disabled). The plugin may still
+    /// be loaded.
     NotVerified { reason: &'static str },
-    /// Plugin should NOT be loaded (e.g. unsigned under `Required`).
-    Rejected { reason: String },
 }
 
 /// Path of the policy sidecar for a given `.wasm` file.
@@ -377,174 +354,91 @@ fn policy_path_for(wasm_path: &Path) -> PathBuf {
 
 /// Read wasm bytes + sidecar policy and verify the combined signature.
 ///
-/// Returns `(outcome, Some(VerifiedPlugin))` on `Verified` / `NotVerified`,
-/// `(outcome, None)` on `Rejected`. Closes the verify-then-load TOCTOU window
-/// by capturing wasm bytes once for both probe and runtime load.
+/// Closes the verify-then-load TOCTOU window by capturing wasm bytes
+/// once for both probe and runtime load. The `Err` variant carries the
+/// rejection reason as a single human-readable string.
 ///
 /// # Behaviour by mode
 ///
-/// - **`Required` (default)** — `.wasm.minisig` and `.wasm.policy.toml` must
-///   both exist. The signature covers `(wasm_bytes || policy_bytes)`;
+/// The `.policy.toml` sidecar is **mandatory in both modes** — `disabled`
+/// only bypasses the cryptographic signature check, never the declarative
+/// policy. There is no manifest-declared fallback path.
+///
+/// - **`Required` (default)** — `.wasm.minisig` and `.wasm.policy.toml`
+///   must both exist. The signature covers `(wasm_bytes || policy_bytes)`;
 ///   substitution of either file invalidates it.
-/// - **`Disabled` (dev)** — signature ignored. If a `.policy.toml` exists it
-///   is parsed and used (so devs can write a local policy and have it apply).
-///   If absent, the daemon falls back to manifest-declared allow-lists; a
-///   `warn!` is logged at scan time.
-fn verify_plugin(wasm_path: &Path, verify: WasmVerify) -> (VerifyOutcome, Option<VerifiedPlugin>) {
-    let wasm_bytes = match std::fs::read(wasm_path) {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                VerifyOutcome::Rejected {
-                    reason: format!("failed to read WASM file '{}': {e}", wasm_path.display()),
-                },
-                None,
-            );
-        }
-    };
+/// - **`Disabled` (dev)** — `.wasm.policy.toml` must exist; the
+///   `.minisig` is not required and any signature verification is
+///   skipped. A loud `warn!` is logged at scan time.
+fn verify_plugin(
+    wasm_path: &Path,
+    verify: WasmVerify,
+) -> Result<(VerifyOutcome, VerifiedPlugin), String> {
+    let wasm_bytes = std::fs::read(wasm_path)
+        .map_err(|e| format!("failed to read WASM file '{}': {e}", wasm_path.display()))?;
 
     let policy_path = policy_path_for(wasm_path);
-    let policy_bytes = if policy_path.exists() {
-        match std::fs::read(&policy_path) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                return (
-                    VerifyOutcome::Rejected {
-                        reason: format!(
-                            "failed to read policy file '{}': {e}",
-                            policy_path.display()
-                        ),
-                    },
-                    None,
-                );
-            }
+    let policy_bytes = std::fs::read(&policy_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "policy file '{}' not found (required for all wasm_verify modes; \
+                 disabled mode skips the signature check, not the policy)",
+                policy_path.display()
+            )
+        } else {
+            format!(
+                "failed to read policy file '{}': {e}",
+                policy_path.display()
+            )
         }
-    } else {
-        None
-    };
+    })?;
+
+    let policy = PluginPolicy::from_toml_bytes(&policy_bytes)
+        .map_err(|e| format!("policy file '{}' parse failed: {e}", policy_path.display()))?;
 
     if verify == WasmVerify::Disabled {
-        let policy = match &policy_bytes {
-            Some(bytes) => match PluginPolicy::from_toml_bytes(bytes) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    return (
-                        VerifyOutcome::Rejected {
-                            reason: format!(
-                                "policy file '{}' parse failed: {e}",
-                                policy_path.display()
-                            ),
-                        },
-                        None,
-                    );
-                }
-            },
-            None => {
-                warn!(
-                    wasm = %wasm_path.display(),
-                    "wasm_verify = \"disabled\" and no .policy.toml — falling back to manifest-declared allow-lists. \
-                     Ship a .policy.toml alongside your .wasm to express the sandbox declaratively."
-                );
-                None
-            }
-        };
-        return (
-            VerifyOutcome::NotVerified { reason: "disabled" },
-            Some(VerifiedPlugin { wasm_bytes, policy }),
+        warn!(
+            wasm = %wasm_path.display(),
+            "wasm_verify = \"disabled\" — loading without signature verification. \
+             Policy from .wasm.policy.toml is still applied."
         );
+        return Ok((
+            VerifyOutcome::NotVerified { reason: "disabled" },
+            VerifiedPlugin { wasm_bytes, policy },
+        ));
     }
-
-    // Required mode: both files MUST exist and the signature MUST cover both.
-    let policy_bytes = match policy_bytes {
-        Some(b) => b,
-        None => {
-            return (
-                VerifyOutcome::Rejected {
-                    reason: format!(
-                        "policy file '{}' not found (required under wasm_verify = \"required\")",
-                        policy_path.display()
-                    ),
-                },
-                None,
-            );
-        }
-    };
-
-    let policy = match PluginPolicy::from_toml_bytes(&policy_bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                VerifyOutcome::Rejected {
-                    reason: format!("policy file '{}' parse failed: {e}", policy_path.display()),
-                },
-                None,
-            );
-        }
-    };
 
     let sig_path = wasm_path.with_extension("wasm.minisig");
-
     if !sig_path.exists() {
-        return (
-            VerifyOutcome::Rejected {
-                reason: format!(
-                    "signature file '{}' not found (set wasm_verify = \"disabled\" \
-                     to load unsigned plugins for local development)",
-                    sig_path.display(),
-                ),
-            },
-            None,
-        );
+        return Err(format!(
+            "signature file '{}' not found (set wasm_verify = \"disabled\" \
+             to load unsigned plugins for local development)",
+            sig_path.display(),
+        ));
     }
 
-    let pk = match PublicKey::from_base64(WASM_SIGNING_PUBKEY) {
-        Ok(pk) => pk,
-        Err(e) => {
-            return (
-                VerifyOutcome::Rejected {
-                    reason: format!("invalid embedded public key: {e}"),
-                },
-                None,
-            );
-        }
-    };
-
-    let signature = match Signature::from_file(&sig_path) {
-        Ok(sig) => sig,
-        Err(e) => {
-            return (
-                VerifyOutcome::Rejected {
-                    reason: format!(
-                        "failed to read signature file '{}': {e}",
-                        sig_path.display()
-                    ),
-                },
-                None,
-            );
-        }
-    };
+    let pk = PublicKey::from_base64(WASM_SIGNING_PUBKEY)
+        .map_err(|e| format!("invalid embedded public key: {e}"))?;
+    let signature = Signature::from_file(&sig_path).map_err(|e| {
+        format!(
+            "failed to read signature file '{}': {e}",
+            sig_path.display()
+        )
+    })?;
 
     let combined = policy::signature_input(&wasm_bytes, &policy_bytes);
-    if let Err(e) = pk.verify(&combined, &signature, false) {
-        return (
-            VerifyOutcome::Rejected {
-                reason: format!(
-                    "combined signature verification failed for '{}' (policy '{}'): {e}",
-                    wasm_path.display(),
-                    policy_path.display(),
-                ),
-            },
-            None,
-        );
-    }
+    pk.verify(&combined, &signature, false).map_err(|e| {
+        format!(
+            "combined signature verification failed for '{}' (policy '{}'): {e}",
+            wasm_path.display(),
+            policy_path.display(),
+        )
+    })?;
 
-    (
+    Ok((
         VerifyOutcome::Verified,
-        Some(VerifiedPlugin {
-            wasm_bytes,
-            policy: Some(policy),
-        }),
-    )
+        VerifiedPlugin { wasm_bytes, policy },
+    ))
 }
 
 /// Load a `.wasm` file and call `plugin_manifest()` to extract its
