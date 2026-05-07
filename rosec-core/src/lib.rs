@@ -1176,19 +1176,23 @@ impl AutoLockPolicy {
     /// For timeout fields in the override, `Some(0)` maps to `None` (disabled)
     /// in the resulting policy, matching the "0 means disabled" convention.
     pub fn merge(&self, overrides: &AutoLockOverride) -> Self {
+        // For timeout overrides, `Some(0)` means "explicitly disabled" → None.
+        let merge_timeout = |over: Option<u64>, base: Option<u64>| match over {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => base,
+        };
         Self {
             on_logout: overrides.on_logout.unwrap_or(self.on_logout),
             on_session_lock: overrides.on_session_lock.unwrap_or(self.on_session_lock),
-            idle_timeout_minutes: match overrides.idle_timeout_minutes {
-                Some(0) => None,
-                Some(n) => Some(n),
-                None => self.idle_timeout_minutes,
-            },
-            max_unlocked_minutes: match overrides.max_unlocked_minutes {
-                Some(0) => None,
-                Some(n) => Some(n),
-                None => self.max_unlocked_minutes,
-            },
+            idle_timeout_minutes: merge_timeout(
+                overrides.idle_timeout_minutes,
+                self.idle_timeout_minutes,
+            ),
+            max_unlocked_minutes: merge_timeout(
+                overrides.max_unlocked_minutes,
+                self.max_unlocked_minutes,
+            ),
         }
     }
 }

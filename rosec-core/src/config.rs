@@ -162,13 +162,13 @@ pub struct PromptTheme {
     pub label_color: String,
     #[serde(default = "default_accent_color", alias = "ac")]
     pub accent_color: String,
-    #[serde(default = "default_confirm_bg", alias = "ybg")]
+    #[serde(default, alias = "ybg")]
     pub confirm_background: String,
-    #[serde(default = "default_confirm_text", alias = "yt")]
+    #[serde(default, alias = "yt")]
     pub confirm_text: String,
-    #[serde(default = "default_cancel_bg", alias = "nbg")]
+    #[serde(default, alias = "nbg")]
     pub cancel_background: String,
-    #[serde(default = "default_cancel_text", alias = "nt")]
+    #[serde(default, alias = "nt")]
     pub cancel_text: String,
     #[serde(default = "default_input_bg", alias = "ibg")]
     pub input_background: String,
@@ -188,10 +188,10 @@ impl Default for PromptTheme {
             font_family: default_font_family(),
             label_color: default_label_color(),
             accent_color: default_accent_color(),
-            confirm_background: default_confirm_bg(),
-            confirm_text: default_confirm_text(),
-            cancel_background: default_cancel_bg(),
-            cancel_text: default_cancel_text(),
+            confirm_background: String::new(),
+            confirm_text: String::new(),
+            cancel_background: String::new(),
+            cancel_text: String::new(),
             input_background: default_input_bg(),
             input_text: default_input_text(),
             font_size: default_font_size(),
@@ -573,22 +573,6 @@ fn default_label_color() -> String {
 
 fn default_accent_color() -> String {
     "#7aa2f7ff".to_string()
-}
-
-fn default_confirm_bg() -> String {
-    "".to_string()
-}
-
-fn default_confirm_text() -> String {
-    "".to_string()
-}
-
-fn default_cancel_bg() -> String {
-    "".to_string()
-}
-
-fn default_cancel_text() -> String {
-    "".to_string()
 }
 
 fn default_input_bg() -> String {
