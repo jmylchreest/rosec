@@ -185,6 +185,11 @@ impl PluginPolicy {
         &self,
         options: &mut HashMap<String, serde_json::Value>,
     ) -> Result<(), PolicyError> {
+        // Empty maps fed to `resolve_template` so `$option:` refs are
+        // rejected inside default templates (cycle prevention). Allocated
+        // once and reused across all defaults.
+        let empty_opts = HashMap::new();
+        let empty_known = HashSet::new();
         for (key, template) in &self.options.defaults {
             if self.options.required.contains(key) {
                 return Err(PolicyError::DefaultOnRequiredOption(key.clone()));
@@ -195,9 +200,6 @@ impl PluginPolicy {
             if options.contains_key(key) {
                 continue;
             }
-            // Empty options/known to forbid $option: refs in defaults.
-            let empty_opts: HashMap<String, serde_json::Value> = HashMap::new();
-            let empty_known: HashSet<&str> = HashSet::new();
             let resolved = resolve_template(template, &empty_opts, &empty_known, false)?;
             options.insert(key.clone(), serde_json::Value::String(resolved));
         }

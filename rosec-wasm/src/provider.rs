@@ -731,12 +731,7 @@ impl Provider for WasmProvider {
                 registration_fields,
             } => UnlockRequest {
                 password: password.as_str().to_owned(),
-                registration_fields: Some(
-                    registration_fields
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
-                        .collect(),
-                ),
+                registration_fields: Some(fields_to_plain(registration_fields)),
                 auth_fields: None,
             },
             UnlockInput::WithAuth {
@@ -745,12 +740,7 @@ impl Provider for WasmProvider {
             } => UnlockRequest {
                 password: password.as_str().to_owned(),
                 registration_fields: None,
-                auth_fields: Some(
-                    auth_fields
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
-                        .collect(),
-                ),
+                auth_fields: Some(fields_to_plain(auth_fields)),
             },
         };
 
@@ -784,14 +774,9 @@ impl Provider for WasmProvider {
                             // Pass the stored fields directly to the guest — they use
                             // whatever field names the provider registered with (e.g.
                             // "access_token" for SM, "client_id"/"client_secret" for PM).
-                            let reg_fields_plain: HashMap<String, String> = stored_fields
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
-                                .collect();
-
                             let retry_req = UnlockRequest {
                                 password: password_ref.as_str().to_owned(),
-                                registration_fields: Some(reg_fields_plain),
+                                registration_fields: Some(fields_to_plain(&stored_fields)),
                                 auth_fields: None,
                             };
 
@@ -916,7 +901,7 @@ impl Provider for WasmProvider {
             .as_ref()
             .is_some_and(|k| matches!(k, ErrorKind::TwoFactorRequired))
         {
-            Err(map_guest_2fa_error(resp.error, resp.two_factor_methods))
+            Err(map_guest_2fa_error(resp.two_factor_methods))
         } else {
             Err(map_guest_error(resp.error, resp.error_kind))
         }
@@ -1354,6 +1339,20 @@ pub(crate) fn query_readiness_probes(
 /// Check whether a probe target's hostname is in the allowed hosts list.
 ///
 /// Uses the same glob matching as Extism's built-in HTTP host function.
+/// Materialise a `HashMap<String, Zeroizing<String>>` (or anything that
+/// derefs to `String`) into the plain `HashMap<String, String>` shape the
+/// WASM guest expects in `UnlockRequest`. The caller is responsible for
+/// zeroizing the wrapping `UnlockRequest` after the guest call returns.
+fn fields_to_plain<V>(fields: &HashMap<String, V>) -> HashMap<String, String>
+where
+    V: std::ops::Deref<Target = String>,
+{
+    fields
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().to_owned()))
+        .collect()
+}
+
 fn is_host_allowed(hostname: &str, allowed_hosts: &[String]) -> bool {
     allowed_hosts
         .iter()
@@ -1657,10 +1656,10 @@ fn map_guest_error(message: Option<String>, kind: Option<ErrorKind>) -> Provider
 
 /// Map a guest `TwoFactorRequired` response to a `ProviderError`, converting
 /// the protocol `TwoFactorMethod` types to core types.
-fn map_guest_2fa_error(
-    message: Option<String>,
-    methods: Option<Vec<crate::protocol::TwoFactorMethod>>,
-) -> ProviderError {
+///
+/// `ProviderError::TwoFactorRequired` carries no human-readable message, so
+/// the guest's `message` field is intentionally not threaded through.
+fn map_guest_2fa_error(methods: Option<Vec<crate::protocol::TwoFactorMethod>>) -> ProviderError {
     let core_methods: Vec<rosec_core::TwoFactorMethod> = methods
         .unwrap_or_default()
         .into_iter()
@@ -1675,8 +1674,6 @@ fn map_guest_2fa_error(
     if core_methods.is_empty() {
         warn!("guest returned TwoFactorRequired but no methods");
     }
-
-    let _msg = message.unwrap_or_else(|| "two-factor authentication required".into());
     ProviderError::TwoFactorRequired {
         methods: core_methods,
     }
@@ -1788,7 +1785,7 @@ mod tests {
             prompt_kind: "text".into(),
             challenge: None,
         }];
-        let err = map_guest_2fa_error(Some("two-factor required".into()), Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1807,7 +1804,7 @@ mod tests {
             prompt_kind: "text".into(),
             challenge: None,
         }];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1823,7 +1820,7 @@ mod tests {
             prompt_kind: "text".into(),
             challenge: None,
         }];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1839,7 +1836,7 @@ mod tests {
             prompt_kind: "text".into(),
             challenge: None,
         }];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1855,7 +1852,7 @@ mod tests {
             prompt_kind: "fido2".into(),
             challenge: Some(r#"{"publicKey":{}}"#.into()),
         }];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1872,7 +1869,7 @@ mod tests {
             prompt_kind: "text".into(),
             challenge: None,
         }];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1902,7 +1899,7 @@ mod tests {
                 challenge: None,
             },
         ];
-        let err = map_guest_2fa_error(None, Some(methods));
+        let err = map_guest_2fa_error(Some(methods));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1914,7 +1911,7 @@ mod tests {
 
     #[test]
     fn map_2fa_empty_methods_list() {
-        let err = map_guest_2fa_error(Some("2fa required".into()), Some(vec![]));
+        let err = map_guest_2fa_error(Some(vec![]));
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1923,7 +1920,7 @@ mod tests {
 
     #[test]
     fn map_2fa_none_methods() {
-        let err = map_guest_2fa_error(Some("2fa required".into()), None);
+        let err = map_guest_2fa_error(None);
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
@@ -1932,7 +1929,7 @@ mod tests {
 
     #[test]
     fn map_2fa_none_message_and_methods() {
-        let err = map_guest_2fa_error(None, None);
+        let err = map_guest_2fa_error(None);
         let ProviderError::TwoFactorRequired { methods } = err else {
             panic!("expected TwoFactorRequired, got {err:?}");
         };
