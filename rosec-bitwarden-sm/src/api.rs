@@ -150,6 +150,7 @@ fn url_encode_form(params: &[(&str, String)]) -> Vec<u8> {
 pub struct LoginResponse {
     pub access_token: String,
     pub encrypted_payload: String,
+    pub expires_in: u64,
 }
 
 impl std::fmt::Debug for LoginResponse {
@@ -157,6 +158,7 @@ impl std::fmt::Debug for LoginResponse {
         f.debug_struct("LoginResponse")
             .field("access_token", &"[redacted]")
             .field("encrypted_payload", &"[redacted]")
+            .field("expires_in", &self.expires_in)
             .finish()
     }
 }
@@ -435,17 +437,20 @@ impl std::fmt::Debug for DecryptedSecret {
 
 /// Authenticate and fetch all secrets for the given organisation in one call.
 ///
-/// Returns `(bearer_token, secrets)`.  The bearer token is a short-lived JWT
-/// that callers may cache for subsequent lightweight API calls.
+/// Returns `(bearer_token, expires_in_secs, secrets)`.  The bearer token is a
+/// short-lived JWT that callers may cache for subsequent lightweight API
+/// calls; `expires_in_secs` is its lifetime as reported by the identity
+/// server.
 pub fn fetch_secrets(
     urls: &SmUrls,
     token: &AccessToken,
     org_id: &str,
-) -> Result<(Zeroizing<String>, Vec<DecryptedSecret>), SmError> {
+) -> Result<(Zeroizing<String>, u64, Vec<DecryptedSecret>), SmError> {
     // Step 3: authenticate
     let login_resp = login(urls, token)?;
     extism_pdk::debug!("SM access token authenticated");
     let bearer = Zeroizing::new(login_resp.access_token);
+    let expires_in = login_resp.expires_in;
     let encrypted_payload = login_resp.encrypted_payload;
 
     // Step 4: derive org encryption key
@@ -457,7 +462,7 @@ pub fn fetch_secrets(
     extism_pdk::debug!("SM secret identifiers fetched count={}", identifiers.len());
 
     if identifiers.is_empty() {
-        return Ok((bearer, Vec::new()));
+        return Ok((bearer, expires_in, Vec::new()));
     }
 
     // Step 6: fetch encrypted blobs
@@ -494,7 +499,7 @@ pub fn fetch_secrets(
     }
 
     extism_pdk::debug!("SM secrets loaded and decrypted count={}", secrets.len());
-    Ok((bearer, secrets))
+    Ok((bearer, expires_in, secrets))
 }
 
 #[cfg(test)]

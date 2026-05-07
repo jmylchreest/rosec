@@ -28,7 +28,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use extism_pdk::*;
 use zeroize::Zeroizing;
 
-use crate::api::{fetch_secrets, AccessToken, DecryptedSecret, SmUrls};
+use crate::api::{fetch_secrets, login, AccessToken, DecryptedSecret, SmUrls};
 use crate::error::SmError;
 use crate::protocol::*;
 
@@ -80,11 +80,18 @@ struct AuthState {
     secrets: Vec<DecryptedSecret>,
     /// Short-lived Bearer JWT cached for delta-sync checks.
     bearer: Zeroizing<String>,
+    /// Unix epoch seconds when `bearer` expires (per identity-server `expires_in`).
+    bearer_expires_at_epoch: u64,
     /// Unix epoch seconds of the last successful sync.
     last_sync_epoch_secs: u64,
     /// ISO-8601 UTC timestamp of the last successful sync (for delta-sync).
     last_synced_iso8601: String,
 }
+
+/// Refresh the bearer ahead of its expiry by this margin so a delta-sync probe
+/// in flight when the token is about to expire still completes against a fresh
+/// JWT instead of returning 401.
+const BEARER_REFRESH_MARGIN_SECS: u64 = 300;
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants
@@ -357,13 +364,14 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
     };
 
     match fetch_secrets(&state.config.urls, &token, &state.config.org_id) {
-        Ok((bearer, secrets)) => {
+        Ok((bearer, expires_in, secrets)) => {
             let count = secrets.len();
             let now = now_epoch_secs();
             state.auth = Some(AuthState {
                 access_token: Zeroizing::new(raw_token.to_string()),
                 secrets,
                 bearer,
+                bearer_expires_at_epoch: now.saturating_add(expires_in),
                 last_sync_epoch_secs: now,
                 last_synced_iso8601: epoch_to_iso8601(now),
             });
@@ -431,11 +439,12 @@ pub fn sync(_input: ()) -> FnResult<Json<SimpleResponse>> {
     };
 
     match fetch_secrets(&state.config.urls, &token, &state.config.org_id) {
-        Ok((bearer, secrets)) => {
+        Ok((bearer, expires_in, secrets)) => {
             let count = secrets.len();
             let now = now_epoch_secs();
             auth.secrets = secrets;
             auth.bearer = bearer;
+            auth.bearer_expires_at_epoch = now.saturating_add(expires_in);
             auth.last_sync_epoch_secs = now;
             auth.last_synced_iso8601 = epoch_to_iso8601(now);
             extism_pdk::info!("SM secrets synced: secrets={count}");
@@ -741,9 +750,9 @@ pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
 pub fn check_remote_changed(
     Json(req): Json<CheckRemoteChangedRequest>,
 ) -> FnResult<Json<CheckRemoteChangedResponse>> {
-    let guard = STATE.lock();
+    let mut guard = STATE.lock();
 
-    let Some(state) = guard.as_ref() else {
+    let Some(state) = guard.as_mut() else {
         // Not initialised — assume changed.
         return Ok(Json(CheckRemoteChangedResponse {
             ok: true,
@@ -753,7 +762,7 @@ pub fn check_remote_changed(
         }));
     };
 
-    let Some(auth) = &state.auth else {
+    let Some(auth) = state.auth.as_mut() else {
         // Locked — assume changed.
         return Ok(Json(CheckRemoteChangedResponse {
             ok: true,
@@ -762,6 +771,43 @@ pub fn check_remote_changed(
             has_changes: true,
         }));
     };
+
+    // Refresh the bearer proactively if it's near expiry. The bearer is a
+    // ~1h JWT; without this the delta probe would certainly return 401 once
+    // expired and force a full secrets re-fetch via the `assume changed`
+    // fallback below.
+    let now = now_epoch_secs();
+    if now.saturating_add(BEARER_REFRESH_MARGIN_SECS) >= auth.bearer_expires_at_epoch {
+        match AccessToken::parse(&auth.access_token) {
+            Ok(token) => match login(&state.config.urls, &token) {
+                Ok(resp) => {
+                    auth.bearer = Zeroizing::new(resp.access_token);
+                    auth.bearer_expires_at_epoch = now.saturating_add(resp.expires_in);
+                    extism_pdk::debug!("SM bearer refreshed for delta-sync probe");
+                }
+                Err(e) => {
+                    extism_pdk::warn!("SM bearer refresh failed, assuming changed: {e}");
+                    return Ok(Json(CheckRemoteChangedResponse {
+                        ok: true,
+                        error: None,
+                        error_kind: None,
+                        has_changes: true,
+                    }));
+                }
+            },
+            Err(e) => {
+                extism_pdk::warn!(
+                    "SM bearer refresh: access token parse failed, assuming changed: {e}"
+                );
+                return Ok(Json(CheckRemoteChangedResponse {
+                    ok: true,
+                    error: None,
+                    error_kind: None,
+                    has_changes: true,
+                }));
+            }
+        }
+    }
 
     match crate::api::check_secrets_changed(
         &state.config.urls,
