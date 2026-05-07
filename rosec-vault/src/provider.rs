@@ -604,19 +604,17 @@ impl Provider for LocalVault {
                 return Err(ProviderError::AlreadyExists);
             }
 
-            let now = chrono::Utc::now().timestamp();
-            let mut existing_item = state.data.items[idx].clone();
-            existing_item.label = item.label.clone();
-            existing_item.attributes = attributes;
-            existing_item.secrets = item
+            let existing = &mut state.data.items[idx];
+            existing.label = item.label.clone();
+            existing.attributes = attributes;
+            existing.secrets = item
                 .secrets
                 .iter()
                 .map(|(k, v)| (k.clone(), BASE64_STANDARD.encode(v.as_slice())))
                 .collect();
-            existing_item.modified = now;
+            existing.modified = chrono::Utc::now().timestamp();
 
-            let id = existing_item.id.clone();
-            state.data.items[idx] = existing_item;
+            let id = existing.id.clone();
             state.dirty = true;
 
             drop(guard);
@@ -765,24 +763,31 @@ impl Provider for LocalVault {
                     .cloned()
                     .filter(|v| !v.is_empty());
 
-                let ssh_hosts: Vec<String> = ["custom.ssh_host", "custom.ssh-host"]
-                    .iter()
-                    .filter_map(|key| item.attributes.get(*key))
-                    .flat_map(|v| v.lines())
+                // Attribute keys ship under both `_` and `-` spellings for
+                // historical reasons; collect values across both.
+                let ssh_attr = |aliases: &[&str]| -> Vec<&str> {
+                    aliases
+                        .iter()
+                        .filter_map(|k| item.attributes.get(*k))
+                        .map(String::as_str)
+                        .collect()
+                };
+
+                let ssh_hosts: Vec<String> = ssh_attr(&["custom.ssh_host", "custom.ssh-host"])
+                    .into_iter()
+                    .flat_map(str::lines)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .collect();
 
-                let ssh_user = ["custom.ssh_user", "custom.ssh-user"]
-                    .iter()
-                    .filter_map(|key| item.attributes.get(*key))
+                let ssh_user = ssh_attr(&["custom.ssh_user", "custom.ssh-user"])
+                    .into_iter()
                     .map(|v| v.trim().to_string())
                     .find(|s| !s.is_empty());
 
-                let require_confirm = ["custom.ssh_confirm", "custom.ssh-confirm"]
-                    .iter()
-                    .filter_map(|key| item.attributes.get(*key))
+                let require_confirm = ssh_attr(&["custom.ssh_confirm", "custom.ssh-confirm"])
+                    .into_iter()
                     .any(|v| v == "true");
 
                 let revision_date = SystemTime::UNIX_EPOCH
