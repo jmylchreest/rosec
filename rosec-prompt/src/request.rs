@@ -141,54 +141,60 @@ pub(crate) struct ThemeConfig {
 
 impl Default for ThemeConfig {
     fn default() -> Self {
+        let t = theme_defaults();
         Self {
-            background: default_background(),
-            foreground: default_foreground(),
-            border_color: default_border(),
-            border_width: default_border_width(),
-            font_family: default_font(),
-            label_color: default_label_color(),
-            accent_color: default_accent_color(),
+            background: t.background.clone(),
+            foreground: t.foreground.clone(),
+            border_color: t.border_color.clone(),
+            border_width: t.border_width as f32,
+            font_family: t.font_family.clone(),
+            label_color: t.label_color.clone(),
+            accent_color: t.accent_color.clone(),
             confirm_background: String::new(),
             confirm_text: String::new(),
             cancel_background: String::new(),
             cancel_text: String::new(),
-            input_background: default_input_bg(),
-            input_text: default_input_text(),
-            font_size: default_font_size(),
+            input_background: t.input_background.clone(),
+            input_text: t.input_text.clone(),
+            font_size: t.font_size as f32,
         }
     }
 }
 
-// Default helpers — delegate to rosec_core::config::PromptTheme so values
-// stay in sync with the daemon's config defaults automatically.
+// Default helpers — pluck values from a single cached `PromptTheme` so
+// the daemon's config defaults flow through and we don't reconstruct the
+// theme struct on every field deserialization.
+fn theme_defaults() -> &'static PromptTheme {
+    static T: std::sync::LazyLock<PromptTheme> = std::sync::LazyLock::new(PromptTheme::default);
+    &T
+}
 fn default_background() -> String {
-    PromptTheme::default().background
+    theme_defaults().background.clone()
 }
 fn default_foreground() -> String {
-    PromptTheme::default().foreground
+    theme_defaults().foreground.clone()
 }
 fn default_border() -> String {
-    PromptTheme::default().border_color
+    theme_defaults().border_color.clone()
 }
 fn default_border_width() -> f32 {
-    PromptTheme::default().border_width as f32
+    theme_defaults().border_width as f32
 }
 fn default_font() -> String {
-    PromptTheme::default().font_family
+    theme_defaults().font_family.clone()
 }
 fn default_label_color() -> String {
-    PromptTheme::default().label_color
+    theme_defaults().label_color.clone()
 }
 fn default_accent_color() -> String {
-    PromptTheme::default().accent_color
+    theme_defaults().accent_color.clone()
 }
 fn default_input_bg() -> String {
-    PromptTheme::default().input_background
+    theme_defaults().input_background.clone()
 }
 fn default_input_text() -> String {
-    PromptTheme::default().input_text
+    theme_defaults().input_text.clone()
 }
 fn default_font_size() -> f32 {
-    PromptTheme::default().font_size as f32
+    theme_defaults().font_size as f32
 }
