@@ -1383,6 +1383,15 @@ fn provider_fingerprint(entry: &rosec_core::config::ProviderEntry) -> String {
         .unwrap_or_else(|_| format!("{entry:?}"))
 }
 
+/// `(provider_id, fingerprint)` pairs for every provider in `cfg`, in
+/// config order. Used by the hot-reload watcher to diff old vs new state.
+fn fingerprint_providers(cfg: &rosec_core::config::Config) -> Vec<(String, String)> {
+    cfg.provider
+        .iter()
+        .map(|entry| (entry.id.clone(), provider_fingerprint(entry)))
+        .collect()
+}
+
 /// Watch the config file and hot-reload providers when it changes.
 ///
 /// Uses `notify` (inotify on Linux) to detect writes/renames, debounces
@@ -1447,11 +1456,7 @@ async fn config_watcher(
 
     // Seed `known` from the initial config fingerprints so the first diff
     // compares actual config values — not bare provider IDs.
-    let mut known: Vec<(String, String)> = initial_config
-        .provider
-        .iter()
-        .map(|entry| (entry.id.clone(), provider_fingerprint(entry)))
-        .collect();
+    let mut known: Vec<(String, String)> = fingerprint_providers(&initial_config);
 
     loop {
         if rx.recv().await.is_none() {
@@ -1482,11 +1487,7 @@ async fn config_watcher(
         };
 
         // Build fingerprints for the new config.
-        let new_fingerprints: Vec<(String, String)> = new_config
-            .provider
-            .iter()
-            .map(|entry| (entry.id.clone(), provider_fingerprint(entry)))
-            .collect();
+        let new_fingerprints = fingerprint_providers(&new_config);
 
         if new_fingerprints == known {
             tracing::debug!("config unchanged, no reload needed");

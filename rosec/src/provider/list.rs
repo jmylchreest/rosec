@@ -3,8 +3,8 @@
 use anyhow::Result;
 
 use crate::{
-    ColSpec, ProviderEntry, capability_codes, conn, fit_columns, format_relative_time, load_config,
-    terminal_width, trunc,
+    ColSpec, ProviderEntry, capability_codes, conn, epoch_now, fit_columns, format_relative_time,
+    load_config, terminal_width, trunc,
 };
 
 pub async fn run() -> Result<()> {
@@ -47,10 +47,7 @@ pub async fn run() -> Result<()> {
                 .unwrap_or(false)
         };
 
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_epoch = epoch_now();
 
         struct RowData {
             id: String,

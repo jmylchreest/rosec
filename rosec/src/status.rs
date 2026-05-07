@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::{
-    ColSpec, ProviderEntry, capability_codes, config_path, conn, fit_columns, format_relative_time,
-    load_config, terminal_width, trunc,
+    ColSpec, ProviderEntry, capability_codes, config_path, conn, epoch_now, fit_columns,
+    format_relative_time, load_config, terminal_width, trunc,
 };
 
 pub async fn run() -> Result<()> {
@@ -62,10 +62,7 @@ pub async fn run() -> Result<()> {
             sync: String,
         }
 
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_epoch = epoch_now();
 
         let registry = rosec_wasm::discovery::scan_plugins(
             rosec_core::WasmPreference::default(),

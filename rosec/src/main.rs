@@ -586,10 +586,7 @@ pub(crate) async fn preemptive_sync(conn: &Connection) -> Result<()> {
 
     let providers: Vec<ProviderEntry> = proxy.call("ProviderList", &()).await?;
 
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now_epoch = epoch_now();
 
     let futures: Vec<_> = providers
         .into_iter()
@@ -892,6 +889,15 @@ pub(crate) async fn fetch_item_data(
 }
 
 /// Truncate a string to `max` display chars, appending `…` if cut.
+/// Seconds since the Unix epoch. Returns 0 if the system clock is set to
+/// a time before 1970, which only happens on misconfigured boxes.
+pub(crate) fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Format an epoch timestamp as a human-readable relative time string.
 ///
 /// Returns "never" for 0, otherwise "Xs ago", "Xm ago", "Xh ago", or "Xd ago".
