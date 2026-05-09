@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes};
+use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes, attributes_match};
 use tracing::{debug, info};
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -75,11 +75,7 @@ impl SecretCollection {
 
         let matched: Vec<OwnedObjectPath> = items
             .iter()
-            .filter(|(_, item)| {
-                attributes
-                    .iter()
-                    .all(|(k, v)| item.attributes.get(k) == Some(v))
-            })
+            .filter(|(_, item)| attributes_match(&item.attributes, &attributes))
             .map(|(path, _)| to_object_path(path))
             .collect();
 

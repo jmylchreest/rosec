@@ -27,6 +27,22 @@ pub(crate) static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new((
 
 pub type Attributes = HashMap<String, String>;
 
+/// Subset-match a query against an item's attributes.
+///
+/// Returns `true` when every `(key, value)` pair in `query` is present in
+/// `item` with the same string value (case-sensitive equality).  Keys in
+/// `item` that are absent from `query` do **not** affect the result — this is
+/// the canonical Secret Service `SearchItems` semantics.
+///
+/// This single predicate must back both `SearchItems` and the duplicate-check
+/// inside `CreateItem(replace=…)` so that the two operations agree on which
+/// items they identify.  Reserved internal attributes (`rosec:*`, `xdg:*`)
+/// are not filtered: callers that want client-attribute-only matching are
+/// responsible for stripping them from the query before calling.
+pub fn attributes_match(item: &Attributes, query: &Attributes) -> bool {
+    query.iter().all(|(k, v)| item.get(k) == Some(v))
+}
+
 // `id`, `label`, `created`, `modified` are first-class fields on ItemMeta /
 // VaultItemData and must not appear as user-supplied attribute keys.
 // The `rosec:` namespace mirrors the Secret Service spec's `xdg:schema`

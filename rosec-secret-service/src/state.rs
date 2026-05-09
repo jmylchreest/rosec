@@ -37,7 +37,7 @@ use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
     ATTR_PROVIDER, ATTR_TYPE, Attributes, AutoLockPolicy, Capability, ItemMeta, ItemType, Provider,
-    ProviderError, SecretBytes, UnlockInput,
+    ProviderError, SecretBytes, UnlockInput, attributes_match,
 };
 use tracing::{debug, info, warn};
 use zbus::Connection;
@@ -2104,12 +2104,6 @@ pub(crate) fn map_provider_error_ss(err: ProviderError) -> crate::error::SecretS
 
 pub(crate) fn map_zbus_error(err: zbus::Error) -> FdoError {
     FdoError::Failed(format!("dbus error: {err}"))
-}
-
-fn attributes_match(item: &Attributes, query: &Attributes) -> bool {
-    query
-        .iter()
-        .all(|(key, value)| item.get(key) == Some(value))
 }
 
 /// Partition `(path, meta)` entries into `(unlocked, locked)` by glob matching.

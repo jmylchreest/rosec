@@ -7,7 +7,7 @@ use base64::prelude::{BASE64_STANDARD, Engine};
 use rosec_core::{
     AttributeDescriptor, Attributes, Capability, ItemAttributes, ItemMeta, ItemType, ItemUpdate,
     NewItem, Provider, ProviderCallbacks, ProviderError, ProviderStatus, SecretBytes, SshKeyMeta,
-    SshPrivateKeyMaterial, UnlockInput,
+    SshPrivateKeyMaterial, UnlockInput, attributes_match,
 };
 use tokio::fs;
 use tokio::sync::RwLock;
@@ -233,12 +233,6 @@ impl LocalVault {
             ),
             locked: false,
         }
-    }
-
-    fn matches_attributes(&self, item: &VaultItemData, attrs: &Attributes) -> bool {
-        attrs
-            .iter()
-            .all(|(k, v)| item.attributes.get(k).map(|s| s.as_str()) == Some(v.as_str()))
     }
 }
 
@@ -542,7 +536,7 @@ impl Provider for LocalVault {
             .data
             .items
             .iter()
-            .filter(|item| self.matches_attributes(item, attrs))
+            .filter(|item| attributes_match(&item.attributes, attrs))
             .map(|item| self.item_to_meta(item, &self.id))
             .collect();
 
@@ -587,26 +581,44 @@ impl Provider for LocalVault {
         let mut guard = self.state.write().await;
         let state = guard.as_mut().ok_or(ProviderError::Locked)?;
 
-        // Stamp rosec:type from the typed item_type field.
-        let mut attributes = item.attributes.clone();
+        // Storage-time attributes carry the `rosec:type` stamp derived from the
+        // typed `item_type` field.  This stamp is *never* used to identify
+        // matching items — it would diverge from `SearchItems`, which never
+        // sees the stamp on the query side.  Matching uses the raw client
+        // attributes; the stamp is applied only on insert/update.
+        let mut stored_attributes = item.attributes.clone();
         if let Some(ref item_type) = item.item_type {
-            attributes.insert(rosec_core::ATTR_TYPE.to_string(), item_type.to_string());
+            stored_attributes.insert(rosec_core::ATTR_TYPE.to_string(), item_type.to_string());
         }
 
-        if let Some((idx, _)) = state
+        // Find existing items matching the *client* attributes.  Order
+        // deterministically: most recently modified first, then by id ASC for
+        // a stable tiebreak across runs (HashMap iteration order is not
+        // reproducible).
+        let mut matches: Vec<usize> = state
             .data
             .items
             .iter()
             .enumerate()
-            .find(|(_, i)| self.matches_attributes(i, &attributes))
-        {
+            .filter(|(_, i)| attributes_match(&i.attributes, &item.attributes))
+            .map(|(idx, _)| idx)
+            .collect();
+        matches.sort_by(|&a, &b| {
+            let ia = &state.data.items[a];
+            let ib = &state.data.items[b];
+            ib.modified
+                .cmp(&ia.modified)
+                .then_with(|| ia.id.cmp(&ib.id))
+        });
+
+        if let Some(&idx) = matches.first() {
             if !replace {
                 return Err(ProviderError::AlreadyExists);
             }
 
             let existing = &mut state.data.items[idx];
             existing.label = item.label.clone();
-            existing.attributes = attributes;
+            existing.attributes = stored_attributes;
             existing.secrets = item
                 .secrets
                 .iter()
@@ -635,7 +647,7 @@ impl Provider for LocalVault {
         let new_item = VaultItemData {
             id: id.clone(),
             label: item.label,
-            attributes,
+            attributes: stored_attributes,
             secrets,
             created: now,
             modified: now,
