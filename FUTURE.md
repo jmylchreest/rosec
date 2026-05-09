@@ -1443,3 +1443,88 @@ password, same as re-entering the vault password today.
 ### Status
 
 - **Not started** — design only.  Tracked in [#8](https://github.com/jmylchreest/rosec/issues/8).
+
+---
+
+## Provider trait: split `create_item(replace)` into `insert_item` / `replace_item`
+
+### Background
+
+`Provider::create_item(item: NewItem, replace: bool) -> Result<String>` does
+two distinct jobs: when `replace=false` it inserts and reports `AlreadyExists`
+on attribute collision; when `replace=true` it scans the provider's storage
+for a matching item and either updates that item or inserts a new one.
+
+The find-by-attributes step inside the provider was the right design when the
+provider was the only thing that knew its own storage.  After the
+service-layer routing change (`ServiceState::find_writable_match`), the
+service already picks the writable provider that owns the matching item using
+the metadata cache — i.e. the same view `SearchItems` exposes.  The provider's
+internal scan now duplicates that work and can disagree on edge cases (cache
+drift, provider-internal-only attributes, type-stamp differences).
+
+### Proposed shape
+
+```rust
+async fn insert_item(&self, item: NewItem) -> Result<String, ProviderError>;
+// Always inserts. AlreadyExists is no longer the provider's responsibility —
+// it's enforced at the service layer based on `find_writable_match`.
+
+async fn replace_item(&self, id: &str, item: NewItem) -> Result<(), ProviderError>;
+// Updates the item with the given id, replacing label/attributes/secrets.
+// NotFound → caller falls back to insert.
+```
+
+Service-layer flow becomes:
+
+1. `find_writable_match(&attrs)` → `Option<(provider, existing_id)>`
+   (today returns just `provider`; would re-add the id).
+2. `Some((p, id))`: if the caller passed `replace`, `p.replace_item(&id, item)`;
+   else return `AlreadyExists`.
+3. `None`: `write_provider().insert_item(item)`.
+
+### Why this is worth doing
+
+- **Single source of truth for matching.**  Today the predicate runs in two
+  places; after the patch they agree, but agreement is enforced by convention
+  rather than by the type system.  Splitting the trait makes "discovery" the
+  service's job and "atomic write" the provider's job — no overlap.
+- **Provider impls shrink.**  Each provider drops its find-by-attrs branch.
+  For the WASM providers this is a non-trivial simplification.
+- **Concurrency story improves.**  When the service routes by id, races
+  between concurrent CreateItems become "two inserts at different ids" rather
+  than "two inserts that race on attribute matching", which is easier to
+  reason about and easier to deduplicate at the next cache rebuild.
+
+### Cost
+
+- **Provider trait change**: every impl must be updated.  Affected:
+  - `rosec-vault/src/provider.rs`
+  - The default impl in `rosec-core/src/lib.rs`
+  - Test mocks in `rosec-secret-service/src/portal.rs` and
+    `rosec-core/src/lib.rs`
+- **WASM ABI break**: `rosec-bitwarden-pm`, `rosec-bitwarden-sm`,
+  `rosec-gnome-keyring`, `rosec-keepassxc-file` all expose `create_item` as a
+  guest export.  Splitting on the host means changing the guest contract too.
+  The host needs version detection so older `.wasm` plugins keep working until
+  rebuilt.
+- **Deferred CreateItem**: `rosec-secret-service/src/prompt.rs` carries
+  `PendingOperation::CreateItem { provider_id, item, replace }`.  The deferred
+  variant needs to switch to `insert_item` / `replace_item` plumbing too.
+- **Daemon extension surface**: `org.rosec.Items.CreateItemExtended`
+  (`rosec-secret-service/src/daemon/items.rs`) takes `replace: bool` on the
+  wire — the wire shape can stay the same; the implementation just routes
+  differently internally.
+
+### When to do it
+
+After the WASM plugin distribution allows a coordinated rebuild — i.e. when
+there is a release that bumps all of: `rosec_bitwarden_pm.wasm`,
+`rosec_bitwarden_sm.wasm`, `rosec_gnome_keyring.wasm`,
+`rosec_keepassxc_file.wasm`, plus the host.  Until then the current
+single-method trait keeps backward compatibility with shipped plugins.
+
+### Status
+
+- **Not started** — design only.  Captured here so the routing fix's
+  layering implications don't get forgotten.
