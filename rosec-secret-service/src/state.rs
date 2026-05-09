@@ -347,6 +347,54 @@ impl ServiceState {
             .find(|b| b.capabilities().contains(&Capability::Write))
     }
 
+    /// Resolve which writable provider should receive a `CreateItem` whose
+    /// client attributes match `attrs`.
+    ///
+    /// Walks `metadata_cache` (the same source `SearchItems` reads from) and
+    /// applies the canonical [`attributes_match`] predicate so the two
+    /// operations agree on what "matching" means.  Returns the writable
+    /// provider that owns the best matching item, so the caller can route the
+    /// write there and update the item in place instead of creating a
+    /// duplicate.  A match owned by a read-only provider does not block the
+    /// operation — the caller is expected to fall back to the configured
+    /// write provider and shadow the read-only copy; the dedup layer surfaces
+    /// the priority winner to clients.
+    ///
+    /// When several writable providers own a match, prefer higher-priority
+    /// providers (lower [`providers_ordered`] index); within a provider,
+    /// prefer the most recently modified item, then `id` ASC for a stable
+    /// tiebreak across runs.  Returns `Ok(None)` when no writable match
+    /// exists.
+    pub fn find_writable_match(
+        &self,
+        attrs: &Attributes,
+    ) -> Result<Option<Arc<dyn Provider>>, FdoError> {
+        let mut order: HashMap<String, usize> = HashMap::new();
+        let mut writable: HashSet<String> = HashSet::new();
+        for (idx, p) in self.providers_ordered().iter().enumerate() {
+            let pid = p.id().to_string();
+            if p.capabilities().contains(&Capability::Write) {
+                writable.insert(pid.clone());
+            }
+            order.insert(pid, idx);
+        }
+
+        let mut candidates = self.search_items_entries(attrs)?;
+        candidates.retain(|(_, m)| writable.contains(&m.provider_id));
+        candidates.sort_by(|(_, a), (_, b)| {
+            let ai = order.get(&a.provider_id).copied().unwrap_or(usize::MAX);
+            let bi = order.get(&b.provider_id).copied().unwrap_or(usize::MAX);
+            ai.cmp(&bi)
+                .then_with(|| b.modified.cmp(&a.modified))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        Ok(candidates
+            .into_iter()
+            .next()
+            .and_then(|(_, m)| self.provider_by_id(&m.provider_id)))
+    }
+
     /// Spawn `fut` on the Tokio runtime and await the result.
     ///
     /// zbus dispatches D-Bus handlers on an `async-io` executor that has no

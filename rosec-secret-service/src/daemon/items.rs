@@ -62,21 +62,9 @@ impl RosecItems {
         log_dbus_caller("items-extension", "CreateItemExtended", &header);
         self.state.touch_activity();
 
-        let write_provider = self
-            .state
-            .write_provider()
-            .ok_or_else(|| FdoError::NotSupported("no write-capable provider available".into()))?;
-
         let parsed_type: ItemType = item_type
             .parse()
             .map_err(|e: String| FdoError::InvalidArgs(e))?;
-
-        let supported = write_provider.supported_item_types();
-        if !supported.is_empty() && !supported.contains(&parsed_type) {
-            return Err(FdoError::NotSupported(format!(
-                "provider does not support item type '{item_type}'"
-            )));
-        }
 
         let secret_map: HashMap<String, SecretBytes> = secrets
             .into_iter()
@@ -89,6 +77,29 @@ impl RosecItems {
             attributes,
             secrets: secret_map,
         };
+
+        // Route to the writable provider that already owns a matching item if
+        // one exists; otherwise fall back to the configured / highest-priority
+        // writable provider.  Read-only matches do not block the write — they
+        // are shadowed by the new item, and the dedup layer presents the
+        // priority winner to clients.
+        let write_provider = match self
+            .state
+            .find_writable_match(&item.attributes)
+            .map_err(|e| FdoError::Failed(format!("match lookup failed: {e}")))?
+        {
+            Some(provider) => provider,
+            None => self.state.write_provider().ok_or_else(|| {
+                FdoError::NotSupported("no write-capable provider available".into())
+            })?,
+        };
+
+        let supported = write_provider.supported_item_types();
+        if !supported.is_empty() && !supported.contains(&parsed_type) {
+            return Err(FdoError::NotSupported(format!(
+                "provider does not support item type '{item_type}'"
+            )));
+        }
 
         let provider_id = write_provider.id().to_string();
         let provider = Arc::clone(&write_provider);

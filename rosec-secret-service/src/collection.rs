@@ -89,9 +89,6 @@ impl SecretCollection {
         replace: bool,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretServiceError> {
         debug!("CreateItem called (replace={replace})");
-        let write_provider = self.state.service_state.write_provider().ok_or_else(|| {
-            SecretServiceError::NotSupported("no write-capable provider available".to_string())
-        })?;
 
         let label = properties
             .get("org.freedesktop.Secret.Item.Label")
@@ -131,7 +128,27 @@ impl SecretCollection {
             secrets,
         };
 
-        // Check if the write provider is locked — if so, defer the operation
+        // Pick the provider that should own this item:
+        //   1. If a writable provider already holds a matching item, route the
+        //      write there so we update in place rather than shadowing.
+        //   2. Otherwise, fall back to the configured / highest-priority
+        //      writable provider.
+        // A read-only provider that owns a matching item does not block the
+        // write — we shadow it with a new item in a writable provider.  The
+        // dedup layer surfaces the priority winner to clients.
+        let write_provider = match self
+            .state
+            .service_state
+            .find_writable_match(&item.attributes)
+            .map_err(|e| SecretServiceError::Failed(format!("match lookup failed: {e}")))?
+        {
+            Some(provider) => provider,
+            None => self.state.service_state.write_provider().ok_or_else(|| {
+                SecretServiceError::NotSupported("no write-capable provider available".to_string())
+            })?,
+        };
+
+        // Check if the chosen provider is locked — if so, defer the operation
         // behind a prompt so the client can unlock first.
         let provider_id = write_provider.id().to_string();
         let is_locked = {
