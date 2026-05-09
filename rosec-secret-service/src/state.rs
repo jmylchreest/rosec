@@ -409,13 +409,10 @@ impl ServiceState {
         // provider is dropped here — Zeroizing<> fields zeroize on drop
         drop(provider);
 
-        // Purge all items belonging to the removed provider from both caches
-        // so they don't appear as ghost entries in SearchItems results.
+        // Purge all items belonging to the removed provider so they don't
+        // appear as ghost entries in SearchItems results.
         if let Ok(mut items) = self.cache.items.lock() {
             items.retain(|_, meta| meta.provider_id != id);
-        }
-        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
-            cache.retain(|_, meta| meta.provider_id != id);
         }
         true
     }
@@ -1289,20 +1286,24 @@ impl ServiceState {
         Ok(partition_by_glob(items.iter(), attrs))
     }
 
-    /// Search the persistent metadata cache using exact attribute matching.
+    /// Partition cached items by whether their owning provider is currently
+    /// unlocked, filtering by exact attribute match.
     ///
-    /// This is the method `SearchItems` should use: it reads from `metadata_cache`
-    /// which survives lock/unlock cycles, and partitions results into
-    /// `(unlocked_paths, locked_paths)`.  Never errors due to locked providers.
+    /// This is what spec-level `Service::SearchItems` consumes: each cached
+    /// `ItemMeta` carries a live `locked` flag (kept current by
+    /// [`mark_provider_locked_in_cache`] / cache rebuild), so the partition
+    /// is correct even when the owning provider is locked — the entry stays
+    /// in the cache so its path can be returned in the `locked` list rather
+    /// than erroring.
     ///
-    /// Empty `attrs` returns all cached items.
-    pub fn search_metadata_cache(
+    /// Empty `attrs` returns every cached item.
+    pub fn search_items_partition(
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        let cache = self.cache.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
-                "metadata_cache lock poisoned".to_string(),
+                "items lock poisoned".to_string(),
             ))
         })?;
 
@@ -1323,17 +1324,16 @@ impl ServiceState {
         Ok((unlocked, locked))
     }
 
-    /// Search the persistent metadata cache, returning full `ItemMeta` entries.
-    ///
-    /// Like [`search_metadata_cache`] but returns `(path, ItemMeta)` pairs so
-    /// callers can inspect `provider_id`, `attributes`, etc. for ranking.
-    pub fn search_metadata_cache_entries(
+    /// Like [`search_items_partition`] but returns `(path, ItemMeta)` pairs
+    /// so callers can inspect `provider_id`, `attributes`, `locked`, etc. for
+    /// routing or ranking.
+    pub fn search_items_entries(
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
-        let cache = self.cache.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
-                "metadata_cache lock poisoned".to_string(),
+                "items lock poisoned".to_string(),
             ))
         })?;
 
@@ -1346,44 +1346,38 @@ impl ServiceState {
         Ok(results)
     }
 
-    /// Search the persistent metadata cache using glob patterns.
+    /// Glob-pattern variant of [`search_items_partition`].
     ///
-    /// Like `search_items_glob` but reads from `metadata_cache` (which survives
-    /// lock/unlock cycles) instead of `items`.  Never errors due to locked
-    /// providers.
-    ///
-    /// The special key `"name"` matches against the item label.
-    pub fn search_metadata_cache_glob(
+    /// The special key `"name"` matches against the item label; every other
+    /// key is matched against the corresponding attribute value using
+    /// [`wildmatch`] semantics.  All patterns must match (AND).
+    pub fn search_items_glob_partition(
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        let cache = self.cache.metadata_cache.lock().map_err(|_| {
+        let cache = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
-                "metadata_cache lock poisoned".to_string(),
+                "items lock poisoned".to_string(),
             ))
         })?;
 
         Ok(partition_by_glob(cache.iter(), attrs))
     }
 
-    /// Insert a newly created item into both the `items` and `metadata_cache`
-    /// caches, and register the corresponding D-Bus object so that the item
-    /// is immediately visible to `SearchItems` / `GetSecret` without waiting
-    /// for the next background cache rebuild.
+    /// Insert a newly created item into the cache and register the
+    /// corresponding D-Bus object so the item is immediately visible to
+    /// `SearchItems` / `GetSecret` without waiting for the next background
+    /// rebuild.
     pub(crate) async fn insert_created_item(
         self: &Arc<Self>,
         path: &str,
         meta: ItemMeta,
     ) -> Result<(), FdoError> {
-        // 1. Insert into the items cache (Collection.Items, Collection.SearchItems).
+        // 1. Insert into the items cache.
         if let Ok(mut items) = self.cache.items.lock() {
             items.insert(path.to_string(), meta.clone());
         }
-        // 2. Insert into the persistent metadata cache (Service.SearchItems).
-        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
-            cache.insert(path.to_string(), meta.clone());
-        }
-        // 3. If a D-Bus object already exists at this path (replace/update
+        // 2. If a D-Bus object already exists at this path (replace/update
         //    path), remove it so register_items will create a fresh one with
         //    updated metadata (label, attributes, etc.).
         let already_registered = self
@@ -1401,7 +1395,7 @@ impl ServiceState {
                 registered.remove(path);
             }
         }
-        // 4. Register the D-Bus object so GetSecret works on the new path.
+        // 3. Register the D-Bus object so GetSecret works on the new path.
         self.register_items(&[(path.to_string(), meta)]).await?;
         Ok(())
     }
@@ -1443,21 +1437,13 @@ impl ServiceState {
         {
             patch(meta);
         }
-        if let Ok(mut cache) = self.cache.metadata_cache.lock()
-            && let Some(meta) = cache.get_mut(path)
-        {
-            patch(meta);
-        }
     }
 
-    /// Remove a deleted item from both the `items` and `metadata_cache`
-    /// caches so it disappears from `SearchItems` immediately.
+    /// Remove a deleted item from the cache so it disappears from
+    /// `SearchItems` immediately.
     pub(crate) fn remove_deleted_item(&self, path: &str) {
         if let Ok(mut items) = self.cache.items.lock() {
             items.remove(path);
-        }
-        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
-            cache.remove(path);
         }
         // Note: we do NOT deregister the D-Bus object here. zbus keeps
         // it registered but it will fail with NotFound on GetSecret
@@ -1465,14 +1451,13 @@ impl ServiceState {
         // rebuild will skip registering it again (already registered).
     }
 
-    /// Mark all items belonging to a specific provider as locked in the
-    /// persistent metadata cache.
+    /// Mark all items belonging to a specific provider as locked.
     ///
     /// Called when a provider transitions to the locked state (auto-lock,
     /// manual lock, etc.).  Does NOT remove items — they remain queryable
     /// via `SearchItems` and friends, just in the `locked` partition.
     pub fn mark_provider_locked_in_cache(&self, provider_id: &str) {
-        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.items.lock() {
             for meta in cache.values_mut() {
                 if meta.provider_id == provider_id {
                     meta.locked = true;
@@ -1481,11 +1466,11 @@ impl ServiceState {
         }
     }
 
-    /// Mark all items in the persistent metadata cache as locked.
+    /// Mark every cached item as locked.
     ///
     /// Called during `auto_lock` / `Lock` when all providers are locked at once.
     fn mark_all_locked_in_cache(&self) {
-        if let Ok(mut cache) = self.cache.metadata_cache.lock() {
+        if let Ok(mut cache) = self.cache.items.lock() {
             for meta in cache.values_mut() {
                 meta.locked = true;
             }
@@ -1731,24 +1716,6 @@ impl ServiceState {
             // Insert fresh entries.
             for (path, item) in entries.iter() {
                 state_items.insert(path.clone(), item.clone());
-            }
-        }
-
-        // Also populate the persistent metadata cache with the same
-        // selective-replace strategy.  Items from providers that were
-        // skipped during fetch_entries (still locked) retain their
-        // previous metadata_cache entries with `locked: true`.
-        {
-            let mut cache = self.cache.metadata_cache.lock().map_err(|_| {
-                map_provider_error(ProviderError::Unavailable(
-                    "metadata_cache lock poisoned".to_string(),
-                ))
-            })?;
-            // Remove old entries for providers that were refreshed.
-            cache.retain(|_, meta| !fresh_providers.contains(&meta.provider_id));
-            // Insert fresh entries.
-            for (path, meta) in entries.iter() {
-                cache.insert(path.clone(), meta.clone());
             }
         }
 
@@ -2183,13 +2150,13 @@ fn hash_id(input: &str) -> u64 {
 }
 #[cfg(test)]
 impl ServiceState {
-    /// Insert an entry directly into the metadata cache (test helper).
+    /// Insert an entry directly into the item cache (test helper).
     ///
     /// Used to simulate items from providers that are currently locked
     /// (whose cache entries persisted from a prior unlock cycle).
-    pub fn seed_metadata_cache(&self, path: &str, meta: ItemMeta) {
+    pub fn seed_item_cache(&self, path: &str, meta: ItemMeta) {
         self.cache
-            .metadata_cache
+            .items
             .lock()
             .unwrap()
             .insert(path.to_string(), meta);

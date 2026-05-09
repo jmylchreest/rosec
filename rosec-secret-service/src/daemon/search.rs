@@ -41,7 +41,7 @@ impl RosecSearch {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), FdoError> {
         log_dbus_caller("search", "SearchItemsGlob", &header);
-        let (unlocked, locked) = self.state.search_metadata_cache_glob(&attrs)?;
+        let (unlocked, locked) = self.state.search_items_glob_partition(&attrs)?;
         Ok((
             unlocked.into_iter().map(|s| to_object_path(&s)).collect(),
             locked.into_iter().map(|s| to_object_path(&s)).collect(),

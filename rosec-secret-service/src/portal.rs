@@ -146,7 +146,7 @@ impl PortalSecret {
         let mut search_attrs = HashMap::new();
         search_attrs.insert(PORTAL_ATTR_APP_ID.to_string(), app_id.to_string());
 
-        let mut entries = self.state.search_metadata_cache_entries(&search_attrs)?;
+        let mut entries = self.state.search_items_entries(&search_attrs)?;
 
         if entries.is_empty() {
             return Ok(None);
@@ -935,7 +935,7 @@ mod tests {
                 modified: None,
                 locked: true,
             };
-            state.seed_metadata_cache(
+            state.seed_item_cache(
                 "/org/freedesktop/secrets/collection/default/locked_mock_locked_item",
                 meta,
             );
