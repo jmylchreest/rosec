@@ -30,6 +30,8 @@ sha256sums=('@WASM_SHA256@')
 package() {
     install -Dm644 "${srcdir}/rosec_gnome_keyring.wasm" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_gnome_keyring.wasm"
+    install -Dm644 "${srcdir}/rosec_gnome_keyring.wasm.policy.toml" \
+        "${pkgdir}/usr/lib/rosec/providers/rosec_gnome_keyring.wasm.policy.toml"
     install -Dm644 "${srcdir}/rosec_gnome_keyring.wasm.minisig" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_gnome_keyring.wasm.minisig"
 }

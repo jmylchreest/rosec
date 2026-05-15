@@ -35,6 +35,8 @@ sha256sums=('@WASM_SHA256@')
 package() {
     install -Dm644 "${srcdir}/rosec_keepassxc_file.wasm" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_keepassxc_file.wasm"
+    install -Dm644 "${srcdir}/rosec_keepassxc_file.wasm.policy.toml" \
+        "${pkgdir}/usr/lib/rosec/providers/rosec_keepassxc_file.wasm.policy.toml"
     install -Dm644 "${srcdir}/rosec_keepassxc_file.wasm.minisig" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_keepassxc_file.wasm.minisig"
 }

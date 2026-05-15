@@ -30,6 +30,8 @@ sha256sums=('@WASM_SHA256@')
 package() {
     install -Dm644 "${srcdir}/rosec_bitwarden_pm.wasm" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_bitwarden_pm.wasm"
+    install -Dm644 "${srcdir}/rosec_bitwarden_pm.wasm.policy.toml" \
+        "${pkgdir}/usr/lib/rosec/providers/rosec_bitwarden_pm.wasm.policy.toml"
     install -Dm644 "${srcdir}/rosec_bitwarden_pm.wasm.minisig" \
         "${pkgdir}/usr/lib/rosec/providers/rosec_bitwarden_pm.wasm.minisig"
 }
