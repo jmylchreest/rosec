@@ -1773,6 +1773,22 @@ async fn build_single_provider(
                 .resolve(&guest_options)
                 .map_err(|e| anyhow::anyhow!("policy resolve for provider '{}': {e}", entry.id))?;
 
+            // For preopens of the exact form `host_template = "$option:KEY"`,
+            // the resolved value is a host-side path used to set up the WASI
+            // preopen and the landlock rule. Inside the WASI sandbox the
+            // plugin can only reach that directory via its `guest_path`, so
+            // rewrite the option in the map forwarded to the guest. The host
+            // keeps the host path for the preopen/landlock; the guest sees
+            // only the path it can actually open.
+            for preopen in &policy.filesystem.preopens {
+                if let Some(key) = rosec_wasm::policy::single_option_ref(&preopen.host_template) {
+                    guest_options.insert(
+                        key.to_string(),
+                        serde_json::Value::String(preopen.guest_path.clone()),
+                    );
+                }
+            }
+
             // Effective allowed_hosts:
             //   policy baseline             ↦  user.allowed_hosts replaces it (loud warn)
             //                               ↦  user.additional_hosts always extends (info)
@@ -1850,18 +1866,15 @@ fn extract_host_from_url(url_str: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(str::to_string))
 }
 
-/// Expand `~/` for any string-valued option.  Non-string values pass through
-/// unchanged (numbers, bools, nested objects).  Strings without a `~/` prefix
-/// pass through unchanged.
+/// Expand path-like variables in any string-valued option: a leading `~/`,
+/// `$home`, `$xdg_data_home`, `$xdg_config_home`. Unknown variables and
+/// `$option:KEY` refs are left literally — policy resolution handles those,
+/// and we don't want to mangle unrelated `$` occurrences (e.g. inside a
+/// passphrase or URL fragment).  Non-string values pass through unchanged.
 fn expand_tilde_in_value(v: &serde_json::Value) -> serde_json::Value {
     match v {
-        serde_json::Value::String(s) if s.starts_with("~/") => {
-            if let Some(home) = std::env::var_os("HOME") {
-                let mut p = PathBuf::from(home);
-                p.push(&s[2..]);
-                return serde_json::Value::String(p.to_string_lossy().into_owned());
-            }
-            v.clone()
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(rosec_wasm::policy::expand_env_vars(s))
         }
         other => other.clone(),
     }

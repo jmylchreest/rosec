@@ -371,6 +371,79 @@ fn is_template_var_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == ':'
 }
 
+/// If `host_template` is exactly `$option:KEY` (a single option ref with no
+/// other characters), return `Some(KEY)`. Used by the daemon to identify
+/// preopen templates whose source value comes verbatim from a user option,
+/// so it can substitute the corresponding `guest_path` into the option map
+/// forwarded to the WASI guest. The host keeps the resolved host path for
+/// landlock and the WASI preopen; the guest only ever sees its own path.
+pub fn single_option_ref(host_template: &str) -> Option<&str> {
+    let key = host_template.strip_prefix("$option:")?;
+    if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Some(key)
+    } else {
+        None
+    }
+}
+
+/// Lenient env-var expansion for free-form user-supplied strings (e.g.
+/// option values from `config.toml`). Substitutes `$home`,
+/// `$xdg_data_home`, `$xdg_config_home`, and a leading `~/`. Unknown
+/// variables and `$option:KEY` refs are left literally so policy
+/// resolution can handle them downstream — and so unrelated `$`
+/// occurrences in passphrases or URLs aren't mangled.
+pub fn expand_env_vars(input: &str) -> String {
+    let normalized = if let Some(rest) = input.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() => format!("{home}/{rest}"),
+            _ => return input.to_string(),
+        }
+    } else {
+        input.to_string()
+    };
+
+    let mut out = String::with_capacity(normalized.len());
+    let mut chars = normalized.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let var_start = i + c.len_utf8();
+        let mut var_end = normalized.len();
+        let mut consumed: usize = 0;
+        for (j, nc) in normalized[var_start..].char_indices() {
+            if is_template_var_char(nc) {
+                consumed += nc.len_utf8();
+            } else {
+                var_end = var_start + j;
+                break;
+            }
+        }
+        if var_end == normalized.len() {
+            var_end = var_start + consumed;
+        }
+        let var = &normalized[var_start..var_end];
+        let resolved = match var {
+            "home" => std::env::var("HOME").ok().filter(|s| !s.is_empty()),
+            "xdg_data_home" => Some(xdg_data_home()),
+            "xdg_config_home" => Some(xdg_config_home()),
+            _ => None,
+        };
+        if let Some(value) = resolved {
+            out.push_str(&value);
+            for _ in 0..var.chars().count() {
+                chars.next();
+            }
+        } else {
+            // Leave the original "$var" in place so policy resolution
+            // ($option:) or downstream code can see it untouched.
+            out.push('$');
+        }
+    }
+    out
+}
+
 fn xdg_data_home() -> String {
     std::env::var("XDG_DATA_HOME")
         .ok()
@@ -651,5 +724,44 @@ a = "$option:b"
         assert_eq!(combined.len(), wasm.len() + policy.len());
         assert_eq!(&combined[..wasm.len()], &wasm[..]);
         assert_eq!(&combined[wasm.len()..], &policy[..]);
+    }
+
+    #[test]
+    fn single_option_ref_matches_exact_form() {
+        assert_eq!(super::single_option_ref("$option:path"), Some("path"));
+        assert_eq!(
+            super::single_option_ref("$option:keyring_dir"),
+            Some("keyring_dir")
+        );
+        assert_eq!(super::single_option_ref("$option:"), None);
+        assert_eq!(super::single_option_ref("$home/foo"), None);
+        assert_eq!(super::single_option_ref("$option:path/sub"), None);
+        assert_eq!(super::single_option_ref("prefix$option:path"), None);
+    }
+
+    #[test]
+    fn expand_env_vars_leaves_option_refs_alone() {
+        let s = super::expand_env_vars("$option:path");
+        assert_eq!(s, "$option:path");
+    }
+
+    #[test]
+    fn expand_env_vars_leaves_unknown_vars_alone() {
+        let s = super::expand_env_vars("$something_else/foo");
+        assert_eq!(s, "$something_else/foo");
+    }
+
+    #[test]
+    fn expand_env_vars_resolves_home_when_set() {
+        let Ok(home) = std::env::var("HOME") else {
+            return; // sandboxed test runner without $HOME — nothing to verify
+        };
+        if home.is_empty() {
+            return;
+        }
+        let s = super::expand_env_vars("$home/.config/foo");
+        assert_eq!(s, format!("{home}/.config/foo"));
+        let s2 = super::expand_env_vars("~/Documents");
+        assert_eq!(s2, format!("{home}/Documents"));
     }
 }
