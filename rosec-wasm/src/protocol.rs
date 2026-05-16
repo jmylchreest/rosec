@@ -222,6 +222,13 @@ pub struct WasmSshKeyMeta {
     pub public_key_openssh: Option<String>,
     pub fingerprint: Option<String>,
     pub ssh_hosts: Vec<String>,
+    /// Git-signing principals from `custom.ssh_signing_principal` /
+    /// `custom.ssh-signing-principal` fields, one per line.  Omitted from
+    /// the on-wire payload when empty (default skip-if-empty) so older
+    /// plugins that don't emit this field still deserialise cleanly on
+    /// the host.
+    #[serde(default)]
+    pub signing_principals: Vec<String>,
     pub ssh_user: Option<String>,
     pub require_confirm: bool,
     pub revision_date_epoch_secs: Option<u64>,

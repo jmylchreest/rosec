@@ -649,6 +649,14 @@ pub struct SshKeyMeta {
     /// `Host` patterns from `custom.ssh_host` / `custom.ssh-host` fields.
     pub ssh_hosts: Vec<String>,
 
+    /// Git-signing principals from `custom.ssh_signing_principal` /
+    /// `custom.ssh-signing-principal` fields.  Each value may carry one
+    /// principal per line; an item with no entries here is not exposed in
+    /// the FUSE-synthesised `allowed_signers` file (so a stolen
+    /// server-access key cannot spoof git commits unless the user has
+    /// explicitly tagged it as a signing key for an identity).
+    pub signing_principals: Vec<String>,
+
     /// SSH username from `custom.ssh_user` / `custom.ssh-user` field.
     /// Emitted as `User <value>` in generated SSH config snippets.
     pub ssh_user: Option<String>,

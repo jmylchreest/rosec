@@ -47,6 +47,13 @@ pub struct KeyEntry {
     /// Multiple patterns are supported (one per field, or newline-separated).
     pub ssh_hosts: Vec<String>,
 
+    /// Git-signing principals from `custom.ssh_signing_principal` /
+    /// `custom.ssh-signing-principal` fields.  Each (key, principal) pair
+    /// becomes one line in the FUSE-synthesised `allowed_signers` file;
+    /// keys with no principals here are excluded entirely so the file
+    /// only trusts identities the user explicitly opted in to.
+    pub signing_principals: Vec<String>,
+
     /// SSH username from `custom.ssh_user` / `custom.ssh-user` field.
     /// Emitted as `User <value>` in generated SSH config snippets.
     pub ssh_user: Option<String>,
@@ -188,6 +195,7 @@ pub fn build_entry(
     item_name: String,
     provider_id: String,
     ssh_hosts: Vec<String>,
+    signing_principals: Vec<String>,
     ssh_user: Option<String>,
     require_confirm: bool,
     revision_date: Option<SystemTime>,
@@ -204,6 +212,7 @@ pub fn build_entry(
         fingerprint,
         public_key_openssh,
         ssh_hosts,
+        signing_principals,
         ssh_user,
         require_confirm,
         revision_date,

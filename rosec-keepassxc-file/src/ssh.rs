@@ -109,6 +109,23 @@ pub(crate) fn entry_to_ssh_key_meta(db: &Database, entry: &EntryRef<'_>) -> Opti
         })
         .collect();
 
+    // ssh_signing_principal / ssh-signing-principal: git-signing
+    // identities the FUSE `allowed_signers` should trust for this key.
+    let signing_principals: Vec<String> =
+        ["ssh_signing_principal", "ssh-signing-principal"]
+            .into_iter()
+            .filter_map(|n| entry.fields.get(n))
+            .flat_map(|v| {
+                v.get()
+                    .as_str()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
     // ssh_user / ssh-user: SSH login user.  Falls back to entry username
     // (KeePassXC's standard Username field) when the custom field is absent.
     let ssh_user_custom = ["ssh_user", "ssh-user"]
@@ -140,6 +157,7 @@ pub(crate) fn entry_to_ssh_key_meta(db: &Database, entry: &EntryRef<'_>) -> Opti
         public_key_openssh: None,
         fingerprint: None,
         ssh_hosts,
+        signing_principals,
         ssh_user,
         require_confirm: settings.require_confirm || confirm_field,
         revision_date_epoch_secs,

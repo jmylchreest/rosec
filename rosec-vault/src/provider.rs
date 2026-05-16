@@ -793,6 +793,17 @@ impl Provider for LocalVault {
                     .map(String::from)
                     .collect();
 
+                let signing_principals: Vec<String> = ssh_attr(&[
+                    "custom.ssh_signing_principal",
+                    "custom.ssh-signing-principal",
+                ])
+                .into_iter()
+                .flat_map(str::lines)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+
                 let ssh_user = ssh_attr(&["custom.ssh_user", "custom.ssh-user"])
                     .into_iter()
                     .map(|v| v.trim().to_string())
@@ -812,6 +823,7 @@ impl Provider for LocalVault {
                     public_key_openssh,
                     fingerprint,
                     ssh_hosts,
+                    signing_principals,
                     ssh_user,
                     require_confirm,
                     revision_date,

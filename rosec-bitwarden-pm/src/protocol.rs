@@ -212,6 +212,8 @@ pub struct WasmSshKeyMeta {
     pub public_key_openssh: Option<String>,
     pub fingerprint: Option<String>,
     pub ssh_hosts: Vec<String>,
+    #[serde(default)]
+    pub signing_principals: Vec<String>,
     pub ssh_user: Option<String>,
     pub require_confirm: bool,
     pub revision_date_epoch_secs: Option<u64>,

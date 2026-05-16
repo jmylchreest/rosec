@@ -11,8 +11,12 @@
 //! │   │   └── <fp>.pub      ino 100+
 //! │   └── by-host/          ino 5
 //! │       └── <host>.pub    ino 100+
-//! └── config.d/             ino 6
-//!     └── <stem>.conf       ino 100+
+//! ├── config.d/             ino 6
+//! │   └── <stem>.conf       ino 100+
+//! └── allowed_signers       ino 7  (synthesised; only keys with
+//!                                   `custom.ssh_signing_principal`
+//!                                   land here, one line per
+//!                                   principal × key pair)
 //! ```
 //!
 //! The snapshot is rebuilt each time [`SshFuse::update`] is called.  All
@@ -44,6 +48,11 @@ const INO_BY_NAME: u64 = 3;
 const INO_BY_FINGERPRINT: u64 = 4;
 const INO_BY_HOST: u64 = 5;
 const INO_CONFIG_D: u64 = 6;
+/// Static inode for the synthesised `allowed_signers` file at the root.
+/// Reserved a fixed number rather than allocating dynamically so the file
+/// has a stable path/inode across rebuilds (matters for `gpg.ssh.allowedSignersFile`
+/// being pinned by users to this path).
+const INO_ALLOWED_SIGNERS: u64 = 7;
 
 /// First inode for dynamic entries (files).
 const INO_DYNAMIC_START: u64 = 100;
@@ -106,6 +115,7 @@ impl Snapshot {
             .expect("root initialised");
         root.push(("keys".to_string(), INO_KEYS, true));
         root.push(("config.d".to_string(), INO_CONFIG_D, true));
+        root.push(("allowed_signers".to_string(), INO_ALLOWED_SIGNERS, false));
         let keys = snap
             .dir_children
             .get_mut(&INO_KEYS)
@@ -200,6 +210,52 @@ impl Snapshot {
                 .push((filename, ino, false));
         }
 
+        // `/allowed_signers` — one `<principal> namespaces="git" <key>`
+        // line per (principal × public-key) pair, dedup'd, only for keys
+        // that carry at least one `custom.ssh_signing_principal`.  Empty
+        // is fine: git treats it as "no key trusted", which is the
+        // correct fail-closed behaviour before the user opts any key in.
+        let mut allowed_lines: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for entry in entries {
+            if entry.signing_principals.is_empty() {
+                continue;
+            }
+            let pubkey_line = entry.public_key_openssh.trim();
+            if pubkey_line.is_empty() {
+                continue;
+            }
+            for principal in &entry.signing_principals {
+                let principal = principal.trim();
+                if principal.is_empty() {
+                    continue;
+                }
+                if !seen.insert((principal.to_string(), pubkey_line.to_string())) {
+                    continue;
+                }
+                allowed_lines.push(format!("{principal} namespaces=\"git\" {pubkey_line}"));
+            }
+        }
+        let allowed_content = if allowed_lines.is_empty() {
+            // Keep a marker so users opening the file see what it's for.
+            String::from(
+                "# rosec allowed_signers — populated from items with\n\
+                 # `custom.ssh_signing_principal` (or its dash spelling).\n\
+                 # See `gpg.ssh.allowedSignersFile` in git's docs.\n",
+            )
+        } else {
+            let mut out = allowed_lines.join("\n");
+            out.push('\n');
+            out
+        };
+        snap.files.insert(
+            INO_ALLOWED_SIGNERS,
+            VirtFile {
+                content: allowed_content.into_bytes(),
+            },
+        );
+
         snap
     }
 
@@ -231,7 +287,7 @@ impl Snapshot {
     fn parent_ino(&self, ino: u64) -> u64 {
         match ino {
             INO_ROOT => INO_ROOT,
-            INO_KEYS | INO_CONFIG_D => INO_ROOT,
+            INO_KEYS | INO_CONFIG_D | INO_ALLOWED_SIGNERS => INO_ROOT,
             INO_BY_NAME | INO_BY_FINGERPRINT | INO_BY_HOST => INO_KEYS,
             _ => INO_ROOT,
         }

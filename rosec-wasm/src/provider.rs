@@ -1706,6 +1706,7 @@ fn to_ssh_key_meta(w: WasmSshKeyMeta, provider_id: &str) -> SshKeyMeta {
         public_key_openssh: w.public_key_openssh,
         fingerprint: w.fingerprint,
         ssh_hosts: w.ssh_hosts,
+        signing_principals: w.signing_principals,
         ssh_user: w.ssh_user,
         require_confirm: w.require_confirm,
         revision_date: w

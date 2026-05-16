@@ -188,6 +188,7 @@ impl SshManager {
                     meta.item_name.clone(),
                     provider_id.clone(),
                     meta.ssh_hosts.clone(),
+                    meta.signing_principals.clone(),
                     meta.ssh_user.clone(),
                     meta.require_confirm,
                     revision_date,

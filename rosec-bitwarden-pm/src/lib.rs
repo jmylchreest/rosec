@@ -686,6 +686,23 @@ fn cipher_to_ssh_key_meta(_provider_id: &str, dc: &DecryptedCipher) -> Option<Wa
         .map(String::from)
         .collect();
 
+    // Git-signing principals (emails) for the FUSE `allowed_signers` file.
+    let signing_principals: Vec<String> = dc
+        .fields
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.name.as_deref(),
+                Some("ssh_signing_principal" | "ssh-signing-principal")
+            )
+        })
+        .filter_map(|f| f.value.as_ref())
+        .flat_map(|v| v.as_str().lines())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
     // Extract custom.ssh_user / custom.ssh-user field (first wins).
     let ssh_user = dc
         .fields
@@ -709,6 +726,7 @@ fn cipher_to_ssh_key_meta(_provider_id: &str, dc: &DecryptedCipher) -> Option<Wa
         public_key_openssh,
         fingerprint,
         ssh_hosts,
+        signing_principals,
         ssh_user,
         require_confirm,
         revision_date_epoch_secs: revision_date.map(to_epoch_secs),
