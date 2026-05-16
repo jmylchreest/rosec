@@ -10,6 +10,11 @@ use zbus::message::Header;
 use super::log_dbus_caller;
 use crate::state::{ServiceState, make_item_path, map_provider_error};
 
+/// Tuple shape returned by `ReadItemsFromProvider`:
+/// `(item_id, label, attributes, secret_bytes)`.  Extracted to satisfy
+/// clippy::type_complexity while keeping the D-Bus signature unchanged.
+type RawProviderItem = (String, String, HashMap<String, String>, Vec<u8>);
+
 pub struct RosecItems {
     pub(super) state: Arc<ServiceState>,
 }
@@ -275,5 +280,78 @@ impl RosecItems {
             .iter()
             .map(|t| t.to_string())
             .collect())
+    }
+
+    /// Read items from a specific provider, bypassing the deduplication layer.
+    ///
+    /// `SearchItems` (and the rosec extensions that read from the cache)
+    /// surface only the dedup winner per (label, client-attrs) group, so an
+    /// item that another writable provider also holds is invisible to
+    /// clients.  This method calls `Provider::search` directly on the named
+    /// provider and returns every match, paired with its primary secret
+    /// bytes, so callers can recover values that the cache hides.
+    ///
+    /// Each returned tuple is `(item_id, label, attributes, secret_bytes)`.
+    /// The secret is read from the first matching `secret_names` entry the
+    /// provider exposes (`"secret"` or `"password"` for most provider
+    /// kinds).  Items with no readable secret are returned with an empty
+    /// byte vector rather than failing the whole call.
+    ///
+    /// Intended for diagnostic/migration tooling (`rosec search --no-dedup`,
+    /// cross-provider copy).  Returns raw bytes — callers must zeroise
+    /// whatever they copy.
+    async fn read_items_from_provider(
+        &self,
+        provider_id: &str,
+        attributes: HashMap<String, String>,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<RawProviderItem>, FdoError> {
+        log_dbus_caller("items-extension", "ReadItemsFromProvider", &header);
+        self.state.touch_activity();
+
+        let provider = self
+            .state
+            .provider_by_id(provider_id)
+            .ok_or_else(|| FdoError::Failed(format!("provider not found: {provider_id}")))?;
+
+        let metas = self
+            .state
+            .run_on_tokio({
+                let provider = Arc::clone(&provider);
+                let attrs = attributes.clone();
+                async move { provider.search(&attrs).await }
+            })
+            .await?
+            .map_err(map_provider_error)?;
+
+        let mut out: Vec<RawProviderItem> = Vec::with_capacity(metas.len());
+
+        for meta in metas {
+            let item_id = meta.id.clone();
+            let label = meta.label.clone();
+            let attrs = meta.attributes.clone();
+            let provider_for_read = Arc::clone(&provider);
+            let id_for_read = item_id.clone();
+
+            let secret_bytes = self
+                .state
+                .run_on_tokio(async move {
+                    let ia = match provider_for_read.get_item_attributes(&id_for_read).await {
+                        Ok(ia) => ia,
+                        Err(_) => return Vec::new(),
+                    };
+                    for name in &ia.secret_names {
+                        if let Ok(s) = provider_for_read.get_secret_attr(&id_for_read, name).await {
+                            return s.as_slice().to_vec();
+                        }
+                    }
+                    Vec::new()
+                })
+                .await?;
+
+            out.push((item_id, label, attrs, secret_bytes));
+        }
+
+        Ok(out)
     }
 }

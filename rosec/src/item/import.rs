@@ -15,6 +15,7 @@ use super::parse_item_toml;
 
 pub async fn run(args: ItemImportArgs) -> Result<()> {
     let provider_id = args.provider.unwrap_or_default();
+    let force = args.force;
 
     let mut content = String::new();
     io::stdin().lock().read_to_string(&mut content)?;
@@ -72,7 +73,7 @@ pub async fn run(args: ItemImportArgs) -> Result<()> {
                 &parsed.item_type,
                 &parsed.attributes,
                 &parsed.secrets,
-                false, // replace
+                force, // replace if --force was passed
             ),
         )
         .await?;

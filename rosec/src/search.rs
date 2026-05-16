@@ -18,6 +18,8 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     let show_path = args.show_path;
     let sync = args.sync;
     let no_unlock = args.no_unlock;
+    let no_dedup = args.no_dedup;
+    let provider_id = args.provider.clone();
     let mut all_attrs: HashMap<String, String> = HashMap::new();
 
     for filter in &args.filters {
@@ -32,10 +34,18 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         bail!("--sync and --no-unlock are mutually exclusive");
     }
 
+    if no_dedup && provider_id.is_none() {
+        bail!("--no-dedup requires --provider <id>");
+    }
+
     let conn = conn().await?;
     let rosecd = is_rosecd(&conn).await;
     if rosecd {
         warn_if_no_providers(&conn).await;
+    }
+
+    if no_dedup {
+        return run_no_dedup(&conn, provider_id.as_deref().unwrap(), &all_attrs, format).await;
     }
 
     if sync {
@@ -117,6 +127,84 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         OutputFormat::Human | OutputFormat::Table => print_search_table(&items, show_path),
         OutputFormat::Kv => print_search_kv(&items, show_path),
         OutputFormat::Json => print_search_json(&items)?,
+    }
+
+    Ok(())
+}
+
+/// `--no-dedup` path: call `org.rosec.Items.ReadItemsFromProvider` directly so
+/// items that the cache's dedup layer would hide (cross-provider duplicates,
+/// where another provider won by priority) are returned with their primary
+/// secret bytes attached.  Useful for diagnostics and cross-provider migration
+/// — the surfaced bytes can be copied into another provider via
+/// `rosec item edit` / `rosec item import`.
+async fn run_no_dedup(
+    conn: &Connection,
+    provider_id: &str,
+    attrs: &HashMap<String, String>,
+    format: OutputFormat,
+) -> Result<()> {
+    type RawItem = (String, String, HashMap<String, String>, Vec<u8>);
+
+    let proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Items",
+        "org.rosec.Items",
+    )
+    .await?;
+    let items: Vec<RawItem> = proxy
+        .call("ReadItemsFromProvider", &(provider_id, attrs))
+        .await?;
+
+    if items.is_empty() {
+        if format == OutputFormat::Json {
+            println!("[]");
+        } else {
+            println!("No items found.");
+        }
+        return Ok(());
+    }
+
+    match format {
+        OutputFormat::Json => {
+            use base64::Engine;
+            let json: Vec<serde_json::Value> = items
+                .iter()
+                .map(|(id, label, attrs, secret)| {
+                    serde_json::json!({
+                        "provider": provider_id,
+                        "id": id,
+                        "label": label,
+                        "attributes": attrs,
+                        "secret_base64": base64::engine::general_purpose::STANDARD.encode(secret),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            for (id, label, attrs_map, secret) in &items {
+                println!("Provider:   {provider_id}");
+                println!("ID:         {id}");
+                println!("Label:      {label}");
+                if !attrs_map.is_empty() {
+                    println!("Attributes:");
+                    let mut sorted: Vec<_> = attrs_map.iter().collect();
+                    sorted.sort_by_key(|(k, _)| *k);
+                    for (k, v) in sorted {
+                        println!("  {k}: {v}");
+                    }
+                }
+                if secret.is_empty() {
+                    println!("Secret:     <empty / not readable>");
+                } else {
+                    let text = String::from_utf8_lossy(secret);
+                    println!("Secret:     {text}");
+                }
+                println!();
+            }
+        }
     }
 
     Ok(())

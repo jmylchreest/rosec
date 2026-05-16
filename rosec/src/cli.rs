@@ -248,6 +248,19 @@ pub struct SearchArgs {
     #[arg(long)]
     pub show_path: bool,
 
+    /// Skip the dedup layer and list raw items from a specific provider.
+    /// Requires `--provider`.  Cross-provider duplicates that the cache
+    /// would have hidden are returned, with their primary secret value
+    /// included in the output so the result can be copied elsewhere.
+    #[arg(long)]
+    pub no_dedup: bool,
+
+    /// Provider id to query directly (used with `--no-dedup`).  Without
+    /// `--no-dedup` this is ignored; use `rosec:provider=<id>` as a
+    /// regular filter for cache-based searches.
+    #[arg(long)]
+    pub provider: Option<String>,
+
     /// Attribute filters: key=value pairs (AND semantics, globs accepted)
     #[arg(trailing_var_arg = true)]
     pub filters: Vec<String>,
@@ -683,4 +696,10 @@ pub struct ItemImportArgs {
     /// Target provider (default: first write-capable)
     #[arg(long)]
     pub provider: Option<String>,
+
+    /// Overwrite an existing item with matching attributes (passes
+    /// `replace=true` to CreateItemExtended).  Without this flag, import
+    /// fails with `already exists` if a match is found.
+    #[arg(long)]
+    pub force: bool,
 }
