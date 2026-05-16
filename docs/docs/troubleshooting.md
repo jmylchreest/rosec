@@ -15,65 +15,55 @@ Chromium identifies its key by searching for
 
 ### Diagnose — find the duplicates
 
-Temporarily set `dedup_strategy = "none"` in your config so both copies are
-visible:
-
-```toml
-# ~/.config/rosec/config.toml
-[service]
-dedup_strategy = "none"
-```
-
-Then search for the duplicate items:
+`rosec search` only returns the dedup winner per group, so a stale copy and
+the real one look identical from the cache's perspective. Use `--no-dedup` to
+query a provider directly, bypassing the cache:
 
 ```bash
-rosec search application=chrome
+# Whatever provider you think holds the original key — try each:
+rosec search --no-dedup --provider gnome-keyring application=chrome
+rosec search --no-dedup --provider local         application=chrome
 ```
 
-If two items appear from different providers with the same label but different
-`rosec:provider` values, you have cross-provider duplication.
+Each invocation prints the matching item (including its secret bytes) from
+that one provider, without any deduplication. If you see different `Secret:`
+values across providers for the same `application=chrome`, you have
+cross-provider duplication and the cache is hiding one of them.
 
-### Fix — keep the correct copy
+### Fix — replant the correct value into your writable provider
 
-1. Identify which provider holds the **original** secret (typically the one your
-   browser was using before rosec — often `gnome-keyring`).
+From the `--no-dedup` output above, copy the `Secret:` field of the provider
+whose value your browser was sealed against (typically `gnome-keyring` — the
+one that predates rosec on your machine). Then overwrite the stale copy in
+your writable provider with `item import --force`:
 
-2. Set `dedup_strategy = "priority"` and list that provider **first** in your
-   config so its copy wins:
+```bash
+cat <<EOF | rosec item import --provider local --force
+[item]
+label = "Chrome Safe Storage"
+type = "generic"
 
-   ```toml
-   [service]
-   dedup_strategy = "priority"
+[attributes]
+application = "chrome"
+"xdg:schema" = "chrome_libsecret_os_crypt_password_v2"
 
-   # provider listed first wins dedup
-   [[provider]]
-   id = "gnome-keyring"
-   kind = "gnome-keyring"
+[secrets]
+secret = "<paste the Secret value from --no-dedup output>"
+EOF
+```
 
-   [[provider]]
-   id = "local"
-   kind = "local"
-   # ...remaining providers...
-   ```
+`--force` passes `replace=true` to `CreateItemExtended` so the new TOML
+overwrites the existing item with matching attributes instead of failing with
+"already exists".
 
-3. Restart your browser to verify it no longer shows the error.
+Restart your browser. It should accept the keystore on next launch.
 
-4. *(Optional)* Migrate the correct secret into your preferred vault and remove
-   the stale copy:
-
-   ```bash
-   # Export the correct item from gnome-keyring
-   rosec item export <item-id> > chrome-key.toml
-
-   # Import into your local vault
-   rosec item import --provider=local < chrome-key.toml
-
-   # Delete the stale copy from the local vault (the old wrong one)
-   rosec item delete <stale-item-id>
-   ```
-
-   After migrating, you can switch back to `dedup_strategy = "newest"` or
-   remove the explicit strategy to use the default.
+> **Alternative:** if you'd rather keep the original copy as the live source,
+> set `dedup_strategy = "priority"` and list its provider **first** in
+> `[[provider]]` ordering. The dedup layer will then surface it as the winner
+> automatically — no copying needed. This affects every cross-provider
+> duplicate, not just `application=chrome`, so prefer the targeted import
+> above unless you know all the duplicates should flip together.
 
 > **Why does this happen?** When rosec replaced `gnome-keyring-daemon` as the
 > Secret Service provider, Chromium's `CreateItem` call stored a new encryption

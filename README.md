@@ -111,6 +111,8 @@ A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.gi
 
 **`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
 
+**Chromium / Vivaldi / Brave says "Encrypted keystore changed".** Cross-provider duplicate; dedup served the wrong copy. Find the right value with `rosec search --no-dedup --provider <id> application=chrome`, then replant it with `rosec item import --force --provider local` (piping the TOML). Full walk-through on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
+
 ## Status
 
 Active development. The `local`, `bitwarden`, `bitwarden-sm`, and `gnome-keyring` providers are stable. The `keepassxc-file` provider is **experimental** — interfaces and on-disk caching may change between releases.

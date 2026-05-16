@@ -51,6 +51,38 @@ Both mounts are gated by `[service]` flags (`ssh_fuse = true`, `totp_fuse = true
 - **Sandboxed:** WASM provider plugins. They can only touch host paths they were granted via the per-provider allow-list; network access is per-provider via `allowed_hosts`. They can't escape into the host filesystem or talk to D-Bus directly.
 - **Out of scope:** root, kernel, hardware. If your machine is compromised at that level, no userspace daemon helps.
 
+## A Chromium-based browser says "Encrypted keystore changed". How do I fix it?
+
+When the same `application=chrome` entry exists in two providers (typically a `local` vault and `gnome-keyring`) with different secret values, dedup keeps only the priority winner. If the loser was what your browser sealed against, you get "Encrypted keystore changed" on next launch.
+
+Recover with `--no-dedup` to surface the hidden value, then `item import --force` to replant it:
+
+```bash
+# 1. Surface the hidden value from the provider that holds the original key
+rosec search --no-dedup --provider gnome-keyring application=chrome
+# Copy the "Secret:" field from the output.
+
+# 2. Replant it into your writable provider, overwriting the wrong copy
+cat <<EOF | rosec item import --provider local --force
+[item]
+label = "Chrome Safe Storage"
+type = "generic"
+
+[attributes]
+application = "chrome"
+"xdg:schema" = "chrome_libsecret_os_crypt_password_v2"
+
+[secrets]
+secret = "<paste the Secret value from step 1>"
+EOF
+
+# 3. Restart the browser — it should accept the keystore on next launch.
+```
+
+`--no-dedup` requires `--provider <id>`; it calls the provider's `search()` directly so duplicates that the cache dropped at dedup time are visible again, with their secret bytes attached. `item import --force` passes `replace=true` to `CreateItemExtended`, so the new TOML overwrites an existing item with the same client-visible attributes instead of erroring.
+
+See also the [Chromium "keystore changed"](./troubleshooting#chrome--vivaldi--chromium--encrypted-keystore-changed-or-is-now-unavailable) section in Troubleshooting for the diagnostic flow and why this happens.
+
 ## Does rosec sync?
 
 The daemon doesn't sync between machines — it's a local daemon. Individual providers may sync from their own remote source (Bitwarden does, KeePassXC reloads from the kdbx file on save, gnome-keyring is read-only). For multi-machine "same vault everywhere" use-cases, the cleanest path is a sync'd Bitwarden account, or a kdbx file under Syncthing.
