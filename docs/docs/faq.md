@@ -83,6 +83,17 @@ EOF
 
 See also the [Chromium "keystore changed"](./troubleshooting#chrome--vivaldi--chromium--encrypted-keystore-changed-or-is-now-unavailable) section in Troubleshooting for the diagnostic flow and why this happens.
 
+## Can rosec verify signed git commits locally?
+
+Yes — rosec's SSH FUSE synthesises an `allowed_signers` file from the keys you've tagged for git signing. Add a `custom.ssh_signing_principal` field (value: your email) to each SSH-key vault item, then:
+
+```bash
+git config --global gpg.ssh.allowedSignersFile \
+  "$XDG_RUNTIME_DIR/rosec/ssh/allowed_signers"
+```
+
+`git log --show-signature` now reports `Good "git" signature` for commits signed by any tagged key. Only tagged keys land in the file, so untagged server-access keys in rosec can't be used to spoof commits. Full details in the [SSH agent guide](./ssh-agent#git-signature-verification-allowed_signers).
+
 ## Does rosec sync?
 
 The daemon doesn't sync between machines — it's a local daemon. Individual providers may sync from their own remote source (Bitwarden does, KeePassXC reloads from the kdbx file on save, gnome-keyring is read-only). For multi-machine "same vault everywhere" use-cases, the cleanest path is a sync'd Bitwarden account, or a kdbx file under Syncthing.

@@ -80,10 +80,14 @@ $XDG_RUNTIME_DIR/rosec/ssh/
 │   ├── by-name/<item>.pub        # public key per vault item
 │   ├── by-fingerprint/<sha256>.pub
 │   └── by-host/<host>.pub        # one per ssh_host attribute
-└── config.d/<provider>-<item>.conf  # ssh config snippet — `Host <pattern>` blocks pointing at agent.sock
+├── config.d/<provider>-<item>.conf  # ssh config snippet — `Host <pattern>` blocks pointing at agent.sock
+└── allowed_signers               # synthesised — one line per (principal × key) for items
+                                  # tagged with `custom.ssh_signing_principal`
 ```
 
 Add `Include $XDG_RUNTIME_DIR/rosec/ssh/config.d/*` near the top of your `~/.ssh/config` and any item with an `ssh_host` attribute auto-routes through rosec.
+
+Tag a key with `custom.ssh_signing_principal=you@example.com` and point `git config gpg.ssh.allowedSignersFile` at the FUSE `allowed_signers` to get local verification of your own signed commits — locking rosec or removing the tag removes trust automatically. Details in [SSH agent docs](https://jmylchreest.github.io/rosec/ssh-agent#git-signature-verification-allowed_signers).
 
 ### TOTP
 
@@ -112,6 +116,8 @@ A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.gi
 **`gnome-keyring-daemon` keeps grabbing the bus name back.** Run `rosec enable --force` to rewrite the autostart and D-Bus mask files, then re-login. Full diagnosis on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
 
 **Chromium / Vivaldi / Brave says "Encrypted keystore changed".** Cross-provider duplicate; dedup served the wrong copy. Find the right value with `rosec search --no-dedup --provider <id> application=chrome`, then replant it with `rosec item import --force --provider local` (piping the TOML). Full walk-through on the [troubleshooting page](https://jmylchreest.github.io/rosec/troubleshooting).
+
+**Can git verify signed commits against rosec?** Yes. Tag the signing key item with `custom.ssh_signing_principal=you@example.com` and set `git config gpg.ssh.allowedSignersFile "$XDG_RUNTIME_DIR/rosec/ssh/allowed_signers"`. rosec synthesises the file from every tagged key; locking the daemon revokes trust automatically.
 
 ## Status
 

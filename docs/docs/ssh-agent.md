@@ -38,9 +38,10 @@ $XDG_RUNTIME_DIR/rosec/ssh/
 │       ├── github.com.pub
 │       ├── _star.prod.example.com.pub  # * replaced with _star
 │       └── bastion.internal.pub
-└── config.d/                           # SSH config snippets
-    ├── my_github_key.conf
-    └── production_server.conf
+├── config.d/                           # SSH config snippets
+│   ├── my_github_key.conf
+│   └── production_server.conf
+└── allowed_signers                     # synthesised — see "Git signature verification"
 ```
 
 All `.pub` files contain the OpenSSH wire-format public key (the same line you would put in `~/.ssh/authorized_keys`).
@@ -186,6 +187,34 @@ OpenSSH `Host` patterns use `*` and `?` as wildcards.  Since `*` is illegal in F
 | `192.168.?.1` | `192.168._qmark.1.pub` |
 
 The `config.d/` snippets use the original pattern in the `Host` line — the substitution only applies to FUSE filenames.
+
+## Git signature verification (`allowed_signers`)
+
+rosec also synthesises an `allowed_signers` file at the **root** of the FUSE mount so `ssh-keygen -Y verify` (and git, via `gpg.ssh.allowedSignersFile`) can validate signed commits against the same keys it signs them with — no separate file to maintain.
+
+Tag a key you sign with by adding a custom field to its vault item:
+
+| Field name | Field value |
+|---|---|
+| `ssh_signing_principal` (or `ssh-signing-principal`) | `you@example.com` |
+
+Multiple principals are supported (one per line in a single field, or duplicate fields). Each `(principal × public-key)` pair becomes one line in the synthesised file, in the format `ssh-keygen -Y verify` expects:
+
+```
+you@example.com namespaces="git" ssh-ed25519 AAAA... comment
+```
+
+Point git at the file once:
+
+```bash
+git config --global gpg.ssh.allowedSignersFile "$XDG_RUNTIME_DIR/rosec/ssh/allowed_signers"
+```
+
+After that, `git log --show-signature` reports `Good "git" signature for <principal>` for every commit signed by a key you've tagged.
+
+**Scoping (important).** Only keys with at least one principal land in `allowed_signers`. A server-access key sitting in rosec untagged contributes nothing to verification trust — so a leaked deploy key cannot spoof commits unless you've explicitly opted it in to a git identity.
+
+**Fail-closed.** If rosec is locked or the FUSE mount is unavailable, `allowed_signers` is unreadable / empty. Git's behaviour in that case is "no key trusted", which is the right default — better to mark a real signature as untrusted than to trust the wrong key.
 
 ## Signing confirmation
 
