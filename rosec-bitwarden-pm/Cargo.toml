@@ -1,6 +1,9 @@
 [package]
 name = "rosec-bitwarden-pm"
-version = "0.1.0"
+# Kept in lockstep with the workspace version (bumped by cargo-release via
+# pre-release-replacements in ../release.toml). WASM providers must match the
+# rosec-core ABI of the release they ship with.
+version = "0.0.28"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"

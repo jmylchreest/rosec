@@ -16,8 +16,27 @@
 # We do NOT publish to crates.io — this is a binary workspace, not a library.
 
 # Single workspace release — version is set in [workspace.package] and all
-# members use version.workspace = true, so only the root needs bumping.
+# workspace members use version.workspace = true, so only the root needs bumping.
+#
+# The WASM provider crates (rosec-bitwarden-pm, rosec-bitwarden-sm,
+# rosec-gnome-keyring, rosec-keepassxc-file) are excluded from the workspace
+# because they target wasm32-wasip1 and have their own Cargo.lock files.
+# They must still match the rosec-core ABI of the release they ship with, so
+# pre-release-replacements below keep their `version = "..."` in lockstep.
 shared-version = true
+
+# Bump the version line in each excluded WASM provider Cargo.toml so they
+# stay aligned with the workspace version. `min = 1, max = 1` enforces that
+# exactly one match must be found and replaced per file — fails loudly if a
+# crate's manifest drifts from this format. `prerelease = true` ensures these
+# also run for pre-release versions (cargo-release defaults this to false for
+# replacements, which would skip dev/alpha bumps).
+pre-release-replacements = [
+  { file = "rosec-bitwarden-pm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "rosec-bitwarden-sm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "rosec-gnome-keyring/Cargo.toml",  search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "rosec-keepassxc-file/Cargo.toml", search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+]
 
 # Do not publish any crates to crates.io
 publish = false
