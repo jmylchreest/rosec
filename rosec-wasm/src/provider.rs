@@ -1025,7 +1025,7 @@ impl Provider for WasmProvider {
         Ok(resp
             .items
             .into_iter()
-            .map(|w| to_item_meta(w, &self.config.id))
+            .filter_map(|w| to_item_meta(w, &self.config.id))
             .collect())
     }
 
@@ -1040,7 +1040,7 @@ impl Provider for WasmProvider {
         Ok(resp
             .items
             .into_iter()
-            .map(|w| to_item_meta(w, &self.config.id))
+            .filter_map(|w| to_item_meta(w, &self.config.id))
             .collect())
     }
 
@@ -1679,8 +1679,67 @@ fn map_guest_2fa_error(methods: Option<Vec<crate::protocol::TwoFactorMethod>>) -
     }
 }
 
-fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta {
-    ItemMeta {
+/// Maximum length (UTF-8 bytes) accepted for guest-supplied item id.
+pub const MAX_ITEM_ID_LEN: usize = 256;
+/// Maximum length accepted for guest-supplied item label.
+pub const MAX_ITEM_LABEL_LEN: usize = 1024;
+/// Maximum length accepted for any single attribute key.
+pub const MAX_ATTR_KEY_LEN: usize = 256;
+/// Maximum length accepted for any single attribute value (large enough
+/// for SSH public keys and similar).
+pub const MAX_ATTR_VALUE_LEN: usize = 65_536;
+/// Maximum number of attributes per item.
+pub const MAX_ATTRS_PER_ITEM: usize = 256;
+
+/// Sanity-check a guest-supplied `WasmItemMeta` before it lands in the
+/// host's cache.  Returns a short reason string when the item should be
+/// dropped — callers warn-log and skip rather than propagate, so a single
+/// malformed item doesn't poison the rest of the provider's `list_items`
+/// response.
+fn validate_wasm_item_meta(w: &crate::protocol::WasmItemMeta) -> Result<(), String> {
+    if w.id.is_empty() {
+        return Err("empty id".into());
+    }
+    if w.id.len() > MAX_ITEM_ID_LEN {
+        return Err(format!("id exceeds {MAX_ITEM_ID_LEN}B"));
+    }
+    if w.label.is_empty() {
+        return Err("empty label".into());
+    }
+    if w.label.len() > MAX_ITEM_LABEL_LEN {
+        return Err(format!("label exceeds {MAX_ITEM_LABEL_LEN}B"));
+    }
+    if w.attributes.len() > MAX_ATTRS_PER_ITEM {
+        return Err(format!(
+            "attribute count {} exceeds {MAX_ATTRS_PER_ITEM}",
+            w.attributes.len()
+        ));
+    }
+    for (k, v) in &w.attributes {
+        if k.is_empty() {
+            return Err("empty attribute key".into());
+        }
+        if k.len() > MAX_ATTR_KEY_LEN {
+            return Err(format!("attribute key {k:?} exceeds {MAX_ATTR_KEY_LEN}B"));
+        }
+        if v.len() > MAX_ATTR_VALUE_LEN {
+            return Err(format!(
+                "attribute {k:?} value exceeds {MAX_ATTR_VALUE_LEN}B"
+            ));
+        }
+        if rosec_core::RESERVED_ATTRIBUTES.contains(&k.as_str()) {
+            return Err(format!("attribute key {k:?} is reserved"));
+        }
+    }
+    Ok(())
+}
+
+fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> Option<ItemMeta> {
+    if let Err(reason) = validate_wasm_item_meta(&w) {
+        warn!(provider = %provider_id, item_id = %w.id, reason, "dropping invalid item from guest");
+        return None;
+    }
+    Some(ItemMeta {
         id: w.id,
         provider_id: provider_id.to_owned(),
         label: w.label,
@@ -1693,7 +1752,7 @@ fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta
             .map(|s| UNIX_EPOCH + Duration::from_secs(s)),
         locked: false,
         attribute_hashes: None,
-    }
+    })
 }
 
 /// Spawn a tokio task that drains `host_watch` events and dispatches them
@@ -2025,5 +2084,87 @@ mod tests {
             ProviderError::Other(e) => assert_eq!(e.to_string(), "unknown plugin error"),
             other => panic!("expected Other, got {other:?}"),
         }
+    }
+
+    fn meta_with(id: &str, label: &str, attrs: Vec<(&str, &str)>) -> crate::protocol::WasmItemMeta {
+        crate::protocol::WasmItemMeta {
+            id: id.to_string(),
+            label: label.to_string(),
+            attributes: attrs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            created_epoch_secs: None,
+            modified_epoch_secs: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_typical_item() {
+        let m = meta_with(
+            "abc123",
+            "Chromium Safe Storage",
+            vec![("application", "Signal")],
+        );
+        assert!(validate_wasm_item_meta(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_id_and_label() {
+        let m = meta_with("", "x", vec![]);
+        assert!(
+            validate_wasm_item_meta(&m)
+                .unwrap_err()
+                .contains("empty id")
+        );
+        let m = meta_with("x", "", vec![]);
+        assert!(
+            validate_wasm_item_meta(&m)
+                .unwrap_err()
+                .contains("empty label")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_oversize_fields() {
+        let big = "x".repeat(MAX_ITEM_ID_LEN + 1);
+        let m = meta_with(&big, "ok", vec![]);
+        assert!(validate_wasm_item_meta(&m).unwrap_err().contains("id"));
+
+        let big = "y".repeat(MAX_ITEM_LABEL_LEN + 1);
+        let m = meta_with("ok", &big, vec![]);
+        assert!(validate_wasm_item_meta(&m).unwrap_err().contains("label"));
+
+        let big = "z".repeat(MAX_ATTR_VALUE_LEN + 1);
+        let m = meta_with("ok", "ok", vec![("k", big.as_str())]);
+        assert!(validate_wasm_item_meta(&m).unwrap_err().contains("value"));
+    }
+
+    #[test]
+    fn validate_rejects_reserved_attribute_keys() {
+        let m = meta_with("ok", "ok", vec![("rosec:provider", "evil")]);
+        let err = validate_wasm_item_meta(&m).unwrap_err();
+        assert!(err.contains("reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_attributes() {
+        let mut m = meta_with("ok", "ok", vec![]);
+        for i in 0..=MAX_ATTRS_PER_ITEM {
+            m.attributes.insert(format!("k{i}"), "v".to_string());
+        }
+        assert!(
+            validate_wasm_item_meta(&m)
+                .unwrap_err()
+                .contains("attribute count")
+        );
+    }
+
+    #[test]
+    fn to_item_meta_drops_invalid_returns_none() {
+        let bad = meta_with("", "label", vec![]);
+        assert!(to_item_meta(bad, "provider").is_none());
+        let good = meta_with("id", "label", vec![("app", "Signal")]);
+        assert!(to_item_meta(good, "provider").is_some());
     }
 }
