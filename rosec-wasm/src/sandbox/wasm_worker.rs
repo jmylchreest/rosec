@@ -33,6 +33,12 @@ use crate::provider::{
     query_registration_info,
 };
 
+/// Host-side ceiling on how long any caller will wait for a wasm worker
+/// to reply.  Tighter than extism's [`GUEST_CALL_TIMEOUT`] (180s) so the
+/// host releases the await well before extism's trap, freeing downstream
+/// rebuilds / searches for other providers.
+const HOST_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Capacity of the call-request channel between async callers and the
 /// worker thread. Per-provider activity is sequential (one user, one
 /// vault) so 16 in-flight is plenty; the bound prevents a misbehaving
@@ -144,12 +150,26 @@ impl WasmWorker {
             .map_err(|_| {
                 ProviderError::Unavailable(format!("wasm worker '{}' has stopped", self.label))
             })?;
-        reply_rx.await.map_err(|_| {
-            ProviderError::Unavailable(format!(
+        // Host-side ceiling: bounds how long any caller waits for the worker
+        // to reply, independent of extism's in-guest timeout (which only
+        // covers wasm execution, not host functions like network I/O).  If
+        // this fires the worker thread keeps running its call until either
+        // it finishes or extism's `GUEST_CALL_TIMEOUT` cuts it short, but
+        // the caller stops blocking and downstream code (cache rebuild,
+        // SearchItems) keeps going for the other providers.
+        let awaited = tokio::time::timeout(HOST_CALL_TIMEOUT, reply_rx).await;
+        match awaited {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ProviderError::Unavailable(format!(
                 "wasm worker '{}' dropped reply (panic during call)",
                 self.label
-            ))
-        })?
+            ))),
+            Err(_) => Err(ProviderError::Unavailable(format!(
+                "wasm worker '{}' did not reply within {}s",
+                self.label,
+                HOST_CALL_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     /// Convenience wrapper around [`Self::call`] for the canonical pattern:
