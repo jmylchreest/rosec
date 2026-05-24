@@ -304,6 +304,7 @@ mod tests {
             created: None,
             modified: None,
             locked,
+            attribute_hashes: None,
         }
     }
 

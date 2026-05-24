@@ -102,6 +102,7 @@ fn select_by_newest(
                 created: None,
                 modified: None,
                 locked: true,
+                attribute_hashes: None,
             };
         }
     };
@@ -171,6 +172,7 @@ mod tests {
             created: None,
             modified,
             locked: false,
+            attribute_hashes: None,
         }
     }
 
@@ -246,6 +248,7 @@ mod tests {
             created: None,
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(120)),
             locked: false,
+            attribute_hashes: None,
         };
 
         let gk_item = ItemMeta {
@@ -256,6 +259,7 @@ mod tests {
             created: None,
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
             locked: false,
+            attribute_hashes: None,
         };
 
         let config = DedupConfig {
@@ -299,6 +303,7 @@ mod tests {
             created: None,
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
             locked: false,
+            attribute_hashes: None,
         };
 
         let local_item = ItemMeta {
@@ -309,6 +314,7 @@ mod tests {
             created: None,
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(200)),
             locked: false,
+            attribute_hashes: None,
         };
 
         let config = DedupConfig {

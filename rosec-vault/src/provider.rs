@@ -11,7 +11,7 @@ use rosec_core::{
 };
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -49,8 +49,47 @@ fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+fn metadata_path_for(vault_path: &Path) -> PathBuf {
+    let mut name = vault_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".meta");
+    let mut p = vault_path.to_path_buf();
+    p.set_file_name(name);
+    p
+}
+
+fn load_metadata_sidecar(path: &Path) -> Option<Vec<MetaItem>> {
+    let content = match std::fs::read(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "metadata sidecar read failed");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<MetaSidecar>(&content) {
+        Ok(s) if s.version == META_SIDECAR_VERSION => Some(s.items),
+        Ok(s) => {
+            warn!(
+                path = %path.display(),
+                found = s.version, expected = META_SIDECAR_VERSION,
+                "metadata sidecar version mismatch — ignoring",
+            );
+            None
+        }
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "metadata sidecar corrupt — ignoring");
+            None
+        }
+    }
+}
+
 use crate::crypto;
-use crate::types::{VaultData, VaultFile, VaultItemData, WrappingEntry};
+use crate::types::{
+    META_SIDECAR_VERSION, MetaItem, MetaSidecar, VaultData, VaultFile, VaultItemData, WrappingEntry,
+};
 
 struct UnlockedState {
     /// The random vault key used to encrypt/decrypt vault data.
@@ -69,15 +108,41 @@ pub struct LocalVault {
     path: PathBuf,
     state: RwLock<Option<UnlockedState>>,
     callbacks: std::sync::RwLock<ProviderCallbacks>,
+    /// Sidecar metadata, loaded at construction; refreshed after each save
+    /// (and after unlock if it was missing).  Lets `list_items` answer
+    /// while the vault is locked.
+    metadata_cache: std::sync::RwLock<Option<Vec<MetaItem>>>,
 }
 
 impl LocalVault {
     pub fn new(id: impl Into<String>, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let metadata = load_metadata_sidecar(&metadata_path_for(&path));
         Self {
             id: id.into(),
-            path: path.as_ref().to_path_buf(),
+            path,
             state: RwLock::new(None),
             callbacks: std::sync::RwLock::new(ProviderCallbacks::default()),
+            metadata_cache: std::sync::RwLock::new(metadata),
+        }
+    }
+
+    fn metadata_path(&self) -> PathBuf {
+        metadata_path_for(&self.path)
+    }
+
+    fn write_sidecar(&self, items: &[VaultItemData]) {
+        let sidecar = MetaSidecar::from_items(items);
+        let meta_path = self.metadata_path();
+        match serde_json::to_vec(&sidecar) {
+            Ok(bytes) => {
+                if let Err(e) = write_secret_file(&meta_path, &bytes) {
+                    warn!(path = %meta_path.display(), error = %e, "metadata sidecar write failed");
+                } else if let Ok(mut cache) = self.metadata_cache.write() {
+                    *cache = Some(sidecar.items);
+                }
+            }
+            Err(e) => warn!(error = %e, "metadata sidecar serialize failed"),
         }
     }
 
@@ -205,6 +270,10 @@ impl LocalVault {
         write_secret_file(&self.path, content.as_bytes())
             .map_err(|e| ProviderError::Other(e.into()))?;
 
+        // Vault-first ordering: a crash here leaves the sidecar stale, not
+        // ghost-pathed.  Sidecar errors are warn-logged, not fatal.
+        self.write_sidecar(&state.data.items);
+
         state.dirty = false;
         debug!(path = %self.path.display(), "saved vault");
         Ok(())
@@ -213,6 +282,31 @@ impl LocalVault {
     /// On-disk path of this vault file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn meta_item_to_locked_meta(&self, item: MetaItem, provider_id: &str) -> ItemMeta {
+        let mut attributes: Attributes = item
+            .attribute_hashes
+            .keys()
+            .map(|k| (k.clone(), String::new()))
+            .collect();
+        if item.secret_names.iter().any(|n| n == "totp") {
+            attributes.insert(rosec_core::ATTR_TOTP.to_string(), "true".to_string());
+        }
+        ItemMeta {
+            id: item.id,
+            provider_id: provider_id.to_string(),
+            label: item.label,
+            attributes,
+            created: Some(
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(item.created as u64),
+            ),
+            modified: Some(
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(item.modified as u64),
+            ),
+            locked: true,
+            attribute_hashes: Some(item.attribute_hashes),
+        }
     }
 
     fn item_to_meta(&self, item: &VaultItemData, provider_id: &str) -> ItemMeta {
@@ -232,6 +326,7 @@ impl LocalVault {
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(item.modified as u64),
             ),
             locked: false,
+            attribute_hashes: None,
         }
     }
 }
@@ -352,6 +447,7 @@ impl Provider for LocalVault {
             Capability::KeyWrapping,
             Capability::PasswordChange,
             Capability::Totp,
+            Capability::MetadataCache,
         ]
     }
 
@@ -423,6 +519,18 @@ impl Provider for LocalVault {
 
         let mac_key =
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
+
+        // Populate sidecar on first unlock if it wasn't already loaded.
+        // Closes the cold-start gap where SearchItems would return empty
+        // until the first item write.
+        let needs_sidecar = self
+            .metadata_cache
+            .read()
+            .map(|c| c.is_none())
+            .unwrap_or(true);
+        if needs_sidecar {
+            self.write_sidecar(&data.items);
+        }
 
         *guard = Some(UnlockedState {
             vault_key,
@@ -516,16 +624,26 @@ impl Provider for LocalVault {
 
     async fn list_items(&self) -> Result<Vec<ItemMeta>, ProviderError> {
         let guard = self.state.read().await;
-        let state = guard.as_ref().ok_or(ProviderError::Locked)?;
+        if let Some(state) = guard.as_ref() {
+            return Ok(state
+                .data
+                .items
+                .iter()
+                .map(|item| self.item_to_meta(item, &self.id))
+                .collect());
+        }
+        drop(guard);
 
-        let items: Vec<ItemMeta> = state
-            .data
-            .items
-            .iter()
-            .map(|item| self.item_to_meta(item, &self.id))
-            .collect();
-
-        Ok(items)
+        let cached = self
+            .metadata_cache
+            .read()
+            .ok()
+            .and_then(|c| c.clone())
+            .ok_or(ProviderError::Locked)?;
+        Ok(cached
+            .into_iter()
+            .map(|m| self.meta_item_to_locked_meta(m, &self.id))
+            .collect())
     }
 
     async fn search(&self, attrs: &Attributes) -> Result<Vec<ItemMeta>, ProviderError> {
@@ -1600,5 +1718,149 @@ mod tests {
             )))
             .await;
         assert!(result.is_err());
+    }
+
+    async fn unlocked_with_signal_item() -> (LocalVault, NamedTempFile) {
+        let (provider, temp) = create_test_provider();
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new("pw".into())))
+            .await
+            .unwrap();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "password".to_string(),
+            SecretBytes::new(b"hunter2".to_vec()),
+        );
+        let mut attributes = HashMap::new();
+        attributes.insert("application".to_string(), "Signal".to_string());
+        attributes.insert(
+            "xdg:schema".to_string(),
+            "chrome_libsecret_os_crypt_password_v2".to_string(),
+        );
+        provider
+            .create_item(
+                NewItem {
+                    label: "Chromium Safe Storage".to_string(),
+                    item_type: Some(ItemType::Login),
+                    attributes,
+                    secrets,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        (provider, temp)
+    }
+
+    #[tokio::test]
+    async fn metadata_cache_capability_declared() {
+        let (provider, _temp) = create_test_provider();
+        assert!(provider.capabilities().contains(&Capability::MetadataCache));
+    }
+
+    #[tokio::test]
+    async fn sidecar_written_on_save_no_plaintext_values() {
+        let (provider, _temp) = unlocked_with_signal_item().await;
+        let meta_path = provider.metadata_path();
+        assert!(meta_path.exists());
+        let bytes = std::fs::read(&meta_path).unwrap();
+        let txt = String::from_utf8_lossy(&bytes);
+        assert!(
+            !txt.contains("\"Signal\""),
+            "plaintext attribute value leaked into sidecar: {txt}"
+        );
+        assert!(
+            !txt.contains("chrome_libsecret_os_crypt_password_v2"),
+            "plaintext xdg:schema value leaked into sidecar: {txt}",
+        );
+        let sidecar: MetaSidecar = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(sidecar.version, META_SIDECAR_VERSION);
+        assert_eq!(sidecar.items.len(), 1);
+        let item = &sidecar.items[0];
+        assert_eq!(item.label, "Chromium Safe Storage");
+        assert!(item.attribute_hashes.contains_key("application"));
+        assert!(item.attribute_hashes.contains_key("xdg:schema"));
+        // values are HMAC hex (64 chars)
+        assert_eq!(item.attribute_hashes["application"].len(), 64);
+    }
+
+    #[tokio::test]
+    async fn locked_search_via_sidecar_matches_signal_query() {
+        let (first, _temp) = unlocked_with_signal_item().await;
+        let path = first.path().to_path_buf();
+        drop(first);
+
+        let provider = LocalVault::new("test", &path);
+        let items = provider.list_items().await.unwrap();
+        assert_eq!(items.len(), 1, "sidecar should surface the one item");
+        let meta = &items[0];
+        assert!(meta.locked, "items from sidecar must be locked");
+        assert!(
+            meta.attribute_hashes.is_some(),
+            "items from sidecar must carry hashes"
+        );
+        // plaintext attributes are blanked
+        assert_eq!(meta.attributes.get("application"), Some(&String::new()));
+        // hash-based query match works
+        let mut query = HashMap::new();
+        query.insert("application".to_string(), "Signal".to_string());
+        assert!(rosec_core::meta_matches_query(meta, &query));
+        // wrong value does NOT match
+        query.insert("application".to_string(), "Chrome".to_string());
+        assert!(!rosec_core::meta_matches_query(meta, &query));
+    }
+
+    #[tokio::test]
+    async fn list_items_locked_without_sidecar_returns_locked_err() {
+        let (provider, _temp) = create_test_provider();
+        let err = provider.list_items().await.unwrap_err();
+        assert!(matches!(err, ProviderError::Locked));
+    }
+
+    #[tokio::test]
+    async fn sidecar_corrupt_file_tolerated() {
+        let (first, temp) = unlocked_with_signal_item().await;
+        let path = first.path().to_path_buf();
+        let meta_path = first.metadata_path();
+        drop(first);
+        std::fs::write(&meta_path, b"not json").unwrap();
+
+        let provider = LocalVault::new("test", &path);
+        let err = provider.list_items().await.unwrap_err();
+        assert!(matches!(err, ProviderError::Locked));
+        let _ = temp;
+    }
+
+    #[tokio::test]
+    async fn sidecar_future_version_tolerated() {
+        let (first, temp) = unlocked_with_signal_item().await;
+        let path = first.path().to_path_buf();
+        let meta_path = first.metadata_path();
+        drop(first);
+        std::fs::write(&meta_path, br#"{"version": 999, "items": []}"#).unwrap();
+
+        let provider = LocalVault::new("test", &path);
+        let err = provider.list_items().await.unwrap_err();
+        assert!(matches!(err, ProviderError::Locked));
+        let _ = temp;
+    }
+
+    #[tokio::test]
+    async fn unlock_populates_sidecar_when_missing() {
+        // Simulate cold-start: vault exists, sidecar deleted.
+        let (first, temp) = unlocked_with_signal_item().await;
+        let path = first.path().to_path_buf();
+        let meta_path = first.metadata_path();
+        drop(first);
+        std::fs::remove_file(&meta_path).unwrap();
+        assert!(!meta_path.exists());
+
+        let provider = LocalVault::new("test", &path);
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new("pw".into())))
+            .await
+            .unwrap();
+        assert!(meta_path.exists(), "unlock should populate missing sidecar");
+        let _ = temp;
     }
 }

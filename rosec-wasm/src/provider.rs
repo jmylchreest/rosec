@@ -1692,6 +1692,7 @@ fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> ItemMeta
             .modified_epoch_secs
             .map(|s| UNIX_EPOCH + Duration::from_secs(s)),
         locked: false,
+        attribute_hashes: None,
     }
 }
 

@@ -4521,6 +4521,7 @@ dependencies = [
  "cbc",
  "chrono",
  "data-encoding",
+ "hkdf",
  "hmac",
  "landlock",
  "libc",

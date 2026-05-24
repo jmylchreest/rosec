@@ -118,6 +118,9 @@ pub enum Capability {
     /// Provider stores TOTP seeds and supports code generation
     /// (items may expose `"totp"` as a secret attribute).
     Totp,
+    /// Provider can return [`ItemMeta`] while locked, carrying
+    /// `attribute_hashes` (HMAC fingerprints) in place of plaintext values.
+    MetadataCache,
 }
 
 /// Check that `provider` declares `cap`; return `ProviderError::NotSupported` if not.
@@ -309,6 +312,10 @@ pub struct ItemMeta {
     pub created: Option<SystemTime>,
     pub modified: Option<SystemTime>,
     pub locked: bool,
+    /// HMAC fingerprints of attribute values when the item was surfaced
+    /// without unlocking (see [`Capability::MetadataCache`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute_hashes: Option<HashMap<String, String>>,
 }
 
 impl ItemMeta {
@@ -334,8 +341,53 @@ impl ItemMeta {
             created: now,
             modified: now,
             locked: false,
+            attribute_hashes: None,
         }
     }
+}
+
+/// HMAC-SHA256 fingerprint of an attribute value, hex-encoded.
+///
+/// Used by providers with [`Capability::MetadataCache`] to populate
+/// [`ItemMeta::attribute_hashes`] without exposing the plaintext value.
+/// The HMAC key is derived once from the per-machine seed
+/// ([`machine_key::load_or_create`]) so fingerprints are stable across
+/// rosecd runs on the same machine but not portable across machines.
+///
+/// Returns `None` if the machine key is unavailable (the caller should
+/// fall back to skipping the entry rather than emitting plaintext).
+pub fn sidecar_attribute_hash(value: &str) -> Option<String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mk = machine_key::load_or_create().ok()?;
+    let hk = hkdf::Hkdf::<Sha256>::new(None, &mk);
+    let mut hash_key = [0u8; 32];
+    hk.expand(b"rosec-sidecar-attribute-hash-v1", &mut hash_key)
+        .ok()?;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(&hash_key).ok()?;
+    mac.update(value.as_bytes());
+    let bytes = mac.finalize().into_bytes();
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// Match a query against an item's metadata, dispatching between plaintext
+/// equality (for normal items) and HMAC-fingerprint equality (for items
+/// surfaced via [`Capability::MetadataCache`] while their provider is
+/// locked).
+///
+/// Returns `true` when every `(key, value)` in `query` matches the item.
+/// For hash-form items the query value is fingerprinted via
+/// [`sidecar_attribute_hash`] before comparison.
+pub fn meta_matches_query(meta: &ItemMeta, query: &Attributes) -> bool {
+    if let Some(hashes) = &meta.attribute_hashes {
+        return query.iter().all(|(k, v)| match sidecar_attribute_hash(v) {
+            Some(h) => hashes.get(k) == Some(&h),
+            None => false,
+        });
+    }
+    attributes_match(&meta.attributes, query)
 }
 
 pub struct SecretBytes(Zeroizing<Vec<u8>>);

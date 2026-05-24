@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const VAULT_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_PBKDF2_ITERATIONS: u32 = 200_000;
+pub const META_SIDECAR_VERSION: u32 = 1;
 
 /// Parameters for PBKDF2 key derivation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,5 +149,54 @@ impl VaultFile {
 
     pub fn hmac_bytes(&self) -> Vec<u8> {
         BASE64_STANDARD.decode(&self.hmac).unwrap_or_default()
+    }
+}
+
+/// Insensitive per-item entry persisted to `<vault>.meta`.
+///
+/// `attribute_hashes` carries HMAC fingerprints of attribute values (see
+/// [`rosec_core::sidecar_attribute_hash`]) so `SearchItems` can match
+/// pre-unlock without plaintext on disk.  `secret_names` lists the keys of
+/// secrets stored on the item but never the values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaItem {
+    pub id: String,
+    pub label: String,
+    pub attribute_hashes: HashMap<String, String>,
+    pub secret_names: Vec<String>,
+    pub created: i64,
+    pub modified: i64,
+}
+
+impl MetaItem {
+    pub fn from_item(item: &VaultItemData) -> Self {
+        let attribute_hashes = item
+            .attributes
+            .iter()
+            .filter_map(|(k, v)| rosec_core::sidecar_attribute_hash(v).map(|h| (k.clone(), h)))
+            .collect();
+        Self {
+            id: item.id.clone(),
+            label: item.label.clone(),
+            attribute_hashes,
+            secret_names: item.secrets.keys().cloned().collect(),
+            created: item.created,
+            modified: item.modified,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaSidecar {
+    pub version: u32,
+    pub items: Vec<MetaItem>,
+}
+
+impl MetaSidecar {
+    pub fn from_items(items: &[VaultItemData]) -> Self {
+        Self {
+            version: META_SIDECAR_VERSION,
+            items: items.iter().map(MetaItem::from_item).collect(),
+        }
     }
 }

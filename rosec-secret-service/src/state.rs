@@ -37,7 +37,7 @@ use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
     ATTR_PROVIDER, ATTR_TYPE, Attributes, AutoLockPolicy, Capability, ItemMeta, ItemType, Provider,
-    ProviderError, SecretBytes, UnlockInput, attributes_match,
+    ProviderError, SecretBytes, UnlockInput, meta_matches_query,
 };
 use tracing::{debug, info, warn};
 use zbus::Connection;
@@ -1360,7 +1360,7 @@ impl ServiceState {
         let mut locked = Vec::new();
 
         for (path, meta) in cache.iter() {
-            if !attributes_match(&meta.attributes, attrs) {
+            if !meta_matches_query(meta, attrs) {
                 continue;
             }
             if meta.locked {
@@ -1388,7 +1388,7 @@ impl ServiceState {
 
         let mut results = Vec::new();
         for (path, meta) in cache.iter() {
-            if attributes_match(&meta.attributes, attrs) {
+            if meta_matches_query(meta, attrs) {
                 results.push((path.clone(), meta.clone()));
             }
         }
@@ -1586,7 +1586,7 @@ impl ServiceState {
             let attrs: Attributes = attrs.into_iter().collect();
             Ok(entries
                 .into_iter()
-                .filter(|(_, item)| attributes_match(&item.attributes, &attrs))
+                .filter(|(_, item)| meta_matches_query(item, &attrs))
                 .collect())
         } else {
             Ok(entries)
@@ -2363,6 +2363,7 @@ mod tests {
             created: None,
             modified: None,
             locked,
+            attribute_hashes: None,
         }
     }
 

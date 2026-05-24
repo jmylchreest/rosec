@@ -452,6 +452,7 @@ mod tests {
                 created: None,
                 modified: None,
                 locked: false,
+                attribute_hashes: None,
             };
             self.items.lock().unwrap().push(meta);
 
@@ -741,6 +742,7 @@ mod tests {
             created: None,
             modified: None,
             locked: false,
+            attribute_hashes: None,
         };
 
         let mut secrets = HashMap::new();
@@ -788,6 +790,7 @@ mod tests {
             created: None,
             modified: None,
             locked: false,
+            attribute_hashes: None,
         };
 
         let mut secrets = HashMap::new();
@@ -834,6 +837,7 @@ mod tests {
             created: None,
             modified: None,
             locked: false,
+            attribute_hashes: None,
         };
         let mut secrets_hi = HashMap::new();
         secrets_hi.insert("hi-item".to_string(), secret_hi.clone());
@@ -854,6 +858,7 @@ mod tests {
             created: None,
             modified: None,
             locked: false,
+            attribute_hashes: None,
         };
         let mut secrets_lo = HashMap::new();
         secrets_lo.insert("lo-item".to_string(), secret_lo.clone());
@@ -911,6 +916,7 @@ mod tests {
             created: None,
             modified: None,
             locked: true, // item reports as locked in cache
+            attribute_hashes: None,
         };
 
         let mock = Arc::new(PasswordOnlyMock::new_locked("locked-mock", vec![item]));
@@ -934,6 +940,7 @@ mod tests {
                 created: None,
                 modified: None,
                 locked: true,
+                attribute_hashes: None,
             };
             state.seed_item_cache(
                 "/org/freedesktop/secrets/collection/default/locked_mock_locked_item",
