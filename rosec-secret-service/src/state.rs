@@ -547,6 +547,7 @@ impl ServiceState {
 
     pub(crate) fn mark_provider_unlocked(&self, provider_id: &str) {
         self.locks.mark_provider_unlocked(provider_id);
+        self.mark_provider_unlocked_in_cache(provider_id);
     }
 
     /// Clear the unlock timestamp for all providers (all locked).
@@ -1525,6 +1526,24 @@ impl ServiceState {
         }
     }
 
+    /// Flip every cached item belonging to `provider_id` to `locked = false`.
+    ///
+    /// Mirror of [`mark_provider_locked_in_cache`].  Called from
+    /// [`mark_provider_unlocked`] so the cache stops reporting items as
+    /// locked the instant their provider unlocks — otherwise `Item.GetSecret`
+    /// keeps returning `IsLocked` until the next periodic cache rebuild,
+    /// which libsecret clients (e.g. Chromium safe storage) interpret as
+    /// "secret not loadable" and react to by regenerating and overwriting.
+    pub fn mark_provider_unlocked_in_cache(&self, provider_id: &str) {
+        if let Ok(mut cache) = self.cache.items.lock() {
+            for meta in cache.values_mut() {
+                if meta.provider_id == provider_id {
+                    meta.locked = false;
+                }
+            }
+        }
+    }
+
     /// Resolve item paths or search by attributes.
     /// Dispatches to Tokio so that cache/unlock futures run on the Tokio reactor.
     pub async fn resolve_items(
@@ -2368,6 +2387,49 @@ mod tests {
         assert_eq!(locked.len(), 1);
         assert!(unlocked[0].starts_with("/org/freedesktop/secrets/collection/default/"));
         assert!(locked[0].starts_with("/org/freedesktop/secrets/collection/default/"));
+    }
+
+    /// Regression: after `auto_lock` flips cache items to `locked=true`, a
+    /// subsequent `mark_provider_unlocked` must flip them back.  Without this,
+    /// `Item.is_locked()` keeps reading stale `locked=true` from the cache
+    /// after the provider has actually unlocked, and `GetSecret` returns
+    /// `IsLocked` until the next periodic rebuild — which libsecret clients
+    /// (e.g. Chromium safe storage) interpret as "secret missing" and react
+    /// to by regenerating and overwriting.
+    #[tokio::test]
+    async fn unlock_clears_cache_locked_flags() {
+        let items = vec![meta("item-1", "one", false)];
+        let state = new_state(items).await;
+
+        // Populate the cache via the normal rebuild path.
+        state.rebuild_cache().await.expect("initial rebuild");
+        {
+            let cache = state.cache.items.lock().unwrap();
+            assert!(
+                cache.values().any(|m| m.provider_id == "mock" && !m.locked),
+                "after rebuild cache should hold the mock item as unlocked"
+            );
+        }
+
+        // Simulate auto-lock: items get flipped to locked=true in the cache.
+        state.mark_provider_locked_in_cache("mock");
+        {
+            let cache = state.cache.items.lock().unwrap();
+            assert!(
+                cache.values().all(|m| m.provider_id != "mock" || m.locked),
+                "after mark_provider_locked_in_cache all mock items must be locked"
+            );
+        }
+
+        // The fix under test: mark_provider_unlocked must flip them back.
+        state.mark_provider_unlocked("mock");
+        {
+            let cache = state.cache.items.lock().unwrap();
+            assert!(
+                cache.values().all(|m| m.provider_id != "mock" || !m.locked),
+                "after mark_provider_unlocked all mock items must be unlocked"
+            );
+        }
     }
 
     #[tokio::test]
