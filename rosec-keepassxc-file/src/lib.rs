@@ -426,10 +426,15 @@ pub fn sync(_: ()) -> FnResult<Json<SimpleResponse>> {
 
 // ── helpers for item-level functions ─────────────────────────────────────────
 
-fn with_db<R>(f: impl FnOnce(&str, &Database) -> R) -> Result<R, String> {
+fn with_db<R>(f: impl FnOnce(&str, &Database) -> R) -> Result<R, (String, ErrorKind)> {
     let guard = STATE.lock();
-    let state = guard.as_ref().ok_or("plugin not initialised")?;
-    let auth = state.auth.as_ref().ok_or("provider locked")?;
+    let state = guard
+        .as_ref()
+        .ok_or(("plugin not initialised".to_string(), ErrorKind::Unavailable))?;
+    let auth = state
+        .auth
+        .as_ref()
+        .ok_or(("provider locked".to_string(), ErrorKind::Locked))?;
     Ok(f(&state.config.provider_id, &auth.db))
 }
 
@@ -462,10 +467,10 @@ pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
             error_kind: None,
             items,
         })),
-        Err(msg) => Ok(Json(ItemListResponse {
+        Err((msg, kind)) => Ok(Json(ItemListResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             items: vec![],
         })),
     }
@@ -485,10 +490,10 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
             error_kind: None,
             items,
         })),
-        Err(msg) => Ok(Json(ItemListResponse {
+        Err((msg, kind)) => Ok(Json(ItemListResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             items: vec![],
         })),
     }
@@ -500,7 +505,7 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
 pub fn get_item_attributes(
     Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
-    let result: Result<Option<(_, _)>, String> = with_db(|provider_id, db| {
+    let result = with_db(|provider_id, db| {
         lookup_entry_by_id(db, &req.id).map(|entry| {
             (
                 cipher::build_public_attrs(provider_id, db, &entry),
@@ -524,10 +529,10 @@ pub fn get_item_attributes(
             public: Default::default(),
             secret_names: vec![],
         })),
-        Err(msg) => Ok(Json(ItemAttributesResponse {
+        Err((msg, kind)) => Ok(Json(ItemAttributesResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             public: Default::default(),
             secret_names: vec![],
         })),
@@ -536,7 +541,7 @@ pub fn get_item_attributes(
 
 #[plugin_fn]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
-    let bytes_result: Result<Option<Zeroizing<Vec<u8>>>, String> = with_db(|_, db| {
+    let bytes_result = with_db(|_, db| {
         lookup_entry_by_id(db, &req.id).and_then(|e| cipher::resolve_secret(&e, &req.attr))
     });
 
@@ -566,10 +571,10 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
             error_kind: Some(ErrorKind::NotFound),
             value_b64: None,
         })),
-        Err(msg) => Ok(Json(SecretAttrResponse {
+        Err((msg, kind)) => Ok(Json(SecretAttrResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             value_b64: None,
         })),
     }
@@ -579,10 +584,10 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
 
 #[plugin_fn]
 pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
-    let result: Result<Vec<WasmSshKeyMeta>, String> = with_db(|_, db| {
+    let result = with_db(|_, db| {
         db.iter_all_entries()
             .filter_map(|e| ssh::entry_to_ssh_key_meta(db, &e))
-            .collect()
+            .collect::<Vec<_>>()
     });
     match result {
         Ok(keys) => Ok(Json(SshKeyListResponse {
@@ -591,10 +596,10 @@ pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
             error_kind: None,
             keys,
         })),
-        Err(msg) => Ok(Json(SshKeyListResponse {
+        Err((msg, kind)) => Ok(Json(SshKeyListResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             keys: Vec::new(),
         })),
     }
@@ -604,11 +609,9 @@ pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
 pub fn get_ssh_private_key(
     Json(req): Json<SshPrivateKeyRequest>,
 ) -> FnResult<Json<SshPrivateKeyResponse>> {
-    let pem_result: Result<Result<Zeroizing<String>, String>, String> = with_db(|_, db| {
-        match lookup_entry_by_id(db, &req.item_id) {
-            Some(entry) => ssh::resolve_ssh_private_key(&entry),
-            None => Err(format!("item not found: {}", req.item_id)),
-        }
+    let pem_result = with_db(|_, db| match lookup_entry_by_id(db, &req.item_id) {
+        Some(entry) => ssh::resolve_ssh_private_key(&entry),
+        None => Err(format!("item not found: {}", req.item_id)),
     });
 
     match pem_result {
@@ -633,10 +636,10 @@ pub fn get_ssh_private_key(
             error_kind: Some(ErrorKind::NotFound),
             pem: None,
         })),
-        Err(msg) => Ok(Json(SshPrivateKeyResponse {
+        Err((msg, kind)) => Ok(Json(SshPrivateKeyResponse {
             ok: false,
             error: Some(msg),
-            error_kind: Some(ErrorKind::Unavailable),
+            error_kind: Some(kind),
             pem: None,
         })),
     }
