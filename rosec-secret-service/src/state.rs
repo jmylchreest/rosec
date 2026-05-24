@@ -61,6 +61,23 @@ use crate::session::SessionManager;
 // `ServiceState` that need cross-cutting access (prompt deregistration uses
 // `conn`, hotreload_remove_provider purges `cache`) stay here as orchestration
 // wrappers; the sub-structs only own data.
+/// Per-provider failure tracking for circuit-breaker quarantine.
+///
+/// A provider with `failures >= QUARANTINE_THRESHOLD` is considered
+/// unhealthy and `quarantine_until` is set into the future.  While
+/// quarantined, the cache rebuild skips it without calling `list_items`.
+/// Any success resets the counter and clears the quarantine.
+#[derive(Debug, Default)]
+struct ProviderHealth {
+    failures: u32,
+    quarantine_until: Option<std::time::Instant>,
+}
+
+/// Consecutive `list_items` errors needed to trigger a quarantine.
+const QUARANTINE_THRESHOLD: u32 = 3;
+/// Cap for the exponential backoff window (10 minutes).
+const QUARANTINE_MAX_SECS: u64 = 600;
+
 pub struct ServiceState {
     /// Registered providers, ordering, and per-provider config (return-attr
     /// patterns and optional collection label).  See [`ProviderRegistry`].
@@ -70,6 +87,8 @@ pub struct ServiceState {
     /// Item registry (mounted items, registered D-Bus paths, last-sync
     /// timestamp, persistent metadata cache).  See [`ItemCache`].
     pub cache: ItemCache,
+    /// Per-provider health for circuit-breaker quarantine.
+    provider_health: std::sync::Mutex<HashMap<String, ProviderHealth>>,
     /// The active D-Bus connection.  Behind `RwLock` so it can be swapped
     /// from a private bus to the session bus during live migration.
     conn: RwLock<Connection>,
@@ -165,6 +184,7 @@ impl ServiceState {
             router,
             sessions,
             cache: ItemCache::new(),
+            provider_health: std::sync::Mutex::new(HashMap::new()),
             conn: RwLock::new(conn),
             locks: LockPolicy::new(),
             tokio_handle,
@@ -1526,6 +1546,52 @@ impl ServiceState {
         }
     }
 
+    /// Returns true if the provider is currently within its quarantine window.
+    pub fn is_provider_quarantined(&self, provider_id: &str) -> bool {
+        let Ok(map) = self.provider_health.lock() else {
+            return false;
+        };
+        match map.get(provider_id).and_then(|h| h.quarantine_until) {
+            Some(until) => std::time::Instant::now() < until,
+            None => false,
+        }
+    }
+
+    /// Reset failure count and clear any quarantine for the given provider.
+    pub fn record_provider_success(&self, provider_id: &str) {
+        if let Ok(mut map) = self.provider_health.lock()
+            && let Some(h) = map.get_mut(provider_id)
+            && (h.failures > 0 || h.quarantine_until.is_some())
+        {
+            h.failures = 0;
+            h.quarantine_until = None;
+            debug!(provider = %provider_id, "circuit-breaker: provider healthy again");
+        }
+    }
+
+    /// Increment failure count for the provider.  Once the count reaches
+    /// [`QUARANTINE_THRESHOLD`], set a quarantine window with exponential
+    /// backoff capped at [`QUARANTINE_MAX_SECS`].
+    pub fn record_provider_failure(&self, provider_id: &str) {
+        let Ok(mut map) = self.provider_health.lock() else {
+            return;
+        };
+        let h = map.entry(provider_id.to_string()).or_default();
+        h.failures = h.failures.saturating_add(1);
+        if h.failures >= QUARANTINE_THRESHOLD {
+            let shift = (h.failures - QUARANTINE_THRESHOLD).min(5);
+            let secs = (30u64 << shift).min(QUARANTINE_MAX_SECS);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            h.quarantine_until = Some(until);
+            warn!(
+                provider = %provider_id,
+                failures = h.failures,
+                quarantine_secs = secs,
+                "circuit-breaker: provider quarantined",
+            );
+        }
+    }
+
     /// Flip every cached item belonging to `provider_id` to `locked = false`.
     ///
     /// Mirror of [`mark_provider_locked_in_cache`].  Called from
@@ -1795,12 +1861,27 @@ impl ServiceState {
         let mut provider_ids: Vec<String> = Vec::new();
         for provider in self.providers_ordered() {
             let bid = provider.id().to_string();
+            // Honour the circuit breaker: a provider with repeated failures
+            // is skipped until its quarantine window elapses, sparing the
+            // rebuild loop from spamming the same dead plugin.
+            if self.is_provider_quarantined(&bid) {
+                debug!(provider = %bid, "skipping quarantined provider during cache fetch");
+                provider_ids.push(bid);
+                continue;
+            }
             let result = self
                 .run_on_tokio(async move { provider.list_items().await })
                 .await?;
             let fetched = match result {
-                Ok(items) => items,
+                Ok(items) => {
+                    self.record_provider_success(&bid);
+                    items
+                }
                 Err(ProviderError::Locked) => {
+                    // Locked is a normal state, not a fault — reset the
+                    // health counter so a previously-failing provider that
+                    // is now just locked doesn't stay quarantined.
+                    self.record_provider_success(&bid);
                     debug!(provider = %bid, "skipping locked provider during cache fetch");
                     provider_ids.push(bid);
                     continue;
@@ -1813,6 +1894,7 @@ impl ServiceState {
                 // regenerating their own keys.
                 Err(e) => {
                     warn!(provider = %bid, error = %e, "provider failed during cache fetch — skipping");
+                    self.record_provider_failure(&bid);
                     provider_ids.push(bid);
                     continue;
                 }
@@ -2396,6 +2478,40 @@ mod tests {
         assert_eq!(locked.len(), 1);
         assert!(unlocked[0].starts_with("/org/freedesktop/secrets/collection/default/"));
         assert!(locked[0].starts_with("/org/freedesktop/secrets/collection/default/"));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_quarantines_after_threshold_failures() {
+        let state = new_state(vec![]).await;
+        // Below threshold: never quarantined.
+        for _ in 0..(QUARANTINE_THRESHOLD - 1) {
+            state.record_provider_failure("mock");
+            assert!(!state.is_provider_quarantined("mock"));
+        }
+        // Hitting the threshold puts the provider in quarantine.
+        state.record_provider_failure("mock");
+        assert!(state.is_provider_quarantined("mock"));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_success_clears_quarantine() {
+        let state = new_state(vec![]).await;
+        for _ in 0..QUARANTINE_THRESHOLD {
+            state.record_provider_failure("mock");
+        }
+        assert!(state.is_provider_quarantined("mock"));
+        state.record_provider_success("mock");
+        assert!(!state.is_provider_quarantined("mock"));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_isolates_providers() {
+        let state = new_state(vec![]).await;
+        for _ in 0..QUARANTINE_THRESHOLD {
+            state.record_provider_failure("misbehaving");
+        }
+        assert!(state.is_provider_quarantined("misbehaving"));
+        assert!(!state.is_provider_quarantined("healthy"));
     }
 
     /// Regression: after `auto_lock` flips cache items to `locked=true`, a
