@@ -118,11 +118,6 @@ pub enum Capability {
     /// Provider stores TOTP seeds and supports code generation
     /// (items may expose `"totp"` as a secret attribute).
     Totp,
-    /// Provider returns insensitive [`ItemMeta`] from [`Provider::list_items`]
-    /// even while locked (paths, labels, attributes, secret names — never
-    /// secret values), so `SearchItems` can populate the spec's `locked`
-    /// partition before first unlock.
-    MetadataCache,
 }
 
 /// Check that `provider` declares `cap`; return `ProviderError::NotSupported` if not.

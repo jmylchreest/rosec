@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 pub const VAULT_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_PBKDF2_ITERATIONS: u32 = 200_000;
-pub const META_SIDECAR_VERSION: u32 = 1;
 
 /// Parameters for PBKDF2 key derivation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,46 +148,5 @@ impl VaultFile {
 
     pub fn hmac_bytes(&self) -> Vec<u8> {
         BASE64_STANDARD.decode(&self.hmac).unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetaItem {
-    pub id: String,
-    pub label: String,
-    pub attributes: HashMap<String, String>,
-    pub secret_names: Vec<String>,
-    pub created: i64,
-    pub modified: i64,
-}
-
-impl MetaItem {
-    pub fn from_item(item: &VaultItemData) -> Self {
-        Self {
-            id: item.id.clone(),
-            label: item.label.clone(),
-            attributes: item.attributes.clone(),
-            secret_names: item.secrets.keys().cloned().collect(),
-            created: item.created,
-            modified: item.modified,
-        }
-    }
-}
-
-/// Insensitive metadata sidecar written next to the encrypted vault so a
-/// locked vault can still answer `list_items()` with paths/labels/attributes.
-/// Lenient on parse: unknown version or corrupt content → ignored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetaSidecar {
-    pub version: u32,
-    pub items: Vec<MetaItem>,
-}
-
-impl MetaSidecar {
-    pub fn from_items(items: &[VaultItemData]) -> Self {
-        Self {
-            version: META_SIDECAR_VERSION,
-            items: items.iter().map(MetaItem::from_item).collect(),
-        }
     }
 }
