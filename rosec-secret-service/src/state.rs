@@ -1801,13 +1801,21 @@ impl ServiceState {
             let fetched = match result {
                 Ok(items) => items,
                 Err(ProviderError::Locked) => {
-                    // Provider is locked — skip it so the remaining providers
-                    // still populate the cache.  The user must unlock it first.
                     debug!(provider = %bid, "skipping locked provider during cache fetch");
                     provider_ids.push(bid);
                     continue;
                 }
-                Err(e) => return Err(map_provider_error(e)),
+                // Any other per-provider failure (e.g. wasm guest returning
+                // Unavailable when its backing file is missing/locked) must
+                // not kill the whole rebuild — otherwise one misbehaving
+                // provider blocks every other provider's items from reaching
+                // the cache, and clients see empty SearchItems and react by
+                // regenerating their own keys.
+                Err(e) => {
+                    warn!(provider = %bid, error = %e, "provider failed during cache fetch — skipping");
+                    provider_ids.push(bid);
+                    continue;
+                }
             };
             // Tag each item with its provider_id and optional collection label.
             let collection_label = self.registry.collection_label(&bid);
