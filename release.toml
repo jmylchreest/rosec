@@ -41,6 +41,16 @@ pre-release-replacements = [
   { file = "../rosec-bitwarden-sm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
   { file = "../rosec-gnome-keyring/Cargo.toml",  search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
   { file = "../rosec-keepassxc-file/Cargo.toml", search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+
+  # Each excluded WASM crate has its own Cargo.lock; the self-crate entry's
+  # `version = "…"` must stay in lockstep with Cargo.toml or `cargo --locked`
+  # rejects the manifest as out of date. cargo-release doesn't refresh
+  # lockfiles for excluded crates, so we sync them here too via a multi-line
+  # regex anchored to the package name.
+  { file = "../rosec-bitwarden-pm/Cargo.lock",   search = 'name = "rosec-bitwarden-pm"\nversion = "[^"]+"',   replace = 'name = "rosec-bitwarden-pm"\nversion = "{{version}}"',   min = 1, max = 1, prerelease = true },
+  { file = "../rosec-bitwarden-sm/Cargo.lock",   search = 'name = "rosec-bitwarden-sm"\nversion = "[^"]+"',   replace = 'name = "rosec-bitwarden-sm"\nversion = "{{version}}"',   min = 1, max = 1, prerelease = true },
+  { file = "../rosec-gnome-keyring/Cargo.lock",  search = 'name = "rosec-gnome-keyring"\nversion = "[^"]+"',  replace = 'name = "rosec-gnome-keyring"\nversion = "{{version}}"',  min = 1, max = 1, prerelease = true },
+  { file = "../rosec-keepassxc-file/Cargo.lock", search = 'name = "rosec-keepassxc-file"\nversion = "[^"]+"', replace = 'name = "rosec-keepassxc-file"\nversion = "{{version}}"', min = 1, max = 1, prerelease = true },
 ]
 
 # Do not publish any crates to crates.io
