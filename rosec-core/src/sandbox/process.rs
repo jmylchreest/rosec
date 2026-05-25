@@ -71,6 +71,24 @@ pub fn harden_setuid_capable() {
 #[cfg(not(unix))]
 pub fn harden_setuid_capable() {}
 
+/// Subset of [`harden`] for short-lived helpers that need to spawn I/O threads
+/// under inherited (typically tight) `RLIMIT_MEMLOCK`.
+///
+/// Skips `mlockall(MCL_FUTURE)` because it makes every subsequent `mmap` count
+/// against the locked-memory budget; at PAM context that budget is the user
+/// default (8 MB), which a single `pthread_create` (8 MB stack) blows past.
+/// `blocking::Executor::grow_pool` retries `pthread_create` indefinitely on
+/// `EAGAIN`, producing a silent 100% CPU spin. Used by `rosec-pam-unlock`,
+/// where the password lives in memory for milliseconds before reaching rosecd.
+#[cfg(unix)]
+pub fn harden_no_memlock() {
+    set_no_new_privs();
+    set_not_dumpable();
+}
+
+#[cfg(not(unix))]
+pub fn harden_no_memlock() {}
+
 #[cfg(unix)]
 fn set_no_new_privs() {
     // SAFETY: prctl(PR_SET_NO_NEW_PRIVS) takes a single flag argument and
