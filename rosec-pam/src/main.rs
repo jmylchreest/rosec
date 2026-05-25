@@ -100,7 +100,9 @@ enum Mode {
 
 fn main() -> ! {
     // Apply process hardening before stdin is read or D-Bus is touched.
-    rosec_core::sandbox::harden();
+    // Skips mlockall: incompatible with zbus's pthread_create-based spawn_blocking
+    // under inherited PAM-context RLIMIT_MEMLOCK. See harden_no_memlock docs.
+    rosec_core::sandbox::harden_no_memlock();
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         eprintln!(
@@ -364,8 +366,61 @@ async fn pam_connect() -> Result<zbus::Connection> {
     bail!("no connection to rosecd available (session bus failed, no private bus socket)");
 }
 
-async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
+// 10s budget covering pam_rosec firing inside greetd's PAM stack before
+// rosecd.service has finished starting under the user systemd manager.
+const CONNECT_RETRY_DELAYS_MS: &[u64] = &[
+    250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
+    250, 1000, 1000, 1000, 1000, 1000,
+];
+
+async fn connect_and_wait_for_daemon() -> Result<zbus::Connection> {
+    let mut attempt: usize = 0;
+    loop {
+        attempt += 1;
+        match probe_once().await {
+            Ok(conn) => {
+                if attempt > 1 {
+                    debug_log(&format!("rosecd reachable on attempt {attempt}"));
+                }
+                return Ok(conn);
+            }
+            Err(e) => {
+                let idx = attempt - 1;
+                if idx >= CONNECT_RETRY_DELAYS_MS.len() {
+                    return Err(e.context(format!(
+                        "rosecd not reachable after {attempt} attempts ({}ms budget)",
+                        CONNECT_RETRY_DELAYS_MS.iter().sum::<u64>()
+                    )));
+                }
+                let delay = CONNECT_RETRY_DELAYS_MS[idx];
+                debug_log(&format!(
+                    "attempt {attempt} failed ({e:#}); sleeping {delay}ms"
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
+
+async fn probe_once() -> Result<zbus::Connection> {
     let conn = pam_connect().await?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.secrets",
+        "/org/rosec/Daemon",
+        "org.rosec.Daemon",
+    )
+    .await
+    .context("create org.rosec.Daemon proxy")?;
+    let _: Vec<ProviderEntry> = proxy
+        .call("ProviderList", &())
+        .await
+        .context("ProviderList probe")?;
+    Ok(conn)
+}
+
+async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
+    let conn = connect_and_wait_for_daemon().await?;
 
     let proxy = zbus::Proxy::new(
         &conn,
