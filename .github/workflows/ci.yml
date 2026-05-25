@@ -112,6 +112,49 @@ jobs:
         working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Read declared MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Declared workspace rust-version: ${version}"
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          targets: wasm32-wasip1
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.version }}
+
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Check WASM crates on MSRV
+        run: |
+          for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+            echo "::group::${crate}"
+            (cd "${crate}" && cargo check --locked --target wasm32-wasip1)
+            echo "::endgroup::"
+          done
+
   docs:
     name: Docusaurus
     runs-on: ubuntu-latest

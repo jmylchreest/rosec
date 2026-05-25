@@ -5,7 +5,7 @@ name = "rosec-keepassxc-file"
 # rosec-core ABI of the release they ship with.
 version = "0.0.28"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 description = "KeePassXC .kdbx file provider as an Extism WASM guest plugin for rosec"
 
