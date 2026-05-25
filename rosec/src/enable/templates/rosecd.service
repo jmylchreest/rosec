@@ -3,8 +3,9 @@ Description=rosec - multi-provider Secret Service daemon
 Documentation=https://github.com/jmylchreest/rosec
 After=dbus.service
 Requires=dbus.service
-After=graphical-session.target
-PartOf=graphical-session.target
+
+# Not ordered after graphical-session.target: pam_rosec's PAM-session helper
+# fires before the compositor is up, and logind autolock runs on the system bus.
 
 [Service]
 Type=dbus
@@ -45,5 +46,5 @@ PrivateNetwork=no
 Environment=RUST_LOG=info
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target
 Also=rosecd.socket
