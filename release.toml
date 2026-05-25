@@ -31,11 +31,16 @@ shared-version = true
 # crate's manifest drifts from this format. `prerelease = true` ensures these
 # also run for pre-release versions (cargo-release defaults this to false for
 # replacements, which would skip dev/alpha bumps).
+#
+# Paths are prefixed with `../` because cargo-release resolves them relative
+# to each released package's Cargo.toml (not the workspace root). Every
+# workspace member sits at depth 1, so `..` always resolves to the workspace
+# root regardless of which member cargo-release is processing.
 pre-release-replacements = [
-  { file = "rosec-bitwarden-pm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "rosec-bitwarden-sm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "rosec-gnome-keyring/Cargo.toml",  search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "rosec-keepassxc-file/Cargo.toml", search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "../rosec-bitwarden-pm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "../rosec-bitwarden-sm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "../rosec-gnome-keyring/Cargo.toml",  search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
+  { file = "../rosec-keepassxc-file/Cargo.toml", search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
 ]
 
 # Do not publish any crates to crates.io
