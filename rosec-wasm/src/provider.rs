@@ -1727,18 +1727,23 @@ fn validate_wasm_item_meta(w: &crate::protocol::WasmItemMeta) -> Result<(), Stri
                 "attribute {k:?} value exceeds {MAX_ATTR_VALUE_LEN}B"
             ));
         }
-        if rosec_core::RESERVED_ATTRIBUTES.contains(&k.as_str()) {
-            return Err(format!("attribute key {k:?} is reserved"));
-        }
     }
     Ok(())
 }
 
-fn to_item_meta(w: crate::protocol::WasmItemMeta, provider_id: &str) -> Option<ItemMeta> {
+fn to_item_meta(mut w: crate::protocol::WasmItemMeta, provider_id: &str) -> Option<ItemMeta> {
     if let Err(reason) = validate_wasm_item_meta(&w) {
         warn!(provider = %provider_id, item_id = %w.id, reason, "dropping invalid item from guest");
         return None;
     }
+    // Overwrite rosec:provider with the registered provider_id so a guest
+    // cannot impersonate another provider in the cache. Other reserved
+    // attributes (rosec:type, rosec:totp) are guest-stampable by design —
+    // e.g. rosec-gnome-keyring stamps rosec:type from the keyring's item_type.
+    w.attributes.insert(
+        rosec_core::ATTR_PROVIDER.to_string(),
+        provider_id.to_owned(),
+    );
     Some(ItemMeta {
         id: w.id,
         provider_id: provider_id.to_owned(),
@@ -2141,10 +2146,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_reserved_attribute_keys() {
-        let m = meta_with("ok", "ok", vec![("rosec:provider", "evil")]);
-        let err = validate_wasm_item_meta(&m).unwrap_err();
-        assert!(err.contains("reserved"), "got: {err}");
+    fn to_item_meta_overwrites_guest_supplied_provider_attr() {
+        // Guests legitimately stamp `rosec:type` and similar reserved attrs
+        // (e.g. rosec-gnome-keyring); only `rosec:provider` is host-authoritative,
+        // so a guest claiming a different provider_id must be silently corrected
+        // rather than rejected — otherwise the whole item is dropped and the
+        // backing keyring becomes invisible to the cache.
+        let m = meta_with(
+            "ok",
+            "ok",
+            vec![
+                ("rosec:provider", "impersonated"),
+                ("rosec:type", "generic"),
+                ("xdg:schema", "chrome_libsecret_os_crypt_password_v2"),
+            ],
+        );
+        let meta = to_item_meta(m, "real-provider").expect("item must not be dropped");
+        assert_eq!(
+            meta.attributes.get("rosec:provider").map(String::as_str),
+            Some("real-provider"),
+            "host must overwrite a guest-supplied rosec:provider"
+        );
+        assert_eq!(
+            meta.attributes.get("rosec:type").map(String::as_str),
+            Some("generic"),
+            "rosec:type stamped by the guest must be preserved"
+        );
     }
 
     #[test]
