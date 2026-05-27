@@ -20,38 +20,13 @@
 #
 # The WASM provider crates (rosec-bitwarden-pm, rosec-bitwarden-sm,
 # rosec-gnome-keyring, rosec-keepassxc-file) are excluded from the workspace
-# because they target wasm32-wasip1 and have their own Cargo.lock files.
-# They must still match the rosec-core ABI of the release they ship with, so
-# pre-release-replacements below keep their `version = "..."` in lockstep.
+# (they target wasm32-wasip1 and have their own Cargo.lock files), but must
+# still match the rosec-core ABI of the release. They're bumped in the
+# pre-release-hook below via `cargo set-version` — that updates each
+# Cargo.toml and refreshes the matching Cargo.lock self-entry atomically.
+# The hook fires after cargo-release's clean-tree check, so the resulting
+# dirt gets folded into the release commit.
 shared-version = true
-
-# Bump the version line in each excluded WASM provider Cargo.toml so they
-# stay aligned with the workspace version. `min = 1, max = 1` enforces that
-# exactly one match must be found and replaced per file — fails loudly if a
-# crate's manifest drifts from this format. `prerelease = true` ensures these
-# also run for pre-release versions (cargo-release defaults this to false for
-# replacements, which would skip dev/alpha bumps).
-#
-# Paths are prefixed with `../` because cargo-release resolves them relative
-# to each released package's Cargo.toml (not the workspace root). Every
-# workspace member sits at depth 1, so `..` always resolves to the workspace
-# root regardless of which member cargo-release is processing.
-pre-release-replacements = [
-  { file = "../rosec-bitwarden-pm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "../rosec-bitwarden-sm/Cargo.toml",   search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "../rosec-gnome-keyring/Cargo.toml",  search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-  { file = "../rosec-keepassxc-file/Cargo.toml", search = '^version = "[^"]+"$', replace = 'version = "{{version}}"', min = 1, max = 1, prerelease = true },
-
-  # Each excluded WASM crate has its own Cargo.lock; the self-crate entry's
-  # `version = "…"` must stay in lockstep with Cargo.toml or `cargo --locked`
-  # rejects the manifest as out of date. cargo-release doesn't refresh
-  # lockfiles for excluded crates, so we sync them here too via a multi-line
-  # regex anchored to the package name.
-  { file = "../rosec-bitwarden-pm/Cargo.lock",   search = 'name = "rosec-bitwarden-pm"\nversion = "[^"]+"',   replace = 'name = "rosec-bitwarden-pm"\nversion = "{{version}}"',   min = 1, max = 1, prerelease = true },
-  { file = "../rosec-bitwarden-sm/Cargo.lock",   search = 'name = "rosec-bitwarden-sm"\nversion = "[^"]+"',   replace = 'name = "rosec-bitwarden-sm"\nversion = "{{version}}"',   min = 1, max = 1, prerelease = true },
-  { file = "../rosec-gnome-keyring/Cargo.lock",  search = 'name = "rosec-gnome-keyring"\nversion = "[^"]+"',  replace = 'name = "rosec-gnome-keyring"\nversion = "{{version}}"',  min = 1, max = 1, prerelease = true },
-  { file = "../rosec-keepassxc-file/Cargo.lock", search = 'name = "rosec-keepassxc-file"\nversion = "[^"]+"', replace = 'name = "rosec-keepassxc-file"\nversion = "{{version}}"', min = 1, max = 1, prerelease = true },
-]
 
 # Do not publish any crates to crates.io
 publish = false
@@ -63,8 +38,24 @@ tag-message = "v{{version}}"
 # Commit message for the version bump commit
 pre-release-commit-message = "chore: release v{{version}}"
 
-# Run these checks before doing anything. Mirrors what GHA CI runs.
-pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
+# Runs after cargo-release's clean-tree check, once per workspace package.
+# Clippy mirrors what GHA CI runs. The WASM bump is idempotent — subsequent
+# invocations are no-ops since the target version already matches.
+# DRY_RUN is set by cargo-release for dry runs; skip WASM writes then so
+# `just release-patch` (no `push`) leaves the tree clean.
+# WORKSPACE_ROOT is set by cargo-release; the hook's CWD is the per-package
+# crate dir, so paths must be anchored there.
+pre-release-hook = ["bash", "-c", """
+set -euo pipefail
+cargo clippy -- -D warnings
+if [[ "${DRY_RUN:-false}" != "true" ]]; then
+  for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+    manifest="${WORKSPACE_ROOT}/${crate}/Cargo.toml"
+    cargo set-version --manifest-path "$manifest" "{{version}}"
+    cargo update --workspace --manifest-path "$manifest" --offline
+  done
+fi
+"""]
 
 # Sign the release commit and tag (requires gpg.format = ssh or GPG in git config).
 sign-commit = true
