@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes, attributes_match};
+use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes, meta_matches_query};
 use tracing::{debug, info};
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -73,9 +73,11 @@ impl SecretCollection {
             .lock()
             .map_err(|_| FdoError::Failed("items lock poisoned".to_string()))?;
 
+        // meta_matches_query honours HMAC-fingerprinted sidecar entries;
+        // attributes_match reads plaintext attrs which are empty pre-unlock.
         let matched: Vec<OwnedObjectPath> = items
             .iter()
-            .filter(|(_, item)| attributes_match(&item.attributes, &attributes))
+            .filter(|(_, item)| meta_matches_query(item, &attributes))
             .map(|(path, _)| to_object_path(path))
             .collect();
 

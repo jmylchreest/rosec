@@ -131,6 +131,13 @@ async fn run() -> Result<()> {
     )
     .await?;
 
+    // Populate the cache before claiming the bus name so the first
+    // SearchItems sees sidecar entries — otherwise Chromium-based clients
+    // race in, read empty, and overwrite their libsecret entries.
+    if let Err(e) = state.rebuild_cache().await {
+        tracing::warn!(error = %e, "initial cache rebuild failed");
+    }
+
     // Claim the well-known bus name so clients can discover us.
     // Use DoNotQueue so a second instance fails immediately instead of silently
     // waiting in the D-Bus name queue until the first instance exits.

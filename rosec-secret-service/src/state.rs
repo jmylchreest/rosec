@@ -1161,11 +1161,20 @@ impl ServiceState {
                 this.try_auth_provider(&provider_id, fields)
                     .await
                     .map_err(map_provider_error)?;
-                // Trigger a sync so that on_sync_succeeded callbacks (e.g. SSH
-                // key rebuild) fire immediately after the vault is unlocked,
-                // rather than waiting for the next background-timer tick.
+                // Sync fires on_sync_succeeded callbacks (e.g. SSH key rebuild)
+                // immediately after unlock. Sync-incapable providers bail with
+                // NotSupported before the cache rebuild, so rebuild directly on
+                // failure — otherwise SearchItems stays empty post-unlock and
+                // libsecret clients overwrite their entries.
                 if let Err(e) = this.try_sync_provider(&provider_id).await {
                     warn!(provider = %provider_id, "post-auth sync failed: {e}");
+                    if let Err(rebuild_err) = this.rebuild_cache_inner().await {
+                        warn!(
+                            provider = %provider_id,
+                            error = %rebuild_err,
+                            "post-auth cache rebuild failed"
+                        );
+                    }
                 }
 
                 // Opportunistically try the same password against other locked
@@ -2244,14 +2253,26 @@ fn partition_by_glob<'a>(
 
     'item: for (path, meta) in entries {
         for (key, pattern) in attrs {
-            let value = if key == "name" {
-                meta.label.as_str()
-            } else {
-                meta.attributes
-                    .get(key.as_str())
-                    .map(String::as_str)
-                    .unwrap_or("")
-            };
+            if key == "name" {
+                if !WildMatch::new(pattern).matches(meta.label.as_str()) {
+                    continue 'item;
+                }
+                continue;
+            }
+            // Sidecar entries carry only HMAC fingerprints; match on key
+            // presence and let the caller unlock and retry. Over-reports
+            // rather than under-reports — matches the spec's `locked` array.
+            if let Some(hashes) = &meta.attribute_hashes {
+                if !hashes.contains_key(key) {
+                    continue 'item;
+                }
+                continue;
+            }
+            let value = meta
+                .attributes
+                .get(key.as_str())
+                .map(String::as_str)
+                .unwrap_or("");
             if !WildMatch::new(pattern).matches(value) {
                 continue 'item;
             }
@@ -2555,6 +2576,40 @@ mod tests {
                 "after mark_provider_unlocked all mock items must be unlocked"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn auth_provider_populates_cache_when_sync_unsupported() {
+        let items = vec![
+            meta("signal-key", "Chromium Safe Storage", false),
+            meta("chrome-key", "Chrome Safe Storage", false),
+        ];
+        let state = new_state(items).await;
+
+        {
+            let cache = state.cache.items.lock().unwrap();
+            assert!(cache.is_empty());
+        }
+        let (unlocked, locked) = state
+            .search_items_partition(&HashMap::new())
+            .expect("search_items_partition");
+        assert!(unlocked.is_empty() && locked.is_empty());
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "password".to_string(),
+            Zeroizing::new("test-password".to_string()),
+        );
+        state
+            .auth_provider("mock", fields)
+            .await
+            .expect("auth_provider");
+
+        let (unlocked, locked) = state
+            .search_items_partition(&HashMap::new())
+            .expect("search_items_partition");
+        assert_eq!(unlocked.len(), 2, "unlocked={unlocked:?} locked={locked:?}");
+        assert!(locked.is_empty(), "locked={locked:?}");
     }
 
     #[tokio::test]
