@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-bitwarden-sm"
-version = "0.0.29"
+version = "0.0.30"
 dependencies = [
  "aes",
  "base64",

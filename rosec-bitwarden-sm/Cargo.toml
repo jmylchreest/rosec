@@ -3,7 +3,7 @@ name = "rosec-bitwarden-sm"
 # Kept in lockstep with the workspace version (bumped by cargo-release via
 # pre-release-replacements in ../release.toml). WASM providers must match the
 # rosec-core ABI of the release they ship with.
-version = "0.0.29"
+version = "0.0.30"
 edition = "2024"
 rust-version = "1.90"
 license = "LicenseRef-Bitwarden-SDK"
