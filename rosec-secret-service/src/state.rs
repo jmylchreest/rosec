@@ -109,6 +109,10 @@ pub struct ServiceState {
     /// The full non-provider configuration, kept live so background tasks always
     /// read the latest values rather than a snapshot taken at startup.
     live_config: Arc<RwLock<Config>>,
+    /// Optional callback fired after any item create/update/delete. Wired by
+    /// rosecd to rebuild the SSH/TOTP key stores. Must not block — it runs on
+    /// the zbus async-io executor, so it hands off to a runtime.
+    items_changed_cb: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for ServiceState {
@@ -190,6 +194,26 @@ impl ServiceState {
             tokio_handle,
             prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
+            items_changed_cb: RwLock::new(None),
+        }
+    }
+
+    /// Register a callback fired after any item create/update/delete.
+    pub fn set_items_changed_callback(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut guard) = self.items_changed_cb.write() {
+            *guard = Some(cb);
+        }
+    }
+
+    /// Fire the items-changed callback if one is registered.
+    fn notify_items_changed(&self) {
+        let cb = self
+            .items_changed_cb
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        if let Some(cb) = cb {
+            cb();
         }
     }
 
@@ -1475,6 +1499,7 @@ impl ServiceState {
         }
         // 3. Register the D-Bus object so GetSecret works on the new path.
         self.register_items(&[(path.to_string(), meta)]).await?;
+        self.notify_items_changed();
         Ok(())
     }
 
@@ -1515,6 +1540,7 @@ impl ServiceState {
         {
             patch(meta);
         }
+        self.notify_items_changed();
     }
 
     /// Remove a deleted item from the cache so it disappears from
@@ -1527,6 +1553,7 @@ impl ServiceState {
         // it registered but it will fail with NotFound on GetSecret
         // because the provider no longer has the item. The next cache
         // rebuild will skip registering it again (already registered).
+        self.notify_items_changed();
     }
 
     /// Mark all items belonging to a specific provider as locked.
@@ -2610,6 +2637,46 @@ mod tests {
             .expect("search_items_partition");
         assert_eq!(unlocked.len(), 2, "unlocked={unlocked:?} locked={locked:?}");
         assert!(locked.is_empty(), "locked={locked:?}");
+    }
+
+    /// Regression for issue #23: creating, updating, or deleting an item must
+    /// fire the items-changed callback so rosecd rebuilds the SSH/TOTP key
+    /// stores immediately, rather than only on the next lock/unlock or sync.
+    #[tokio::test]
+    async fn items_changed_callback_fires_on_create_update_delete() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = new_state(vec![]).await;
+        let count = Arc::new(AtomicUsize::new(0));
+        let cb_count = Arc::clone(&count);
+        state.set_items_changed_callback(Arc::new(move || {
+            cb_count.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let path = "/org/freedesktop/secrets/collection/default/item_create".to_string();
+        state
+            .insert_created_item(&path, meta("new-item", "New", false))
+            .await
+            .expect("insert_created_item");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "create should fire the callback"
+        );
+
+        state.patch_cached_item(&path, Some("Renamed"), None, None);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "update should fire the callback"
+        );
+
+        state.remove_deleted_item(&path);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "delete should fire the callback"
+        );
     }
 
     #[tokio::test]

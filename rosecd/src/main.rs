@@ -206,6 +206,7 @@ async fn run() -> Result<()> {
     }
 
     wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
+    wire_items_changed_callback(&state, &ssh_manager, &totp_manager);
 
     // When running on a private bus, spawn a watcher that polls for the
     // session bus and migrates to it when available.
@@ -1129,6 +1130,41 @@ async fn logind_watcher(
             }
         }
     }
+}
+
+/// Rebuild the SSH and TOTP key stores on item create/update/delete.
+///
+/// Provider lifecycle callbacks only rebuild on unlock/lock/sync, so without
+/// this an item added while already unlocked stays invisible to `ssh-agent`
+/// until the next lock/unlock or sync. Wired once — the callback reads
+/// `providers_ordered()` at fire time, so it needs no re-wiring on hot-reload.
+fn wire_items_changed_callback(
+    state: &Arc<rosec_secret_service::ServiceState>,
+    ssh_manager: &Option<Arc<ssh::SshManager>>,
+    totp_manager: &Option<Arc<totp::TotpManager>>,
+) {
+    let ssh = ssh_manager.clone();
+    let totp = totp_manager.clone();
+    if ssh.is_none() && totp.is_none() {
+        return;
+    }
+    let cb_state = Arc::clone(state);
+    // The callback fires on zbus's async-io executor; hop onto Tokio to rebuild.
+    let handle = tokio::runtime::Handle::current();
+    state.set_items_changed_callback(Arc::new(move || {
+        let sm = ssh.clone();
+        let tm = totp.clone();
+        let s = Arc::clone(&cb_state);
+        handle.spawn(async move {
+            let providers = s.providers_ordered();
+            if let Some(ref sm) = sm {
+                sm.rebuild(&providers).await;
+            }
+            if let Some(ref tm) = tm {
+                tm.rebuild(&providers).await;
+            }
+        });
+    }));
 }
 
 /// Register lifecycle and nudge event callbacks on every provider.
