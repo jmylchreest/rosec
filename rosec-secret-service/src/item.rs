@@ -39,19 +39,25 @@ impl SecretItem {
         Self { state }
     }
 
-    /// Live lock state for this item.
+    /// Live metadata for this item, read from the shared `items_cache`.
     ///
-    /// Reads from the shared `items_cache` which is kept up-to-date by
-    /// `rebuild_cache_inner()`.  Falls back to the registration-time
-    /// snapshot if the item has been evicted from the cache (shouldn't
-    /// happen in practice).
-    fn is_locked(&self) -> bool {
+    /// The D-Bus object is registered once and never re-created for in-place
+    /// metadata changes, so reading `self.state.meta` would surface the stale
+    /// registration-time snapshot — empty attributes for items first
+    /// registered while the provider was locked. Falls back to the snapshot
+    /// only if the item has been evicted from the cache.
+    fn current_meta(&self) -> ItemMeta {
         self.state
             .items_cache
             .lock()
             .ok()
-            .and_then(|cache| cache.get(&self.state.path).map(|m| m.locked))
-            .unwrap_or(self.state.meta.locked)
+            .and_then(|cache| cache.get(&self.state.path).cloned())
+            .unwrap_or_else(|| self.state.meta.clone())
+    }
+
+    /// Live lock state for this item.  See [`Self::current_meta`].
+    fn is_locked(&self) -> bool {
+        self.current_meta().locked
     }
 }
 
@@ -59,12 +65,12 @@ impl SecretItem {
 impl SecretItem {
     #[zbus(property)]
     fn label(&self) -> String {
-        self.state.meta.label.clone()
+        self.current_meta().label
     }
 
     #[zbus(property)]
     fn attributes(&self) -> HashMap<String, String> {
-        self.state.meta.attributes.clone()
+        self.current_meta().attributes
     }
 
     #[zbus(property)]
@@ -75,8 +81,7 @@ impl SecretItem {
     /// Unix timestamp when the item was created (0 if unknown).
     #[zbus(property)]
     fn created(&self) -> u64 {
-        self.state
-            .meta
+        self.current_meta()
             .created
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
@@ -86,8 +91,7 @@ impl SecretItem {
     /// Unix timestamp when the item was last modified (0 if unknown).
     #[zbus(property)]
     fn modified(&self) -> u64 {
-        self.state
-            .meta
+        self.current_meta()
             .modified
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
@@ -428,5 +432,73 @@ mod tests {
             .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
             .await;
         assert!(result.is_ok());
+    }
+
+    /// Regression for issue #23: an item registered while locked must reflect
+    /// the unlocked cache's plaintext attributes, not its frozen locked-form
+    /// snapshot — otherwise an ssh-key item degrades to a generic item with no
+    /// fingerprint or public key.
+    #[tokio::test]
+    async fn attributes_reflect_cache_after_unlock() {
+        let sessions = Arc::new(SessionManager::new());
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let items_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let service_state = test_service_state(Arc::clone(&provider)).await;
+        let path = "/org/freedesktop/secrets/item/mock/sshkey".to_string();
+
+        // Registration-time snapshot: locked sidecar form — attribute keys
+        // present but values blank, label as cached while locked.
+        let mut locked_meta = meta(true);
+        locked_meta.label = "Locked Label".to_string();
+        locked_meta.attributes = Attributes::from([
+            ("rosec:type".to_string(), String::new()),
+            ("fingerprint".to_string(), String::new()),
+            ("public_key".to_string(), String::new()),
+        ]);
+        locked_meta.attribute_hashes = Some(HashMap::from([
+            ("rosec:type".to_string(), "h1".to_string()),
+            ("fingerprint".to_string(), "h2".to_string()),
+            ("public_key".to_string(), "h3".to_string()),
+        ]));
+
+        let state = ItemState {
+            meta: locked_meta,
+            path: path.clone(),
+            provider,
+            sessions: sessions.clone(),
+            return_attr_patterns: vec![],
+            tokio_handle: tokio::runtime::Handle::current(),
+            items_cache: Arc::clone(&items_cache),
+            service_state,
+        };
+        let item = SecretItem::new(state);
+
+        assert!(item.locked());
+
+        // Simulate the post-unlock cache rebuild swapping in plaintext attrs.
+        let mut unlocked_meta = meta(false);
+        unlocked_meta.label = "My SSH Key".to_string();
+        unlocked_meta.attributes = Attributes::from([
+            ("rosec:type".to_string(), "ssh-key".to_string()),
+            ("fingerprint".to_string(), "SHA256:abc123".to_string()),
+            ("public_key".to_string(), "ssh-ed25519 AAAA...".to_string()),
+        ]);
+        {
+            let mut cache = items_cache.lock().expect("test lock");
+            cache.insert(path, unlocked_meta);
+        }
+
+        assert!(!item.locked());
+        assert_eq!(item.label(), "My SSH Key");
+        let attrs = item.attributes();
+        assert_eq!(attrs.get("rosec:type").map(String::as_str), Some("ssh-key"));
+        assert_eq!(
+            attrs.get("fingerprint").map(String::as_str),
+            Some("SHA256:abc123")
+        );
+        assert_eq!(
+            attrs.get("public_key").map(String::as_str),
+            Some("ssh-ed25519 AAAA...")
+        );
     }
 }
