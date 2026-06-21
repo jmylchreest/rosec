@@ -709,16 +709,30 @@ impl Provider for LocalVault {
             stored_attributes.insert(rosec_core::ATTR_TYPE.to_string(), item_type.to_string());
         }
 
-        // Find existing items matching the *client* attributes.  Order
+        // Find existing items that the new item duplicates.  Order
         // deterministically: most recently modified first, then by id ASC for
         // a stable tiebreak across runs (HashMap iteration order is not
         // reproducible).
+        //
+        // Items carrying client attributes are matched by attribute subset
+        // (canonical Secret Service semantics).  An item with *no* client
+        // attributes can't be identified that way — an empty query subset-
+        // matches every existing item — so its label is its identity instead.
+        // That keeps attribute-less CLI items (a bare note, an API token)
+        // from colliding with unrelated entries while still detecting a
+        // genuine same-label duplicate.
         let mut matches: Vec<usize> = state
             .data
             .items
             .iter()
             .enumerate()
-            .filter(|(_, i)| attributes_match(&i.attributes, &item.attributes))
+            .filter(|(_, i)| {
+                if item.attributes.is_empty() {
+                    i.label == item.label
+                } else {
+                    attributes_match(&i.attributes, &item.attributes)
+                }
+            })
             .map(|(idx, _)| idx)
             .collect();
         matches.sort_by(|&a, &b| {
@@ -1228,6 +1242,73 @@ mod tests {
         let items = provider.list_items().await.unwrap();
         let meta = items.iter().find(|m| m.id == id1).unwrap();
         assert_eq!(meta.label, "Replaced");
+    }
+
+    /// Attribute-less items are identified by label: distinct labels must
+    /// coexist (an empty attribute set previously subset-matched every item,
+    /// so the second create failed with `AlreadyExists`).
+    #[tokio::test]
+    async fn create_item_attribute_less_distinct_labels_coexist() {
+        let (provider, _temp) = create_test_provider();
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new(
+                "password".to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let mk = |label: &str| NewItem {
+            label: label.to_string(),
+            item_type: None,
+            attributes: HashMap::new(),
+            secrets: HashMap::from([("token".to_string(), SecretBytes::new(b"s".to_vec()))]),
+        };
+
+        provider
+            .create_item(mk("GitHub token"), false)
+            .await
+            .unwrap();
+        // Different label, also attribute-less — must not collide.
+        provider
+            .create_item(mk("GitLab token"), false)
+            .await
+            .unwrap();
+
+        let items = provider.list_items().await.unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    /// Two attribute-less items with the *same* label are duplicates: the
+    /// second create conflicts, and replace=true updates in place.
+    #[tokio::test]
+    async fn create_item_attribute_less_same_label_conflicts() {
+        let (provider, _temp) = create_test_provider();
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new(
+                "password".to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let mk = |secret: &[u8]| NewItem {
+            label: "API token".to_string(),
+            item_type: None,
+            attributes: HashMap::new(),
+            secrets: HashMap::from([("token".to_string(), SecretBytes::new(secret.to_vec()))]),
+        };
+
+        let id1 = provider.create_item(mk(b"first"), false).await.unwrap();
+
+        // Same label, replace=false → conflict.
+        let conflict = provider.create_item(mk(b"second"), false).await;
+        assert!(matches!(conflict, Err(ProviderError::AlreadyExists)));
+
+        // Same label, replace=true → updates the existing item in place.
+        let id2 = provider.create_item(mk(b"second"), true).await.unwrap();
+        assert_eq!(id1, id2);
+
+        let items = provider.list_items().await.unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
