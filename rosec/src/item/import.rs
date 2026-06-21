@@ -65,7 +65,7 @@ pub async fn run(args: ItemImportArgs) -> Result<()> {
         );
     }
 
-    let item_path: String = items_proxy
+    let res: zbus::Result<String> = items_proxy
         .call(
             "CreateItemExtended",
             &(
@@ -76,7 +76,32 @@ pub async fn run(args: ItemImportArgs) -> Result<()> {
                 force, // replace if --force was passed
             ),
         )
-        .await?;
+        .await;
+
+    let item_path = match res {
+        Ok(path) => path,
+        // Turn the bare "already exists" D-Bus error into an actionable hint
+        // naming the conflicting item (import is non-interactive, so no prompt).
+        Err(e) if e.to_string().contains("already exists") => {
+            let conflicts =
+                super::find_conflicts(&conn, true, &provider_id, &parsed.label, &parsed.attributes)
+                    .await;
+            let detail = conflicts
+                .first()
+                .map(|c| format!(" (matches \"{}\" [{}])", c.label, c.display_id()))
+                .unwrap_or_default();
+            let by = if parsed.attributes.is_empty() {
+                "label"
+            } else {
+                "attributes"
+            };
+            bail!(
+                "an item with the same {by} already exists{detail}\n\
+                 pass --force to overwrite it, or change the label/attributes"
+            );
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let display_id = item_path
         .rsplit('/')
