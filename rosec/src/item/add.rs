@@ -67,48 +67,136 @@ pub async fn run(args: ItemAddArgs) -> Result<()> {
         );
     }
 
-    let template = if generate_ssh_key {
+    // `is_rosecd` returned true above, so the rosec Search extension is
+    // available for conflict detection.
+    let rosecd = true;
+
+    // Carry the editor buffer across iterations so "edit again" reopens the
+    // user's last text rather than the blank template.
+    let mut buffer = if generate_ssh_key {
         generate_ssh_key_template()?
     } else {
         generate_item_template(&item_type)
     };
 
-    let edited = open_editor(&template)?;
-    let content = match edited {
-        Some(c) => c,
-        None => {
-            println!("No changes — item not created.");
-            return Ok(());
+    loop {
+        let edited = open_editor(&buffer)?;
+        let content = match edited {
+            Some(c) => c,
+            None => {
+                println!("No changes — item not created.");
+                return Ok(());
+            }
+        };
+
+        let parsed = parse_item_toml(&content)?;
+
+        if parsed.secrets.is_empty() && parsed.attributes.is_empty() {
+            bail!("item has no attributes or secrets — nothing to store");
         }
-    };
 
-    let parsed = parse_item_toml(&content)?;
-
-    if parsed.secrets.is_empty() && parsed.attributes.is_empty() {
-        bail!("item has no attributes or secrets — nothing to store");
-    }
-
-    let item_path: String = items_proxy
-        .call(
-            "CreateItemExtended",
-            &(
-                &parsed.label,
-                &parsed.item_type,
-                &parsed.attributes,
-                &parsed.secrets,
-                false, // replace
-            ),
+        // Detect items this would duplicate before writing anything, so the
+        // user can choose what to do instead of hitting a bare "already
+        // exists" error.
+        let conflicts = super::find_conflicts(
+            &conn,
+            rosecd,
+            &provider_id,
+            &parsed.label,
+            &parsed.attributes,
         )
-        .await?;
+        .await;
 
-    let display_id = item_path
-        .rsplit('/')
-        .next()
-        .and_then(|seg| seg.rsplit('_').next())
-        .unwrap_or(&item_path);
+        let replace = if conflicts.is_empty() {
+            false
+        } else {
+            print_conflicts(&conflicts, parsed.attributes.is_empty());
+            match prompt_conflict_action()? {
+                ConflictAction::Replace => true,
+                ConflictAction::Edit => {
+                    buffer = content;
+                    continue;
+                }
+                ConflictAction::Cancel => {
+                    println!("Cancelled — item not created.");
+                    return Ok(());
+                }
+            }
+        };
 
-    println!("Created item: {} ({})", parsed.label, display_id);
-    Ok(())
+        let item_path: String = items_proxy
+            .call(
+                "CreateItemExtended",
+                &(
+                    &parsed.label,
+                    &parsed.item_type,
+                    &parsed.attributes,
+                    &parsed.secrets,
+                    replace,
+                ),
+            )
+            .await?;
+
+        let display_id = item_path
+            .rsplit('/')
+            .next()
+            .and_then(|seg| seg.rsplit('_').next())
+            .unwrap_or(&item_path);
+
+        let verb = if replace { "Updated" } else { "Created" };
+        println!("{verb} item: {} ({})", parsed.label, display_id);
+        return Ok(());
+    }
+}
+
+enum ConflictAction {
+    Replace,
+    Edit,
+    Cancel,
+}
+
+/// Print the items a pending create would duplicate.
+fn print_conflicts(conflicts: &[crate::ItemSummary], by_label: bool) {
+    let matched = if by_label {
+        "the same label"
+    } else {
+        "the same attributes"
+    };
+    eprintln!("An item with {matched} already exists:");
+    for c in conflicts {
+        if c.attrs.is_empty() || by_label {
+            eprintln!("  • {} ({})", c.label, c.display_id());
+        } else {
+            let mut keys: Vec<&String> = c
+                .attrs
+                .keys()
+                .filter(|k| !k.starts_with("rosec:") && !k.starts_with("xdg:"))
+                .collect();
+            keys.sort();
+            let attrs = keys
+                .iter()
+                .map(|k| format!("{k}={}", c.attrs[*k]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("  • {} ({})  [{attrs}]", c.label, c.display_id());
+        }
+    }
+}
+
+/// Prompt for how to resolve a create conflict.  Defaults to cancel.
+fn prompt_conflict_action() -> Result<ConflictAction> {
+    use std::io::{self, BufRead, Write};
+
+    eprint!("[r]eplace existing, [e]dit again, or [c]ancel? [r/e/C] ");
+    io::stderr().flush().ok();
+
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    match line.trim().to_lowercase().as_str() {
+        "r" | "replace" => Ok(ConflictAction::Replace),
+        "e" | "edit" => Ok(ConflictAction::Edit),
+        _ => Ok(ConflictAction::Cancel),
+    }
 }
 
 /// Generate an ed25519 SSH key pair and return a pre-populated TOML template.

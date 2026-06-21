@@ -686,7 +686,7 @@ impl ItemSummary {
     /// is ~1 in 2^64 across all items in a vault.
     ///
     /// Pass this directly to `rosec get`.
-    fn display_id(&self) -> &str {
+    pub(crate) fn display_id(&self) -> &str {
         let seg = self.path.rsplit('/').next().unwrap_or(self.path.as_str());
         seg.rsplit('_').next().unwrap_or(seg)
     }

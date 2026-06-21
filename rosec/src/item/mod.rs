@@ -138,6 +138,62 @@ pub(super) fn parse_item_toml(content: &str) -> Result<ParsedItem> {
     })
 }
 
+/// Find existing items that a new item with `label`/`attributes` in
+/// `provider_id` would duplicate, for hint/prompt display.
+///
+/// Mirrors the provider's create-time dedup: when `attributes` is non-empty,
+/// match by attribute subset; otherwise match by label (attribute-less items
+/// are identified by their label).  `provider_id` empty means "all providers"
+/// — the same default the create call uses.  Best-effort: returns an empty
+/// vec on any search error rather than failing the caller.
+pub(super) async fn find_conflicts(
+    conn: &zbus::Connection,
+    rosecd: bool,
+    provider_id: &str,
+    label: &str,
+    attributes: &HashMap<String, String>,
+) -> Vec<crate::ItemSummary> {
+    let mut query: HashMap<String, String> = HashMap::new();
+    if !provider_id.is_empty() {
+        query.insert(
+            rosec_core::ATTR_PROVIDER.to_string(),
+            provider_id.to_string(),
+        );
+    }
+    if attributes.is_empty() {
+        // `name` is matched against the item label by the search extension.
+        query.insert("name".to_string(), label.to_string());
+    } else {
+        for (k, v) in attributes {
+            query.insert(k.clone(), v.clone());
+        }
+    }
+
+    // no_unlock = true: conflict detection must not trigger an unlock prompt.
+    let (unlocked, locked) =
+        match crate::search_with_glob_fallback(conn, &query, rosecd, true).await {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+    let mut out = Vec::new();
+    for (path, is_locked) in unlocked
+        .into_iter()
+        .map(|p| (p, false))
+        .chain(locked.into_iter().map(|p| (p, true)))
+    {
+        if let Ok(summary) = crate::fetch_item_data(conn, &path, is_locked).await {
+            // The label query is a glob match server-side; keep only exact
+            // label matches so the hint mirrors the provider's dedup.
+            if attributes.is_empty() && summary.label != label {
+                continue;
+            }
+            out.push(summary);
+        }
+    }
+    out
+}
+
 /// Determine the editor command.  Checks `$VISUAL`, then `$EDITOR`, then
 /// falls back to `vi`.
 pub(super) fn editor_command() -> String {
