@@ -3,7 +3,7 @@ name = "rosec-keepassxc-file"
 # Kept in lockstep with the workspace version (bumped by cargo-release via
 # pre-release-replacements in ../release.toml). WASM providers must match the
 # rosec-core ABI of the release they ship with.
-version = "0.0.30"
+version = "0.0.31"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
