@@ -1,14 +1,25 @@
 //! TOTP FUSE manager — mounts and refreshes the TOTP virtual filesystem.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rosec_core::{Capability, Provider};
 use rosec_fuse::{TotpEntry, TotpMountHandle};
 use tracing::{debug, info, warn};
 
+/// Throttle for FUSE re-mount retries, so a permanently-unmountable
+/// environment (e.g. forced `NoNewPrivileges`) isn't hammered on every event.
+const MOUNT_RETRY_COOLDOWN: Duration = Duration::from_secs(10);
+
+struct MountState {
+    handle: Option<TotpMountHandle>,
+    last_attempt: Option<Instant>,
+}
+
 pub struct TotpManager {
-    fuse_handle: TotpMountHandle,
+    fuse: Mutex<MountState>,
+    totp_dir: PathBuf,
 }
 
 impl std::fmt::Debug for TotpManager {
@@ -33,17 +44,46 @@ impl TotpManager {
 
         let totp_dir = runtime_dir.join("rosec").join("totp");
 
-        let fuse_handle = match rosec_fuse::totp_mount(&totp_dir) {
-            Ok(h) => h,
+        Some(Self {
+            fuse: Mutex::new(MountState {
+                handle: None,
+                last_attempt: None,
+            }),
+            totp_dir,
+        })
+    }
+
+    /// Mount the FUSE filesystem if not already mounted, retrying a failed
+    /// boot-time mount (throttled by [`MOUNT_RETRY_COOLDOWN`]).  Returns
+    /// `true` if mounted.
+    fn ensure_mounted(&self) -> bool {
+        let mut state = match self.fuse.lock() {
+            Ok(g) => g,
             Err(e) => {
-                warn!("TOTP FUSE mount failed: {e:#}");
-                return None;
+                warn!("TOTP FUSE mount lock poisoned: {e}");
+                return false;
             }
         };
-
-        info!(mount = %totp_dir.display(), "TOTP FUSE ready");
-
-        Some(Self { fuse_handle })
+        if state.handle.is_some() {
+            return true;
+        }
+        if let Some(last) = state.last_attempt
+            && last.elapsed() < MOUNT_RETRY_COOLDOWN
+        {
+            return false;
+        }
+        state.last_attempt = Some(Instant::now());
+        match rosec_fuse::totp_mount(&self.totp_dir) {
+            Ok(h) => {
+                info!(mount = %self.totp_dir.display(), "TOTP FUSE ready");
+                state.handle = Some(h);
+                true
+            }
+            Err(e) => {
+                warn!("TOTP FUSE mount failed (will retry on next unlock): {e:#}");
+                false
+            }
+        }
     }
 
     /// Rebuild the TOTP snapshot from the given providers.
@@ -51,6 +91,11 @@ impl TotpManager {
     /// Iterates all unlocked providers that declare `Totp`, fetches
     /// TOTP seeds, parses them, and updates the FUSE snapshot.
     pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+        // Nothing consumes TOTP entries until the filesystem is mounted.
+        if !self.ensure_mounted() {
+            return;
+        }
+
         let mut entries = Vec::new();
 
         for provider in providers {
@@ -122,13 +167,25 @@ impl TotpManager {
         }
 
         let count = entries.len();
-        self.fuse_handle.fuse.update(&entries);
+        self.update_snapshot(&entries);
         debug!(items = count, "TOTP FUSE snapshot refreshed");
     }
 
     /// Remove all entries and refresh with an empty snapshot.
     pub fn clear(&self) {
-        self.fuse_handle.fuse.update(&[]);
+        self.update_snapshot(&[]);
         info!("TOTP FUSE snapshot cleared");
+    }
+
+    /// Push a snapshot to the FUSE filesystem if it is currently mounted.
+    fn update_snapshot(&self, entries: &[TotpEntry]) {
+        match self.fuse.lock() {
+            Ok(state) => {
+                if let Some(handle) = state.handle.as_ref() {
+                    handle.fuse.update(entries);
+                }
+            }
+            Err(e) => warn!("TOTP FUSE mount lock poisoned in update: {e}"),
+        }
     }
 }

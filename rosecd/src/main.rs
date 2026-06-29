@@ -208,6 +208,19 @@ async fn run() -> Result<()> {
     wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
     wire_items_changed_callback(&state, &ssh_manager, &totp_manager);
 
+    // Mount the FUSE filesystems and load any provider already unlocked at
+    // startup (e.g. PAM auto-unlock that raced ahead of the callbacks above);
+    // otherwise loading would wait for a later unlock/sync event (issue #25).
+    {
+        let providers = state.providers_ordered();
+        if let Some(ref sm) = ssh_manager {
+            sm.rebuild(&providers).await;
+        }
+        if let Some(ref tm) = totp_manager {
+            tm.rebuild(&providers).await;
+        }
+    }
+
     // When running on a private bus, spawn a watcher that polls for the
     // session bus and migrates to it when available.
     #[cfg(feature = "private-socket")]

@@ -18,8 +18,8 @@
 //!    socket (both handled by their respective RAII wrappers).
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rosec_core::Provider;
 use rosec_core::config::PromptConfig;
@@ -30,11 +30,22 @@ use rosec_ssh_agent::session::SshAgent;
 use ssh_key::PrivateKey;
 use tracing::{debug, info, warn};
 
+/// Throttle for FUSE re-mount retries, so a permanently-unmountable
+/// environment (e.g. forced `NoNewPrivileges`) isn't hammered on every event.
+const MOUNT_RETRY_COOLDOWN: Duration = Duration::from_secs(10);
+
+struct MountState {
+    handle: Option<MountHandle>,
+    last_attempt: Option<Instant>,
+}
+
 /// Manages the SSH agent and FUSE filesystem on behalf of `rosecd`.
 pub struct SshManager {
     store: Arc<RwLock<KeyStore>>,
-    fuse_handle: MountHandle,
-    /// Absolute path to the Unix socket (`$XDG_RUNTIME_DIR/rosec/agent.sock`).
+    /// Lazily-mounted FUSE export; the agent serves keys from `store`, so it
+    /// still works while this is unmounted.
+    fuse: Mutex<MountState>,
+    ssh_dir: PathBuf,
     agent_sock: PathBuf,
 }
 
@@ -67,10 +78,21 @@ impl SshManager {
             }
         };
 
-        let ssh_dir = runtime_dir.join("rosec").join("ssh");
+        let rosec_dir = runtime_dir.join("rosec");
+        let ssh_dir = rosec_dir.join("ssh");
         // Agent socket lives OUTSIDE the FUSE mountpoint (one level up) so it
         // can be bound on the real filesystem, not through FUSE.
-        let agent_sock = runtime_dir.join("rosec").join("agent.sock");
+        let agent_sock = rosec_dir.join("agent.sock");
+
+        // Create the runtime dir so the agent socket can bind even when the
+        // FUSE mount is unavailable (the mount is retried lazily).
+        if let Err(e) = std::fs::create_dir_all(&rosec_dir) {
+            warn!(
+                path = %rosec_dir.display(),
+                "failed to create runtime dir (SSH agent disabled): {e}"
+            );
+            return None;
+        }
 
         // Remove stale socket from a previous run.
         if agent_sock.exists()
@@ -78,19 +100,6 @@ impl SshManager {
         {
             warn!(path = %agent_sock.display(), "failed to remove stale agent socket: {e}");
         }
-
-        // Mount FUSE first — it creates the directory tree we bind into.
-        let fuse_handle = match rosec_fuse::mount(&ssh_dir, agent_sock.clone()) {
-            Ok(h) => h,
-            Err(e) => {
-                // FUSE mount fails under NoNewPrivileges=yes (systemd hardened unit)
-                // because fusermount3's setuid bit is suppressed.  This is expected
-                // when running as a systemd user service.  The SSH agent is disabled
-                // but the daemon continues normally.
-                warn!("SSH FUSE mount failed (SSH agent disabled): {e:#}");
-                return None;
-            }
-        };
 
         let store = KeyStore::new();
 
@@ -104,14 +113,50 @@ impl SshManager {
             });
         }
 
-        info!(mount = %ssh_dir.display(), "SSH FUSE ready");
         info!(sock = %agent_sock.display(), "SSH agent ready");
 
         Some(Self {
             store,
-            fuse_handle,
+            fuse: Mutex::new(MountState {
+                handle: None,
+                last_attempt: None,
+            }),
+            ssh_dir,
             agent_sock,
         })
+    }
+
+    /// Mount the FUSE filesystem if not already mounted, retrying a failed
+    /// boot-time mount (throttled by [`MOUNT_RETRY_COOLDOWN`]) so an early-boot
+    /// failure self-heals on the next unlock.
+    fn ensure_mounted(&self) {
+        let mut state = match self.fuse.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                warn!("SSH FUSE mount lock poisoned: {e}");
+                return;
+            }
+        };
+        if state.handle.is_some() {
+            return;
+        }
+        if let Some(last) = state.last_attempt
+            && last.elapsed() < MOUNT_RETRY_COOLDOWN
+        {
+            return;
+        }
+        state.last_attempt = Some(Instant::now());
+        match rosec_fuse::mount(&self.ssh_dir, self.agent_sock.clone()) {
+            Ok(h) => {
+                info!(mount = %self.ssh_dir.display(), "SSH FUSE ready");
+                state.handle = Some(h);
+            }
+            Err(e) => {
+                // Expected under NoNewPrivileges and early boot; the agent
+                // still serves keys from the store.
+                warn!("SSH FUSE mount failed (will retry on next unlock): {e:#}");
+            }
+        }
     }
 
     /// Rebuild the key store from the given set of providers.
@@ -125,6 +170,8 @@ impl SshManager {
     /// with a debug log.  After all providers are processed the FUSE snapshot
     /// is refreshed atomically.
     pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+        self.ensure_mounted();
+
         let mut new_entries = Vec::new();
 
         for provider in providers {
@@ -263,7 +310,8 @@ impl SshManager {
         self.refresh_fuse();
     }
 
-    /// Rebuild the FUSE snapshot from the current store contents.
+    /// Rebuild the FUSE snapshot from the current store contents.  No-op while
+    /// the filesystem is unmounted.
     fn refresh_fuse(&self) {
         let snap_entries: Vec<rosec_ssh_agent::KeyEntry> = match self.store.read() {
             Ok(guard) => guard.iter().cloned().collect(),
@@ -272,8 +320,19 @@ impl SshManager {
                 return;
             }
         };
+
+        let state = match self.fuse.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                warn!("SSH FUSE mount lock poisoned in refresh_fuse: {e}");
+                return;
+            }
+        };
+        let Some(handle) = state.handle.as_ref() else {
+            return;
+        };
         let refs: Vec<&rosec_ssh_agent::KeyEntry> = snap_entries.iter().collect();
-        self.fuse_handle.fuse.update(&refs);
+        handle.fuse.update(&refs);
 
         // Compute a stable "last modified" time for logging.
         let newest = snap_entries
