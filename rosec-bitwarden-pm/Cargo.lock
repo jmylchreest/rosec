@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-bitwarden-pm"
-version = "0.0.31"
+version = "0.0.32"
 dependencies = [
  "aes",
  "argon2",
