@@ -28,7 +28,7 @@ jobs:
       should_skip: ${{ steps.version.outputs.should_skip }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -116,7 +116,7 @@ jobs:
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -174,7 +174,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         if: matrix.cross == false
@@ -269,7 +269,7 @@ jobs:
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -391,7 +391,7 @@ jobs:
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -436,7 +436,7 @@ jobs:
       github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
@@ -491,7 +491,7 @@ jobs:
       needs.prepare.outputs.is_prerelease == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
@@ -533,7 +533,7 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download x86_64 artifact (for PKGBUILD checksum)
         uses: actions/download-artifact@v8
@@ -596,7 +596,7 @@ jobs:
             aur_name: rosec-provider-keepassxc-file-bin
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download WASM provider artifacts
         uses: actions/download-artifact@v8
@@ -646,7 +646,7 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Render PKGBUILD from template
         run: |
