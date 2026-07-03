@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use anyhow::Result;
-use iced::widget::text_input;
 use zeroize::Zeroizing;
 
 use crate::helpers::{
@@ -15,7 +14,8 @@ use crate::output::emit_secret_json;
 use crate::request::{FieldKind, FieldSpec, PromptRequest, ThemeConfig};
 
 /// Stable ID for the first text input so we can auto-focus it on startup.
-static FIRST_FIELD_ID: LazyLock<text_input::Id> = LazyLock::new(text_input::Id::unique);
+static FIRST_FIELD_ID: LazyLock<iced::advanced::widget::Id> =
+    LazyLock::new(iced::advanced::widget::Id::unique);
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
@@ -63,41 +63,51 @@ pub(super) fn run(request: PromptRequest) -> Result<()> {
     let fields = request.effective_fields();
     let height = derive_window_height(&request, &fields);
 
-    application("rosec prompt", update, view)
-        .subscription(|_state| {
-            // `event::listen_with` sees all keyboard events, including those a
-            // focused text_input would consume. `on_key_press` only receives
-            // `Status::Ignored`, so the first Esc gets swallowed.
-            iced::event::listen_with(|event, _status, _id| {
-                if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
-                {
-                    Some(Message::KeyPressed(key))
-                } else {
-                    None
-                }
-            })
-        })
-        .window(iced::window::Settings {
-            size: iced::Size::new(420.0, height),
-            resizable: false,
-            decorations: false,
-            transparent: true,
-            platform_specific: PlatformSpecific {
-                application_id: "rosec.prompt".to_string(),
-                override_redirect: false,
-            },
-            ..Default::default()
-        })
-        .run_with(|| {
+    // iced 0.14: the boot function is the first arg to `application()` and must
+    // be `Fn` (callable by reference), so it clones the captured request/fields
+    // rather than consuming them. Title moved to `.title()`; `.run_with()` →
+    // `.run()`.
+    application(
+        move || {
             let has_fields = !fields.is_empty();
-            let state = GuiApp::from_request(request, fields);
+            let state = GuiApp::from_request(request.clone(), fields.clone());
             let task = if has_fields {
-                iced::widget::text_input::focus(FIRST_FIELD_ID.clone())
+                iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::focus(FIRST_FIELD_ID.clone()),
+                )
             } else {
                 iced::Task::none()
             };
             (state, task)
-        })?;
+        },
+        update,
+        view,
+    )
+    .title("rosec prompt")
+    .subscription(|_state| {
+        // `event::listen_with` sees all keyboard events, including those a
+        // focused text_input would consume. `on_key_press` only receives
+        // `Status::Ignored`, so the first Esc gets swallowed.
+        iced::event::listen_with(|event, _status, _id| {
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
+                Some(Message::KeyPressed(key))
+            } else {
+                None
+            }
+        })
+    })
+    .window(iced::window::Settings {
+        size: iced::Size::new(420.0, height),
+        resizable: false,
+        decorations: false,
+        transparent: true,
+        platform_specific: PlatformSpecific {
+            application_id: "rosec.prompt".to_string(),
+            override_redirect: false,
+        },
+        ..Default::default()
+    })
+    .run()?;
     Ok(())
 }
 
@@ -254,7 +264,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
     use iced::widget::{button, column, container, row, text, text_input};
     use iced::{Alignment, Background, Element, Length};
 
-    let font_size = state.theme.font_size as u16;
+    let font_size = state.theme.font_size;
 
     let title_widget: Element<'_, Message> = {
         let bold_font = iced::Font {
@@ -262,7 +272,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
             ..state.font
         };
         let t = text(&state.title)
-            .size(font_size + 1)
+            .size(font_size + 1.0)
             .color(state.fg)
             .font(bold_font);
         if state.hint.trim().is_empty() {
@@ -270,7 +280,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
         } else {
             iced::widget::tooltip(
                 t,
-                container(iced::widget::rich_text(parse_styled_spans(
+                container(iced::widget::rich_text(parse_styled_spans::<Message>(
                     &state.hint,
                     font_size,
                     state.label_color,
@@ -287,6 +297,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
                     },
                     text_color: None,
                     shadow: iced::Shadow::default(),
+                    snap: false,
                 }),
                 iced::widget::tooltip::Position::Bottom,
             )
@@ -305,7 +316,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
             } else {
                 &f.spec.label
             })
-            .size(font_size - 1)
+            .size(font_size - 1.0)
             .color(state.label_color)
             .font(state.font);
             let mut inp = text_input(f.spec.placeholder.as_str(), f.value.as_str())
@@ -326,7 +337,10 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
                     move |_, status| iced::widget::text_input::Style {
                         background: Background::Color(ibg),
                         border: iced::Border {
-                            color: if status == iced::widget::text_input::Status::Focused {
+                            color: if matches!(
+                                status,
+                                iced::widget::text_input::Status::Focused { .. }
+                            ) {
                                 accent
                             } else {
                                 border
@@ -383,9 +397,9 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = vec![title_widget];
 
     if !state.info.trim().is_empty() {
-        let spans = parse_styled_spans(
+        let spans = parse_styled_spans::<Message>(
             &state.info,
-            font_size - 1,
+            font_size - 1.0,
             state.label_color,
             state.fg,
             state.font,
@@ -395,7 +409,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
     }
 
     if !state.message.is_empty() {
-        let spans = parse_styled_spans(
+        let spans = parse_styled_spans::<Message>(
             &state.message,
             font_size,
             state.label_color,
@@ -428,6 +442,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
             },
             text_color: None,
             shadow: iced::Shadow::default(),
+            snap: false,
         })
         .into()
 }

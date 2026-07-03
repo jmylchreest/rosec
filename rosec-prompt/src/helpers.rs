@@ -68,12 +68,18 @@ impl<'a> TextMeasurer<'a> {
         let metrics = cosmic_text::Metrics::new(font_size, lh);
         let mut buffer = cosmic_text::Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(&mut self.font_system, Some(self.content_w), None);
-        let attrs = cosmic_text::Attrs::new().family(self.family).weight(weight);
+        // cosmic-text 0.15 dropped the `.family()`/`.weight()` builders; set the
+        // (public) fields directly, and `set_text` now borrows the attrs and
+        // takes a trailing alignment argument.
+        let mut attrs = cosmic_text::Attrs::new();
+        attrs.family = self.family;
+        attrs.weight = weight;
         buffer.set_text(
             &mut self.font_system,
             text,
-            attrs,
+            &attrs,
             cosmic_text::Shaping::Advanced,
+            None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -106,7 +112,49 @@ pub(crate) fn cosmic_font_family(name: &str) -> cosmic_text::Family<'_> {
     cosmic_text::Family::Name(name)
 }
 pub(crate) fn parse_color(value: &str, fallback: iced::Color) -> iced::Color {
-    iced::Color::parse(value.trim()).unwrap_or(fallback)
+    parse_hex_color(value.trim()).unwrap_or(fallback)
+}
+
+/// Parse a `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa` hex string into a color.
+///
+/// Replaces iced 0.13's `Color::parse`, which was removed in 0.14. Matches the
+/// prior hex-only behaviour (the `#` prefix is optional; no named colors).
+fn parse_hex_color(input: &str) -> Option<iced::Color> {
+    let hex = input.strip_prefix('#').unwrap_or(input);
+    // Single hex digit expanded to a byte (0xF -> 0xFF), normalized to 0.0..=1.0.
+    fn nib(c: char) -> Option<f32> {
+        c.to_digit(16).map(|v| (v * 17) as f32 / 255.0)
+    }
+    // Two hex chars -> byte, normalized to 0.0..=1.0.
+    fn byte(s: &str) -> Option<f32> {
+        u8::from_str_radix(s, 16).ok().map(|v| v as f32 / 255.0)
+    }
+    match hex.len() {
+        3 | 4 => {
+            let c: Vec<char> = hex.chars().collect();
+            let a = if hex.len() == 4 { nib(c[3])? } else { 1.0 };
+            Some(iced::Color::from_rgba(
+                nib(c[0])?,
+                nib(c[1])?,
+                nib(c[2])?,
+                a,
+            ))
+        }
+        6 | 8 => {
+            let a = if hex.len() == 8 {
+                byte(&hex[6..8])?
+            } else {
+                1.0
+            };
+            Some(iced::Color::from_rgba(
+                byte(&hex[0..2])?,
+                byte(&hex[2..4])?,
+                byte(&hex[4..6])?,
+                a,
+            ))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn font_from_string(name: &str) -> iced::Font {
@@ -158,6 +206,7 @@ pub(crate) fn button_style(
             radius: 6.0.into(),
         },
         shadow: iced::Shadow::default(),
+        snap: false,
     };
     match status {
         iced::widget::button::Status::Hovered => iced::widget::button::Style {
@@ -175,7 +224,7 @@ pub(crate) fn button_style(
 /// Render a TOTP code as individual digit boxes (pin-entry style).
 pub(crate) fn pin_box_row<'a, M: 'a>(
     code: &str,
-    font_size: u16,
+    font_size: f32,
     digit_color: iced::Color,
     box_bg: iced::Color,
     box_border: iced::Color,
@@ -188,8 +237,8 @@ pub(crate) fn pin_box_row<'a, M: 'a>(
         weight: iced::font::Weight::Bold,
         ..iced::Font::default()
     };
-    let digit_size = font_size + 8;
-    let box_size = (digit_size as f32 * 1.8).ceil();
+    let digit_size = font_size + 8.0;
+    let box_size = (digit_size * 1.8).ceil();
 
     let digit_boxes: Vec<iced::Element<'_, M>> = code
         .chars()
@@ -213,6 +262,7 @@ pub(crate) fn pin_box_row<'a, M: 'a>(
                     },
                     text_color: None,
                     shadow: iced::Shadow::default(),
+                    snap: false,
                 })
                 .into()
         })
@@ -234,7 +284,7 @@ pub(crate) fn pin_box_row<'a, M: 'a>(
 /// and identifiers like `OAUTH_CLIENT_ID` don't get accidentally italicised.
 pub(crate) fn parse_styled_spans<'a, M: 'a>(
     input: &str,
-    size: u16,
+    size: f32,
     normal_color: iced::Color,
     emphasis_color: iced::Color,
     base_font: iced::Font,
