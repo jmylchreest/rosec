@@ -1,10 +1,15 @@
 # PAM Auto-Unlock
 
 rosec ships a native PAM module (`pam_rosec.so`) that captures your login
-password during the `auth` phase, then passes it to `rosec-pam-unlock` during
-the `session` phase (when the D-Bus session bus is available). This means
-your providers unlock automatically at both **initial login** and
-**screen unlock** — just like gnome-keyring does.
+password during the `auth` phase and passes it to `rosec-pam-unlock` during
+the `session` phase. This unlocks your providers automatically at both
+**initial login** and **screen unlock**.
+
+If the session D-Bus is not yet available when the helper runs (e.g. very
+early in the login sequence), rosecd automatically falls back to a private
+embedded bus at `$XDG_RUNTIME_DIR/rosec/bus`. The PAM helper knows to check
+that path. Once the session bus becomes available, rosecd migrates to it
+transparently. No extra configuration is needed for this to work.
 
 The module also handles **password changes** (`passwd`): when the `password`
 PAM phase fires, it sends the old and new passwords to the daemon, which
@@ -34,47 +39,59 @@ rosec provider add-password <vault-id> --label pam
 Enter your **login password** when prompted. If it matches your vault master
 password, skip this step.
 
-**3.** Add rosec to your PAM config. A drop-in snippet is installed at
-`/etc/pam.d/rosec` — include it from whichever PAM service you use.
+**3.** Add rosec to the PAM config for your display manager and screen locker.
+A drop-in snippet is installed at `/etc/pam.d/rosec` — include it from
+whichever PAM service files are used for login and screen unlock on your system.
 
-### Login + screen lock (recommended)
+The include needs to appear in the PAM files that are actually executed during
+login and screen unlock. Whether `system-local-login` is in that chain depends
+on your distribution and display manager — check which files your DM and screen
+locker include, and add the rosec include to the appropriate ones.
+
+### Common configurations
 
 ```
-# /etc/pam.d/system-local-login — add at the end:
+# /etc/pam.d/system-local-login — covers any DM or locker that includes this file:
 auth      include   rosec
 session   include   rosec
 password  include   rosec
 ```
 
-This covers GDM, SDDM, console login, and screen lockers that include the
-`login` chain (hyprlock, swaylock, etc.). Do **not** add rosec to
-`/etc/pam.d/system-login` — that file is also used by SSH and other remote
-services where there is no D-Bus session bus.
+Do **not** add rosec to `/etc/pam.d/system-login` — that file is also used by
+SSH and other remote services where there is no D-Bus session bus.
 
-### Screen locker only
+If your display manager uses a dedicated PAM config that does not include
+`system-local-login`, add the rosec include there directly:
 
-Most screen lockers include `system-local-login` under the hood, so the above
-is usually sufficient. If yours doesn't, add rosec directly:
-
-```
-# /etc/pam.d/<locker> — add after the existing auth line:
-auth     include   rosec
-session  include   rosec
-```
-
-| Screen locker | PAM config |
+| Display manager / locker | PAM config |
 |---|---|
+| greetd | `/etc/pam.d/greetd` |
+| GDM | `/etc/pam.d/gdm-password` |
+| SDDM | `/etc/pam.d/sddm` |
 | hyprlock | `/etc/pam.d/hyprlock` |
 | swaylock | `/etc/pam.d/swaylock` |
 | i3lock | `/etc/pam.d/i3lock` |
-| GDM | `/etc/pam.d/gdm-password` |
-| SDDM | `/etc/pam.d/sddm` |
+
+For example, on a greetd + hyprlock setup where greetd does not include
+`system-local-login`:
+
+```
+# /etc/pam.d/greetd — add at the end:
+auth      include   rosec
+session   include   rosec
+password  include   rosec
+
+# /etc/pam.d/hyprlock — add at the end:
+auth      include   rosec
+session   include   rosec
+```
 
 ### Fallback: pam_exec (no native module)
 
 If you prefer not to install `pam_rosec.so`, the helper works standalone
-via `pam_exec`. This only works for **screen unlock** (not initial login,
-because the session bus doesn't exist yet during the `auth` phase):
+via `pam_exec`. This only works for **screen unlock** (not initial login),
+because `pam_exec expose_authtok` runs during the `auth` phase only — there
+is no stash-and-replay for the `session` phase:
 
 ```
 # /etc/pam.d/hyprlock — after auth:
