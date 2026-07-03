@@ -80,6 +80,10 @@ fn add_gui_paths(paths: &mut Vec<PathRule>) {
     }
     paths.push(PathRule::rw("/tmp/.X11-unix"));
 
+    // /dev/null for subprocess stdio redirection (clipboard_write spawns
+    // wl-copy/xclip with Stdio::null()).
+    paths.push(PathRule::rw("/dev/null"));
+
     // GPU device nodes for the iced/wgpu render path.
     paths.push(PathRule::rw("/dev/dri"));
     paths.push(PathRule::ro("/sys/devices"));
