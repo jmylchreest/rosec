@@ -5,7 +5,7 @@ name = "rosec-bitwarden-sm"
 # rosec-core ABI of the release they ship with.
 version = "0.0.31"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 license = "LicenseRef-Bitwarden-SDK"
 description = "Bitwarden Secrets Manager provider as an Extism WASM guest plugin for rosec"
 

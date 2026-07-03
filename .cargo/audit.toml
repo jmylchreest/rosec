@@ -1,0 +1,23 @@
+# cargo-audit configuration — https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# Advisories listed under `ignore` are known and consciously accepted. Every
+# entry must have a rationale and, where a fix exists upstream, a tracking
+# reference so it gets removed when unblocked. New advisories NOT listed here
+# will fail CI (see .github/workflows/ci.yml `audit` job).
+
+[advisories]
+ignore = [
+    # --- No upstream fix available -------------------------------------------
+    # rsa 0.9.x "Marvin Attack" timing side-channel. Pulled transitively via
+    # ssh-key (RustCrypto/SSH). patched = [] — there is no fixed rsa release;
+    # the whole ecosystem is waiting on a constant-time reimplementation.
+    # Reachability here is low (local SSH key handling, not a network oracle).
+    "RUSTSEC-2023-0071",
+
+    # --- Transitive, capped below the fixed version --------------------------
+    # quick-xml < 0.41 DoS (quadratic attribute scan / unbounded ns alloc).
+    # Pulled via the desktop-portal / font stack in rosec-prompt; the direct
+    # dependents cap quick-xml at 0.39.x, so we cannot advance it yet. DoS only.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
