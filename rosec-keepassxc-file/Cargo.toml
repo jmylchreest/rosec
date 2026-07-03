@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # KeePass / KDBX 4
-keepass = { version = "0.12", default-features = false }
+keepass = { version = "0.13", default-features = false }
 
 # Zeroize for secret scrubbing
 zeroize = { version = "1", features = ["derive"] }
@@ -45,13 +45,3 @@ ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed2
 
 # UTF-16 → UTF-8 conversion for KeePassXC's KeeAgent.settings XML payloads.
 encoding_rs = "0.8"
-
-# Local patch: keepass-rs's `cfg(target_arch = "wasm32")` is too broad — it
-# pulls in js-sys/wasm-bindgen for ALL wasm32 targets, including
-# wasm32-wasip1 where wasm-bindgen post-processing isn't run and the
-# placeholder imports remain unresolved.  Our fork narrows the cfg to
-# `cfg(all(target_arch = "wasm32", target_os = "unknown"))` (browser only).
-# PR: https://github.com/sseemayer/keepass-rs/pull/318
-# Drop this `[patch.crates-io]` once that PR is merged + a release is cut.
-[patch.crates-io]
-keepass = { git = "https://github.com/jmylchreest/keepass-rs", branch = "local-version-bump" }
