@@ -22,7 +22,7 @@ pub(super) enum Message {
     FieldChanged(usize, String),
     Confirm,
     Cancel,
-    KeyPressed(iced::keyboard::Key),
+    KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
 }
 
 #[derive(Debug)]
@@ -89,8 +89,11 @@ pub(super) fn run(request: PromptRequest) -> Result<()> {
         // focused text_input would consume. `on_key_press` only receives
         // `Status::Ignored`, so the first Esc gets swallowed.
         iced::event::listen_with(|event, _status, _id| {
-            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
-                Some(Message::KeyPressed(key))
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key, modifiers, ..
+            }) = event
+            {
+                Some(Message::KeyPressed(key, modifiers))
             } else {
                 None
             }
@@ -238,23 +241,34 @@ fn confirm_and_exit(state: &GuiApp) -> ! {
     std::process::exit(0);
 }
 
-fn update(state: &mut GuiApp, message: Message) {
+fn update(state: &mut GuiApp, message: Message) -> iced::Task<Message> {
     match message {
         Message::FieldChanged(idx, value) => {
             if let Some(f) = state.fields.get_mut(idx) {
                 // Old `Zeroizing<String>` drops here → scrubbed.
                 f.value = Zeroizing::new(value);
             }
+            iced::Task::none()
         }
         Message::Confirm => confirm_and_exit(state),
         Message::Cancel => std::process::exit(1),
-        Message::KeyPressed(key) => {
+        Message::KeyPressed(key, modifiers) => {
             use iced::keyboard::Key;
             use iced::keyboard::key::Named;
             match key {
                 Key::Named(Named::Enter) => confirm_and_exit(state),
                 Key::Named(Named::Escape) => std::process::exit(1),
-                _ => {}
+                // iced 0.14 no longer traverses focus on Tab automatically, so
+                // dispatch the focus operation ourselves (Shift+Tab = previous).
+                Key::Named(Named::Tab) => {
+                    use iced::advanced::widget::{operate, operation};
+                    if modifiers.shift() {
+                        operate(operation::focusable::focus_previous())
+                    } else {
+                        operate(operation::focusable::focus_next())
+                    }
+                }
+                _ => iced::Task::none(),
             }
         }
     }
