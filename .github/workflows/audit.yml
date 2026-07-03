@@ -1,0 +1,53 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC — catch advisories published against the committed
+    # lockfiles even when no code changes land.
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Root workspace (rosecd, rosec CLI, libraries). Ignore-list and
+      # rationale live in .cargo/audit.toml.
+      - name: Audit workspace
+        run: cargo audit
+
+      # Excluded WASM provider crates carry their own lockfiles. cargo-audit
+      # only reads a cwd-local .cargo/audit.toml, so the shared ignore-list does
+      # not apply; the same accepted advisories are passed explicitly here (see
+      # .cargo/audit.toml for the rationale behind each):
+      #   RUSTSEC-2023-0071  rsa "Marvin" — no upstream fix (via ssh-key)
+      #   RUSTSEC-2026-0194  quick-xml DoS — transitive, capped < 0.41 (keepassxc KDBX)
+      #   RUSTSEC-2026-0195  quick-xml DoS — transitive, capped < 0.41 (keepassxc KDBX)
+      - name: Audit WASM provider crates
+        run: |
+          for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+            echo "::group::${crate}"
+            (cd "${crate}" && cargo audit \
+              --ignore RUSTSEC-2023-0071 \
+              --ignore RUSTSEC-2026-0194 \
+              --ignore RUSTSEC-2026-0195)
+            echo "::endgroup::"
+          done
