@@ -44,20 +44,18 @@ pub(super) fn run(request: PromptRequest) -> Result<()> {
     use iced::application;
     use iced::window::settings::PlatformSpecific;
 
-    let totp = request
+    // Fail fast on a malformed request (from_request also expects totp_display).
+    request
         .totp_display
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("totp_display missing"))?;
-    let code = totp.code.clone();
 
     // iced 0.14: boot fn is the first arg to `application()`; title moved to
-    // `.title()`; `.run_with()` → `.run()`.
+    // `.title()`; `.run_with()` → `.run()`. The TOTP code is copied only on an
+    // explicit Copy-button press — never automatically at open.
     application(
         move || {
             let state = TotpApp::from_request(&request);
-            if state.confirm_label.is_none() {
-                clipboard_write(&code);
-            }
             (state, iced::Task::none())
         },
         update,
@@ -142,59 +140,84 @@ impl TotpApp {
     }
 }
 
-/// Write the TOTP code to the clipboard with auto-clear semantics.
+/// Write the TOTP code to the clipboard via `wl-copy` (Wayland) or `xclip`
+/// (X11). Both fork a background process that owns the selection and keeps
+/// serving it after we exit — iced's own clipboard can't, since it serves the
+/// selection through the (about-to-close) window.
 ///
-/// `wl-copy --paste-once` is a one-shot: the clipboard is consumed by the
-/// first paste, after which the clipboard reverts to whatever was there
-/// before. iced's clipboard API needs a live window surface, which is
-/// impractical for a prompt that exits immediately after copy — hence the
-/// subprocess.
+/// The caller must keep the process alive briefly after this returns (see the
+/// settle in the `CopyToClipboard` handler): the copy tool's daemon needs a
+/// moment to take ownership of the selection, and exiting instantly races that
+/// hand-off and leaves the clipboard empty.
 ///
-/// `xclip` has no equivalent flag, so we fork a detached helper that
-/// overwrites the selection with an empty string after `clear_after`.
+/// Note: `--paste-once` (auto-clear after one paste) is intentionally *not*
+/// used — with a clipboard manager it's consumed immediately, and it doesn't
+/// survive the copy-then-exit hand-off. TOTP codes are short-lived anyway.
 fn clipboard_write(text: &str) {
     use std::process::{Command, Stdio};
 
-    // Wayland: --paste-once clears the clipboard after the first paste.
-    if let Ok(mut child) = Command::new("wl-copy")
-        .arg("--paste-once")
-        .stdin(Stdio::piped())
+    // wl-copy (and xclip) create a private temp dir via mkdtemp to serve the
+    // selection. Under the Landlock sandbox /tmp isn't writable, so point
+    // TMPDIR at XDG_RUNTIME_DIR (which the GUI ruleset already allows) rather
+    // than widening the sandbox. /dev/null (for the Stdio redirections) is
+    // likewise granted in sandbox.rs.
+    let tmpdir = std::env::var_os("XDG_RUNTIME_DIR");
+
+    let mut wl = Command::new("wl-copy");
+    wl.stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(text.as_bytes());
+        .stderr(Stdio::null());
+    if let Some(t) = &tmpdir {
+        wl.env("TMPDIR", t);
+    }
+    match wl.spawn() {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return;
         }
-        let _ = child.wait();
-        return;
+        Err(e) => {
+            tracing::debug!("wl-copy unavailable ({e}), falling back to xclip");
+        }
     }
 
     // X11 fallback: xclip has no auto-clear flag. Stamp the selection now,
     // then schedule a delayed clear via a detached subprocess. 30 s matches
     // the typical TOTP step.
-    if let Ok(mut child) = Command::new("xclip")
-        .args(["-selection", "clipboard"])
+    let mut xc = Command::new("xclip");
+    xc.args(["-selection", "clipboard"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
+        .stderr(Stdio::null());
+    if let Some(t) = &tmpdir {
+        xc.env("TMPDIR", t);
+    }
+    match xc.spawn() {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
 
-        // Detached `sh -c "sleep 30 && xclip -i ..."` — survives our exit.
-        let _ = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30 && printf '' | xclip -selection clipboard -i 2>/dev/null")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            // Detached `sh -c "sleep 30 && xclip -i ..."` — survives our exit.
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg("sleep 30 && printf '' | xclip -selection clipboard -i 2>/dev/null")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+        Err(e) => {
+            tracing::warn!(
+                "clipboard copy failed: could not run wl-copy or xclip ({e}); \
+                 the TOTP code was not copied to the clipboard"
+            );
+        }
     }
 }
 
@@ -222,6 +245,11 @@ fn update(state: &mut TotpApp, message: TotpMessage) -> iced::Task<TotpMessage> 
         }
         TotpMessage::CopyToClipboard => {
             clipboard_write(&state.code);
+            // Let wl-copy/xclip's background daemon take ownership of the
+            // selection before we exit; a bare exit here races the hand-off
+            // and leaves the clipboard empty. 400 ms is imperceptible for a
+            // click-to-close action but reliably wins the race.
+            std::thread::sleep(std::time::Duration::from_millis(400));
             emit_empty_and_exit();
         }
         TotpMessage::AutoDismiss => {
