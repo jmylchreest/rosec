@@ -35,7 +35,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
 zeroize = "1.8.2"
-iced = { version = "0.13.1", default-features = false, features = ["tiny-skia", "tokio"] }
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "advanced"] }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
 wait-timeout = "0.2"
 landlock = "0.4.4"

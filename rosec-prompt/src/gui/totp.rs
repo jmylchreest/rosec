@@ -50,26 +50,33 @@ pub(super) fn run(request: PromptRequest) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("totp_display missing"))?;
     let code = totp.code.clone();
 
-    application("rosec prompt", update, view)
-        .subscription(subscription)
-        .window(iced::window::Settings {
-            size: iced::Size::new(380.0, 190.0),
-            resizable: false,
-            decorations: false,
-            transparent: true,
-            platform_specific: PlatformSpecific {
-                application_id: "rosec.prompt".to_string(),
-                override_redirect: false,
-            },
-            ..Default::default()
-        })
-        .run_with(move || {
+    // iced 0.14: boot fn is the first arg to `application()`; title moved to
+    // `.title()`; `.run_with()` → `.run()`.
+    application(
+        move || {
             let state = TotpApp::from_request(&request);
             if state.confirm_label.is_none() {
                 clipboard_write(&code);
             }
             (state, iced::Task::none())
-        })?;
+        },
+        update,
+        view,
+    )
+    .title("rosec prompt")
+    .subscription(subscription)
+    .window(iced::window::Settings {
+        size: iced::Size::new(380.0, 190.0),
+        resizable: false,
+        decorations: false,
+        transparent: true,
+        platform_specific: PlatformSpecific {
+            application_id: "rosec.prompt".to_string(),
+            override_redirect: false,
+        },
+        ..Default::default()
+    })
+    .run()?;
     Ok(())
 }
 
@@ -253,7 +260,7 @@ fn view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
     use iced::widget::{button, column, container, row, text};
     use iced::{Alignment, Background, Element, Length};
 
-    let font_size = state.theme.font_size as u16;
+    let font_size = state.theme.font_size;
 
     let bold_font = iced::Font {
         weight: iced::font::Weight::Bold,
@@ -261,7 +268,7 @@ fn view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
     };
 
     let title_widget: Element<'_, TotpMessage> = text(&state.title)
-        .size(font_size + 1)
+        .size(font_size + 1.0)
         .color(state.fg)
         .font(bold_font)
         .into();
@@ -361,6 +368,7 @@ fn view(state: &TotpApp) -> iced::Element<'_, TotpMessage> {
             },
             text_color: None,
             shadow: iced::Shadow::default(),
+            snap: false,
         })
         .into()
 }

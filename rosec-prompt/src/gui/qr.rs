@@ -46,23 +46,30 @@ pub(super) fn run(request: PromptRequest) -> Result<()> {
     let initial_status = "Position the QR code on your screen, then click Scan";
     let initial_size = derive_window_size(&request.title, initial_status, &request.theme);
 
-    application("rosec prompt", update, view)
-        .subscription(subscription)
-        .window(iced::window::Settings {
-            size: initial_size,
-            resizable: false,
-            decorations: false,
-            transparent: true,
-            platform_specific: PlatformSpecific {
-                application_id: "rosec.prompt".to_string(),
-                override_redirect: false,
-            },
-            ..Default::default()
-        })
-        .run_with(move || {
+    // iced 0.14: boot fn is the first arg to `application()`; title moved to
+    // `.title()`; `.run_with()` → `.run()`.
+    application(
+        move || {
             let state = QrApp::from_request(&request);
             (state, iced::Task::none())
-        })?;
+        },
+        update,
+        view,
+    )
+    .title("rosec prompt")
+    .subscription(subscription)
+    .window(iced::window::Settings {
+        size: initial_size,
+        resizable: false,
+        decorations: false,
+        transparent: true,
+        platform_specific: PlatformSpecific {
+            application_id: "rosec.prompt".to_string(),
+            override_redirect: false,
+        },
+        ..Default::default()
+    })
+    .run()?;
     Ok(())
 }
 
@@ -238,7 +245,7 @@ fn update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
         QrMessage::Scan => {
             state.scanning = true;
             state.status = "Scanning...".to_string();
-            iced::window::get_oldest().and_then(|id| {
+            iced::window::oldest().and_then(|id| {
                 iced::window::minimize(id, true).chain(iced::Task::done(QrMessage::WindowHidden))
             })
         }
@@ -279,7 +286,7 @@ fn update(state: &mut QrApp, message: QrMessage) -> iced::Task<QrMessage> {
             // Re-measure: error text typically wraps and would overflow the
             // initial "Position the QR..." height.
             let new_size = derive_window_size(&state.title, &state.status, &state.theme);
-            iced::window::get_oldest().and_then(move |id| {
+            iced::window::oldest().and_then(move |id| {
                 iced::window::resize(id, new_size).chain(iced::window::minimize(id, false))
             })
         }
@@ -309,7 +316,7 @@ fn view(state: &QrApp) -> iced::Element<'_, QrMessage> {
     use iced::widget::{button, column, container, row, text};
     use iced::{Alignment, Background, Element, Length};
 
-    let font_size = state.theme.font_size as u16;
+    let font_size = state.theme.font_size;
 
     let bold_font = iced::Font {
         weight: iced::font::Weight::Bold,
@@ -317,7 +324,7 @@ fn view(state: &QrApp) -> iced::Element<'_, QrMessage> {
     };
 
     let title_widget: Element<'_, QrMessage> = text(&state.title)
-        .size(font_size + 1)
+        .size(font_size + 1.0)
         .color(state.fg)
         .font(bold_font)
         .into();
@@ -384,6 +391,7 @@ fn view(state: &QrApp) -> iced::Element<'_, QrMessage> {
             },
             text_color: None,
             shadow: iced::Shadow::default(),
+            snap: false,
         })
         .into()
 }
