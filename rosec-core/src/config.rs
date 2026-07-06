@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AutoLockOverride, AutoLockPolicy, DedupStrategy, DedupTimeFallback, WasmPreference, WasmVerify,
+    AutoLockOverride, AutoLockPolicy, DedupStrategy, DedupTimeFallback, WasmPreference,
+    WasmTrustedKey, WasmVerify,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,6 +82,12 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub wasm_verify: WasmVerify,
 
+    /// Additional trust anchors for WASM plugin signatures, consulted after
+    /// the release keys embedded in the binary.  See [`WasmTrustedKey`] for
+    /// the trust model and TOML shape (`[[service.wasm_trusted_key]]`).
+    #[serde(default)]
+    pub wasm_trusted_key: Vec<WasmTrustedKey>,
+
     /// Enable the SSH FUSE virtual filesystem at `$XDG_RUNTIME_DIR/rosec/ssh/`.
     ///
     /// When `true` (the default), rosecd mounts a read-only FUSE filesystem
@@ -108,6 +115,7 @@ impl Default for ServiceConfig {
 
             wasm_prefer: WasmPreference::default(),
             wasm_verify: WasmVerify::default(),
+            wasm_trusted_key: Vec::new(),
             ssh_fuse: true,
             totp_fuse: true,
         }
@@ -600,6 +608,31 @@ mod tests {
         assert!(!cfg.autolock.on_session_lock);
         assert!(cfg.autolock.idle_timeout_minutes.is_none());
         assert!(cfg.autolock.max_unlocked_minutes.is_none());
+    }
+
+    #[test]
+    fn parse_wasm_trusted_keys() {
+        let toml_str = r#"
+            [[service.wasm_trusted_key]]
+            key   = "RWQFfHlWo/V+kQjsdj4NAqu3g7meVLCmMsq3CPs1ty/TepHCmhcvYzR0"
+            name  = "acme-corp"
+            kinds = ["acme-vault"]
+
+            [[service.wasm_trusted_key]]
+            key  = "RWRHPxDw3cL838WPvXP4ZKRubTHQHMurdTkGOwlwdC/44MfYIcgUFsZF"
+            name = "unscoped-partner"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.service.wasm_trusted_key.len(), 2);
+        assert_eq!(cfg.service.wasm_trusted_key[0].name, "acme-corp");
+        assert_eq!(cfg.service.wasm_trusted_key[0].kinds, vec!["acme-vault"]);
+        assert!(cfg.service.wasm_trusted_key[1].kinds.is_empty());
+    }
+
+    #[test]
+    fn wasm_trusted_keys_default_empty() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.service.wasm_trusted_key.is_empty());
     }
 
     #[test]

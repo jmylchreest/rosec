@@ -23,14 +23,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use extism::{Manifest, PluginBuilder, Wasm};
-use minisign_verify::{PublicKey, Signature};
-use rosec_core::{WasmPreference, WasmVerify};
-use tracing::{debug, info, warn};
-
-use crate::keys::WASM_SIGNING_PUBKEY;
 use crate::policy::{self, PluginPolicy};
 use crate::protocol::{PluginManifest, PluginOptionDescriptor};
+use extism::{Manifest, PluginBuilder, Wasm};
+use minisign_verify::{PublicKey, Signature};
+use rosec_core::{WasmPreference, WasmTrustedKey, WasmVerify};
+use tracing::{debug, info, warn};
 
 /// Bundle of files captured during scan: wasm bytes (after signature
 /// verification) and the parsed policy sidecar. The policy is always
@@ -131,7 +129,13 @@ enum PluginSource {
 /// - `Newest` — compare semver `version` fields; ties fall back to user-local
 ///
 /// `verify` controls signature checking before probing each plugin.
-pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginRegistry {
+/// `user_keys` are additional trust anchors from `[[service.wasm_trusted_key]]`,
+/// consulted after the embedded release keys.
+pub fn scan_plugins(
+    preference: WasmPreference,
+    verify: WasmVerify,
+    user_keys: &[WasmTrustedKey],
+) -> PluginRegistry {
     if verify == WasmVerify::Disabled {
         info!(
             "wasm_verify = \"disabled\" — WASM plugin signature verification is OFF. \
@@ -149,6 +153,7 @@ pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginReg
         PluginSource::System,
         preference,
         verify,
+        user_keys,
     );
 
     if let Some(user_dir) = user_plugin_dir() {
@@ -158,6 +163,7 @@ pub fn scan_plugins(preference: WasmPreference, verify: WasmVerify) -> PluginReg
             PluginSource::User,
             preference,
             verify,
+            user_keys,
         );
     }
 
@@ -183,6 +189,7 @@ fn scan_directory(
     source: PluginSource,
     preference: WasmPreference,
     verify: WasmVerify,
+    user_keys: &[WasmTrustedKey],
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -214,25 +221,35 @@ fn scan_directory(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let (outcome, VerifiedPlugin { wasm_bytes, policy }) = match verify_plugin(&path, verify) {
-            Ok(v) => v,
-            Err(reason) => {
-                warn!(
-                    wasm = %wasm_name,
-                    path = %path.display(),
-                    ?source,
-                    reason = %reason,
-                    "skipping WASM plugin (signature check failed)",
-                );
-                continue;
-            }
-        };
+        let (outcome, VerifiedPlugin { wasm_bytes, policy }) =
+            match verify_plugin(&path, verify, user_keys) {
+                Ok(v) => v,
+                Err(reason) => {
+                    warn!(
+                        wasm = %wasm_name,
+                        path = %path.display(),
+                        ?source,
+                        reason = %reason,
+                        "skipping WASM plugin (signature check failed)",
+                    );
+                    continue;
+                }
+            };
         match &outcome {
-            VerifyOutcome::Verified => info!(
+            VerifyOutcome::Verified(VerifiedBy::ReleaseKey) => info!(
                 wasm = %wasm_name,
                 path = %path.display(),
                 ?source,
                 "WASM plugin signature verified",
+            ),
+            // Loud on purpose: the plugin loads on the strength of a trust
+            // anchor the user added, not the rosec release key.
+            VerifyOutcome::Verified(VerifiedBy::UserKey { name }) => warn!(
+                wasm = %wasm_name,
+                path = %path.display(),
+                ?source,
+                key = %name,
+                "WASM plugin signature verified by user-trusted key, NOT the rosec release key",
             ),
             VerifyOutcome::NotVerified { reason } => debug!(
                 wasm = %wasm_name,
@@ -340,8 +357,8 @@ fn should_replace(
 /// returned as `Err(reason)` from [`verify_plugin`].
 #[derive(Debug)]
 enum VerifyOutcome {
-    /// Signature present and verified.
-    Verified,
+    /// Signature present and verified by the given trust anchor.
+    Verified(VerifiedBy),
     /// Verification was not performed (disabled). The plugin may still
     /// be loaded.
     NotVerified { reason: &'static str },
@@ -372,6 +389,26 @@ pub struct PluginBundle {
     pub wasm_bytes: Vec<u8>,
     pub policy_bytes: Vec<u8>,
     pub policy: PluginPolicy,
+}
+
+/// Which trust anchor accepted a bundle's signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifiedBy {
+    /// One of the release keys embedded in this build
+    /// ([`crate::keys::WASM_SIGNING_PUBKEYS`]).
+    ReleaseKey,
+    /// A user-configured `[[service.wasm_trusted_key]]` entry; the label is
+    /// the entry's `name`.
+    UserKey { name: String },
+}
+
+impl std::fmt::Display for VerifiedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReleaseKey => write!(f, "embedded rosec release key"),
+            Self::UserKey { name } => write!(f, "user-trusted key '{name}'"),
+        }
+    }
 }
 
 impl PluginBundle {
@@ -412,9 +449,67 @@ impl PluginBundle {
     }
 
     /// Verify the detached `.minisig` over `(wasm_bytes || policy_bytes)`
-    /// against the embedded release public key.
+    /// against the embedded release keys.
     pub fn verify_signature(&self) -> Result<(), String> {
-        self.verify_signature_with(WASM_SIGNING_PUBKEY)
+        self.verify_signature_trusted(&[]).map(|_| ())
+    }
+
+    /// Verify against the embedded release keys first, then any
+    /// user-configured trust anchors, reporting which one accepted the
+    /// signature. A user key is only consulted when its `kinds` scope is
+    /// empty or contains this bundle's policy kind.
+    pub fn verify_signature_trusted(
+        &self,
+        user_keys: &[WasmTrustedKey],
+    ) -> Result<VerifiedBy, String> {
+        self.verify_against(crate::keys::WASM_SIGNING_PUBKEYS, user_keys)
+    }
+
+    /// Trust-set verification with an explicit release-key set (separated
+    /// from [`Self::verify_signature_trusted`] so tests can inject keys).
+    fn verify_against(
+        &self,
+        release_keys: &[&str],
+        user_keys: &[WasmTrustedKey],
+    ) -> Result<VerifiedBy, String> {
+        let mut reasons: Vec<String> = Vec::new();
+
+        for key in release_keys {
+            match self.verify_signature_with(key) {
+                Ok(()) => return Ok(VerifiedBy::ReleaseKey),
+                Err(reason) => reasons.push(format!("release key: {reason}")),
+            }
+        }
+
+        for tk in user_keys {
+            if !tk.kinds.is_empty() && !tk.kinds.iter().any(|k| k == &self.policy.kind) {
+                reasons.push(format!(
+                    "user key '{}' skipped: kind '{}' not in its kinds scope [{}]",
+                    tk.name,
+                    self.policy.kind,
+                    tk.kinds.join(", "),
+                ));
+                continue;
+            }
+            match self.verify_signature_with(&tk.key) {
+                Ok(()) => {
+                    return Ok(VerifiedBy::UserKey {
+                        name: tk.name.clone(),
+                    });
+                }
+                Err(reason) => reasons.push(format!("user key '{}': {reason}", tk.name)),
+            }
+        }
+
+        // Deduplicate: with several keys the dominant reason is usually the
+        // same "different key" message repeated per candidate.
+        reasons.dedup();
+        Err(format!(
+            "signature not accepted by any trusted key ({} release, {} user): {}",
+            release_keys.len(),
+            user_keys.len(),
+            reasons.join("; "),
+        ))
     }
 
     /// Verify against an arbitrary base64 minisign public key (the second
@@ -470,6 +565,7 @@ impl PluginBundle {
 fn verify_plugin(
     wasm_path: &Path,
     verify: WasmVerify,
+    user_keys: &[WasmTrustedKey],
 ) -> Result<(VerifyOutcome, VerifiedPlugin), String> {
     let bundle = PluginBundle::load(wasm_path)?;
 
@@ -488,10 +584,10 @@ fn verify_plugin(
         ));
     }
 
-    bundle.verify_signature()?;
+    let verified_by = bundle.verify_signature_trusted(user_keys)?;
 
     Ok((
-        VerifyOutcome::Verified,
+        VerifyOutcome::Verified(verified_by),
         VerifiedPlugin {
             wasm_bytes: bundle.wasm_bytes,
             policy: bundle.policy,
@@ -623,4 +719,121 @@ pub fn id_derivation_key(registry: &PluginRegistry, kind: &str) -> Option<String
     registry
         .get(kind)
         .and_then(|p| p.manifest.id_derivation_key.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_bundle(dir: &Path, kind: &str) -> PathBuf {
+        let wasm = dir.join("test_plugin.wasm");
+        std::fs::write(&wasm, b"\0asm-fake-module").unwrap();
+        std::fs::write(
+            policy_path_for(&wasm),
+            format!("schema_version = 1\nkind = \"{kind}\"\nname = \"Test\"\n"),
+        )
+        .unwrap();
+        wasm
+    }
+
+    fn signed_bundle(dir: &Path, kind: &str) -> (PluginBundle, String) {
+        let wasm = write_bundle(dir, kind);
+        let kp = minisign::KeyPair::generate_encrypted_keypair(Some(String::new())).unwrap();
+        let unsigned = PluginBundle::load(&wasm).unwrap();
+        let combined = policy::signature_input(&unsigned.wasm_bytes, &unsigned.policy_bytes);
+        let sig = minisign::sign(Some(&kp.pk), &kp.sk, combined.as_slice(), None, None).unwrap();
+        std::fs::write(signature_path_for(&wasm), sig.to_string()).unwrap();
+        (PluginBundle::load(&wasm).unwrap(), kp.pk.to_base64())
+    }
+
+    fn other_key() -> String {
+        minisign::KeyPair::generate_encrypted_keypair(Some(String::new()))
+            .unwrap()
+            .pk
+            .to_base64()
+    }
+
+    fn user_key(name: &str, key: &str, kinds: &[&str]) -> WasmTrustedKey {
+        WasmTrustedKey {
+            key: key.to_string(),
+            name: name.to_string(),
+            kinds: kinds.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn release_key_set_selects_matching_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, signer) = signed_bundle(dir.path(), "test");
+        let old = other_key();
+        // Rotation window: old key first, new (signing) key second.
+        let verified = bundle.verify_against(&[&old, &signer], &[]).unwrap();
+        assert_eq!(verified, VerifiedBy::ReleaseKey);
+    }
+
+    #[test]
+    fn unknown_signer_rejected_by_all_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, _signer) = signed_bundle(dir.path(), "test");
+        let err = bundle.verify_against(&[&other_key()], &[]).unwrap_err();
+        assert!(err.contains("not accepted by any trusted key"), "{err}");
+    }
+
+    #[test]
+    fn user_key_accepted_with_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, signer) = signed_bundle(dir.path(), "test");
+        let verified = bundle
+            .verify_against(&[&other_key()], &[user_key("acme", &signer, &[])])
+            .unwrap();
+        assert_eq!(
+            verified,
+            VerifiedBy::UserKey {
+                name: "acme".into()
+            }
+        );
+    }
+
+    #[test]
+    fn user_key_kind_scope_match_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, signer) = signed_bundle(dir.path(), "acme-vault");
+        let verified = bundle
+            .verify_against(&[], &[user_key("acme", &signer, &["acme-vault"])])
+            .unwrap();
+        assert!(matches!(verified, VerifiedBy::UserKey { .. }));
+    }
+
+    #[test]
+    fn user_key_kind_scope_mismatch_skips_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, signer) = signed_bundle(dir.path(), "impersonated-kind");
+        let err = bundle
+            .verify_against(&[], &[user_key("acme", &signer, &["acme-vault"])])
+            .unwrap_err();
+        assert!(err.contains("skipped"), "{err}");
+        assert!(err.contains("kinds scope"), "{err}");
+    }
+
+    #[test]
+    fn invalid_user_key_reported_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, signer) = signed_bundle(dir.path(), "test");
+        // A garbage key must not mask a later valid one.
+        let verified = bundle
+            .verify_against(
+                &[],
+                &[
+                    user_key("broken", "not-base64!!", &[]),
+                    user_key("acme", &signer, &[]),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            verified,
+            VerifiedBy::UserKey {
+                name: "acme".into()
+            }
+        );
+    }
 }

@@ -1220,6 +1220,33 @@ pub enum WasmVerify {
     Disabled,
 }
 
+/// A user-configured trust anchor for WASM plugin signatures, on top of the
+/// release keys embedded in the binary.
+///
+/// Lets a user run plugins signed by a third party (e.g. a partner writing
+/// their own provider) without the global off-switch of
+/// `wasm_verify = "disabled"`: verification stays on, and this key is only
+/// consulted for the plugin kinds it is scoped to.  rosecd logs a `warn!`
+/// whenever a plugin loads on the strength of a user key rather than a
+/// release key, so the extended trust is auditable at startup.
+///
+/// ```toml
+/// [[service.wasm_trusted_key]]
+/// key   = "RWQ..."          # base64 minisign public key (.pub second line)
+/// name  = "acme-corp"       # label used in logs and `rosec provider validate`
+/// kinds = ["acme-vault"]    # optional: kinds this key may vouch for (empty = any)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmTrustedKey {
+    /// Base64-encoded minisign public key (the second line of a `.pub` file).
+    pub key: String,
+    /// Human-readable label for logs and validation output.
+    pub name: String,
+    /// Plugin kinds this key is allowed to vouch for. Empty means any kind.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoLockPolicy {

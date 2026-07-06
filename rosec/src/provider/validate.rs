@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use rosec_core::WasmVerify;
 use rosec_core::config::ProviderEntry;
+use rosec_core::{WasmTrustedKey, WasmVerify};
 use rosec_wasm::discovery::PluginBundle;
 use rosec_wasm::policy::{self, AccessMode, PluginPolicy};
 
@@ -37,8 +37,11 @@ pub fn run(args: &ProviderValidateArgs) -> Result<()> {
         // Disabled here means "discover regardless of signature state" — this
         // command reports signature status itself instead of silently
         // skipping unsigned plugins the way the daemon's Required scan does.
-        let registry =
-            rosec_wasm::discovery::scan_plugins(cfg.service.wasm_prefer, WasmVerify::Disabled);
+        let registry = rosec_wasm::discovery::scan_plugins(
+            cfg.service.wasm_prefer,
+            WasmVerify::Disabled,
+            &cfg.service.wasm_trusted_key,
+        );
         match &args.kind {
             Some(kind) => match registry.get(kind) {
                 Some(plugin) => vec![plugin.wasm_path.clone()],
@@ -73,7 +76,12 @@ pub fn run(args: &ProviderValidateArgs) -> Result<()> {
         if i > 0 {
             println!();
         }
-        problems += validate_bundle(wasm_path, &cfg.provider, cfg.service.wasm_verify);
+        problems += validate_bundle(
+            wasm_path,
+            &cfg.provider,
+            cfg.service.wasm_verify,
+            &cfg.service.wasm_trusted_key,
+        );
     }
 
     if problems > 0 {
@@ -84,7 +92,12 @@ pub fn run(args: &ProviderValidateArgs) -> Result<()> {
 
 /// Validate one bundle and print the report. Returns the number of problems
 /// (signature failures, unresolvable policies, missing required options).
-fn validate_bundle(wasm_path: &Path, entries: &[ProviderEntry], verify: WasmVerify) -> usize {
+fn validate_bundle(
+    wasm_path: &Path,
+    entries: &[ProviderEntry],
+    verify: WasmVerify,
+    user_keys: &[WasmTrustedKey],
+) -> usize {
     let mut problems = 0usize;
 
     let bundle = match PluginBundle::load(wasm_path) {
@@ -110,9 +123,15 @@ fn validate_bundle(wasm_path: &Path, entries: &[ProviderEntry], verify: WasmVeri
     println!("  wasm:    {}", bundle.wasm_path.display());
     println!("  policy:  {}", bundle.policy_path.display());
 
-    match bundle.verify_signature() {
-        Ok(()) => {
-            println!("  signature: ✓ valid (embedded rosec release key)");
+    match bundle.verify_signature_trusted(user_keys) {
+        Ok(verified_by) => {
+            println!("  signature: ✓ valid ({verified_by})");
+            if let rosec_wasm::discovery::VerifiedBy::UserKey { name } = &verified_by {
+                println!(
+                    "    warning: verified by user-trusted key '{name}', \
+                     NOT the rosec release key"
+                );
+            }
         }
         Err(reason) => {
             problems += 1;

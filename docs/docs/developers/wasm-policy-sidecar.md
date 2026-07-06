@@ -327,6 +327,34 @@ Exit status is non-zero when a signature fails or a configured provider
 can't resolve the policy (e.g. missing required options), so it can
 gate scripts.
 
+### Trust anchors and key rotation
+
+Verification consults an ordered trust set, and reports which anchor
+accepted the signature:
+
+1. **Embedded release keys** (`WASM_SIGNING_PUBKEYS` in
+   `rosec-wasm/src/keys/mod.rs`) — a *set*, so rotation runs a
+   deprecation window instead of a flag-day. During a window the set
+   holds both the outgoing and incoming key; releases in that window
+   load plugins signed by either. The full rotation procedure is
+   documented in `keys/mod.rs`; the release workflow's post-sign
+   `rosec-package-wasm verify` gate fails the build if the CI signing
+   secret and the embedded keys ever drift apart.
+2. **User trust anchors** (`[[service.wasm_trusted_key]]` in the user's
+   config) — opt-in keys for third-party plugin authors, optionally
+   scoped to specific plugin kinds. See the
+   [configuration reference](../configuration#trusted-plugin-signing-keys).
+   rosecd logs a `warn!` whenever a plugin loads via a user key rather
+   than a release key.
+
+Third-party authors are deliberately **not** embedded in the binary:
+embedding would make every partner part of the release trust root for
+all users and require a rosec release to onboard or revoke one. A user
+trust anchor keeps the decision local, auditable (`rosec provider
+validate` shows the provenance), revocable by deleting a config entry,
+and scoped — verification stays on for everything else, unlike
+`wasm_verify = "disabled"`.
+
 ## Threat model
 
 **What the sidecar fixes:**

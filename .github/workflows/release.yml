@@ -281,6 +281,7 @@ jobs:
         with:
           key: wasm-providers
           workspaces: |
+            .
             rosec-bitwarden-pm
             rosec-bitwarden-sm
             rosec-gnome-keyring
@@ -330,32 +331,29 @@ jobs:
           cp rosec-keepassxc-file/rosec_keepassxc_file.wasm.policy.toml \
              dist/providers/rosec_keepassxc_file.wasm.policy.toml
 
+      # rosec-package-wasm validates each policy schema before signing and
+      # reads the key from the WASM_SIGNING_KEY env var in-process (the key
+      # never touches disk). The .minisig covers (wasm_bytes || policy_bytes)
+      # so substituting either file invalidates the signature.
+      #
+      # Dev profile on purpose: signing needs no optimisation and the dev
+      # build of the workspace compiles much faster in CI.
+      - name: Build packaging tool
+        run: cargo build -p rosec-tools
+
       - name: Sign WASM providers (combined wasm || policy)
         env:
           WASM_SIGNING_KEY: ${{ secrets.WASM_SIGNING_KEY }}
-        run: |
-          cargo install rsign2 --quiet 2>/dev/null || true
-          KEYFILE=$(mktemp)
-          echo "${WASM_SIGNING_KEY}" > "${KEYFILE}"
-          trap 'rm -f "${KEYFILE}"' EXIT
+        run: ./target/debug/rosec-package-wasm sign --no-password dist/providers/
 
-          # The .minisig covers (wasm_bytes || policy_bytes) so substituting
-          # either file invalidates the signature. We concatenate to a temp
-          # file, sign that, then move the produced .minisig to the wasm's
-          # canonical sidecar path.
-          for wasm in dist/providers/*.wasm; do
-            policy="${wasm}.policy.toml"
-            if [[ ! -f "${policy}" ]]; then
-              echo "ERROR: missing policy file for ${wasm}" >&2
-              exit 1
-            fi
-            combined=$(mktemp)
-            cat "${wasm}" "${policy}" > "${combined}"
-            rsign sign -s "${KEYFILE}" -W "${combined}"
-            mv "${combined}.minisig" "${wasm}.minisig"
-            rm -f "${combined}"
-            echo "Signed: ${wasm} + ${policy}"
-          done
+      # Release gate: the freshly signed bundles must verify against the
+      # release keys embedded in THIS source tree (WASM_SIGNING_PUBKEYS).
+      # Fails the release if the Actions signing secret and the embedded
+      # public keys ever drift apart — e.g. a rotated secret without the
+      # matching keys/mod.rs update — instead of shipping plugins the
+      # released daemon would reject.
+      - name: Verify signed providers against embedded release keys
+        run: ./target/debug/rosec-package-wasm verify dist/providers/
 
       - name: Package signed WASM providers
         run: |

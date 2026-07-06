@@ -13,9 +13,11 @@ use super::{
 };
 
 pub async fn run(args: ProviderAddArgs) -> Result<()> {
+    let trusted_keys = crate::load_config().service.wasm_trusted_key;
     let registry = rosec_wasm::discovery::scan_plugins(
         WasmPreference::default(),
         rosec_core::WasmVerify::default(),
+        &trusted_keys,
     );
 
     let kind = &args.kind;

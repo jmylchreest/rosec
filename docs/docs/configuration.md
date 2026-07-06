@@ -15,6 +15,30 @@ Controls vault caching and deduplication behaviour.
 | `refresh_interval_secs` | integer | `60` | How often (seconds) to re-sync each provider. Set to `0` to disable periodic refresh. |
 | `ssh_fuse` | bool | `true` | Mount the SSH FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/ssh/`. Set to `false` to disable. See [ssh-agent.md](ssh-agent.md). |
 | `totp_fuse` | bool | `true` | Mount the TOTP FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/totp/`. Set to `false` to disable. |
+| `wasm_prefer` | string | `"user"` | Which copy wins when a WASM provider kind exists in both the system and user provider directories: `"user"`, `"system"`, or `"newest"`. |
+| `wasm_verify` | string | `"required"` | Signature verification for WASM provider plugins: `"required"` or `"disabled"` (local plugin development only). |
+| `wasm_trusted_key` | array of tables | `[]` | Additional trust anchors for WASM plugin signatures. See [Trusted plugin signing keys](#trusted-plugin-signing-keys). |
+
+### Trusted plugin signing keys
+
+By default a WASM plugin only loads when its bundle is signed by a rosec
+release key embedded in the binary. To run a plugin signed by a third party
+(e.g. a partner shipping their own provider) *without* the global off-switch of
+`wasm_verify = "disabled"`, add the author's minisign public key as a trust
+anchor:
+
+```toml
+[[service.wasm_trusted_key]]
+key   = "RWQ..."          # base64 minisign public key (second line of the .pub file)
+name  = "acme-corp"       # label shown in logs and `rosec provider validate`
+kinds = ["acme-vault"]    # optional: kinds this key may vouch for (empty = any)
+```
+
+Scoping `kinds` limits the blast radius of the extended trust: the key is only
+consulted for plugins whose signed policy declares one of the listed kinds.
+rosecd logs a `warn!` at startup whenever a plugin loads on the strength of a
+user-trusted key rather than a release key, and
+`rosec provider validate <kind>` shows the same provenance.
 
 ### Deduplication
 

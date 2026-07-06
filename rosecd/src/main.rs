@@ -72,8 +72,11 @@ async fn run() -> Result<()> {
     );
 
     // Discover WASM plugins from system and user directories.
-    let plugin_registry =
-        rosec_wasm::discovery::scan_plugins(config.service.wasm_prefer, config.service.wasm_verify);
+    let plugin_registry = rosec_wasm::discovery::scan_plugins(
+        config.service.wasm_prefer,
+        config.service.wasm_verify,
+        &config.service.wasm_trusted_key,
+    );
 
     let router_config = RouterConfig {
         dedup_strategy: config.service.dedup_strategy,
@@ -1625,6 +1628,7 @@ async fn reconcile_providers(
         *plugin_registry = rosec_wasm::discovery::scan_plugins(
             new_config.service.wasm_prefer,
             new_config.service.wasm_verify,
+            &new_config.service.wasm_trusted_key,
         );
     }
 

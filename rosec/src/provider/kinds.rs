@@ -31,9 +31,11 @@ pub fn run() {
         println!();
     }
 
+    let cfg = crate::load_config();
     let registry = rosec_wasm::discovery::scan_plugins(
         WasmPreference::default(),
         rosec_core::WasmVerify::default(),
+        &cfg.service.wasm_trusted_key,
     );
     for kind in registry.kinds() {
         let plugin = registry

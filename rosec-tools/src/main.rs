@@ -25,7 +25,7 @@ use clap::{Parser, Subcommand};
 use minisign::{KeyPair, PublicKey, SecretKey, SecretKeyBox};
 
 use rosec_wasm::discovery::{PluginBundle, policy_path_for, signature_path_for};
-use rosec_wasm::keys::WASM_SIGNING_PUBKEY;
+use rosec_wasm::keys::WASM_SIGNING_PUBKEYS;
 use rosec_wasm::policy;
 
 /// Env var holding the *contents* of an rsign/minisign secret-key file
@@ -207,10 +207,16 @@ fn keygen(args: &KeygenArgs) -> Result<()> {
     );
     println!();
     println!(
-        "Note: stock rosec builds only load plugins signed by the embedded release key.\n\
-         Users must either rebuild rosec with your public key in\n\
-         rosec-wasm/src/keys/mod.rs (WASM_SIGNING_PUBKEY) or set wasm_verify = \"disabled\"\n\
-         (development only)."
+        "Note: stock rosec builds only load plugins signed by an embedded release key.\n\
+         Users of your plugin must add your public key as a trust anchor in their\n\
+         rosec config:\n\
+         \n\
+           [[service.wasm_trusted_key]]\n\
+           key   = \"{}\"\n\
+           name  = \"{}\"\n\
+           kinds = [\"<your plugin kind>\"]",
+        keypair.pk.to_base64(),
+        args.prefix,
     );
     Ok(())
 }
@@ -277,11 +283,11 @@ fn sign(args: &SignArgs) -> Result<()> {
         );
     }
 
-    if pk.to_base64() != WASM_SIGNING_PUBKEY {
+    if !WASM_SIGNING_PUBKEYS.contains(&pk.to_base64().as_str()) {
         eprintln!(
-            "note: signed with a key that is NOT the rosec release key; stock rosec \
-             builds will reject these bundles unless rebuilt with your public key \
-             ({}) embedded, or run with wasm_verify = \"disabled\".",
+            "note: signed with a key that is NOT a rosec release key; stock rosec \
+             builds will reject these bundles unless users add your public key \
+             ({}) as a [[service.wasm_trusted_key]] entry in their rosec config.",
             pk.to_base64(),
         );
     }
@@ -291,19 +297,20 @@ fn sign(args: &SignArgs) -> Result<()> {
 
 fn verify(args: &VerifyArgs) -> Result<()> {
     let (pubkey_base64, key_desc) = match &args.pubkey {
-        Some(raw) => (resolve_pubkey(raw)?, "supplied key"),
-        None => (
-            WASM_SIGNING_PUBKEY.to_string(),
-            "embedded rosec release key",
-        ),
+        Some(raw) => (Some(resolve_pubkey(raw)?), "supplied key"),
+        None => (None, "embedded rosec release key(s)"),
     };
 
     let wasm_files = collect_wasm_files(&args.paths)?;
     let mut failures = 0usize;
     for wasm_path in &wasm_files {
-        match PluginBundle::load(wasm_path)
-            .and_then(|b| b.verify_signature_with(&pubkey_base64).map(|()| b))
-        {
+        match PluginBundle::load(wasm_path).and_then(|b| {
+            match &pubkey_base64 {
+                Some(key) => b.verify_signature_with(key),
+                None => b.verify_signature(),
+            }
+            .map(|()| b)
+        }) {
             Ok(bundle) => println!(
                 "ok: {} (kind={}, version={}) — signature valid against {key_desc}",
                 wasm_path.display(),
