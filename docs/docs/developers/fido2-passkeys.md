@@ -128,10 +128,23 @@ character device, not a mount point. The flow:
    `uv = true`, the platform-authenticator pattern).
 
 "User level" is achievable, with one caveat: `/dev/uhid` itself is
-root-only by default, so packaging ships a udev rule granting `uaccess` to
-`/dev/uhid` (the same mechanism used for `/dev/kvm` and friends), or a
-small privileged helper creates the device and hands the fd to the user
-daemon (the softu2f split). After creation everything runs as the user.
+root-only by default — deliberately, because uhid can create *any* HID
+device, including virtual keyboards (an input-injection primitive). Two
+ways to cross that boundary without running rosecd as root:
+
+- **udev `uaccess` rule** on `/dev/uhid` (the `/dev/kvm` mechanism) —
+  zero moving parts, but it hands every process in the active session the
+  ability to create arbitrary HID devices, widening the input-injection
+  surface beyond rosec.
+- **Privileged broker (preferred)** — a tiny socket-activated system
+  service (`rosec-uhid-broker`) opens `/dev/uhid` as root, creates a
+  device whose HID descriptor is hard-coded to the FIDO usage page
+  (`0xF1D0`), passes the fd to the user's rosecd via `SCM_RIGHTS`, and
+  exits. The broker physically cannot be asked to create a keyboard, and
+  after fd-passing all CTAP traffic runs unprivileged. This is the
+  softu2f split, and it matches rosec's least-privilege posture.
+
+After creation everything runs as the user.
 Known limitations: Flatpak/Snap-confined browsers need device access;
 attestation-enforcing RPs (e.g. Entra ID) reject software authenticators.
 
