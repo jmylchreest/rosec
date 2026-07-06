@@ -117,15 +117,36 @@ character device, not a mount point. The flow:
 
 1. `rosec-fido` opens `/dev/uhid` and creates a HID device declaring the
    FIDO usage page (`0xF1D0`).
-2. The kernel materialises `/dev/hidrawN`; systemd's `fido_id` rule tags
-   FIDO-usage-page devices with `uaccess` automatically, so the active
-   session's browsers can open it — no rosec-specific udev rule needed for
-   the *hidraw* side.
+2. The kernel materialises `/dev/hidrawN`. The node must be owned by the
+   requesting user at `0600` (see *Multi-user safety* below) — **not** left
+   to the generic `fido_id` uaccess tag, which is active-seat-scoped and
+   wrong for a virtual device.
 3. Browsers enumerate it like a USB key; rosec answers `CTAPHID_INIT`,
    `authenticatorGetInfo`, `authenticatorMakeCredential`,
    `authenticatorGetAssertion` from the registry + ceremony engine, with
    `rosec-prompt` supplying user presence/verification (reported as
    `uv = true`, the platform-authenticator pattern).
+
+### Multi-user safety — do NOT rely on the blanket `fido_id` uaccess tag
+
+The stock `fido_id` + `70-uaccess` rule grants the `/dev/hidrawN` node to
+the **active seat session**, not to a specific user — the model assumes a
+physical device on a seat. A virtual uhid device has no seat binding, so on
+a multi-user box (fast user-switching, multi-seat) that ACL can expose one
+user's authenticator node to whoever is currently active. They still can't
+complete an assertion — CTAP flows to the fd the owner's rosecd holds, so
+the prompt fires on the *owner's* session and dies without their
+confirmation — but enumeration/initiation by another local user is not an
+acceptable property.
+
+The device node must therefore be owned by the **requesting uid at mode
+`0600`**, not left to the generic uaccess tag: either a dedicated udev rule
+keyed on rosec's vendor/product string chowns it, or the broker chowns it
+after `UHID_CREATE2` (it knows the caller's uid from `SO_PEERCRED`).
+Remote/SSH users have no active seat and cannot open the node regardless;
+only concurrent *local* sessions are in scope. This frontend is a desktop
+feature and should be opt-in per user, not enabled system-wide on shared
+servers.
 
 "User level" is achievable, with one caveat: `/dev/uhid` itself is
 root-only by default — deliberately, because uhid can create *any* HID
