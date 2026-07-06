@@ -104,6 +104,10 @@ pub struct DecryptedLogin {
     pub password: Option<Zeroizing<String>>,
     pub totp: Option<Zeroizing<String>>,
     pub uris: Vec<String>,
+    /// FIDO2 credentials (passkeys) attached to this login.
+    /// `default` keeps pre-fido2 offline-cache blobs deserialising.
+    #[serde(default)]
+    pub fido2_credentials: Vec<DecryptedFido2Credential>,
 }
 
 impl std::fmt::Debug for DecryptedLogin {
@@ -113,6 +117,41 @@ impl std::fmt::Debug for DecryptedLogin {
             .field("password", &self.password.as_ref().map(|_| "[redacted]"))
             .field("totp", &self.totp.as_ref().map(|_| "[redacted]"))
             .field("uris", &self.uris)
+            .field("fido2_credentials", &self.fido2_credentials.len())
+            .finish()
+    }
+}
+
+/// A decrypted FIDO2 credential (passkey) from a login cipher.
+///
+/// `key_value` holds the private key as Bitwarden stores it: base64url
+/// (unpadded) PKCS#8 DER. It is zeroized on drop and only leaves the guest
+/// through `get_fido2_key`, PEM-wrapped.
+#[derive(Serialize, Deserialize)]
+pub struct DecryptedFido2Credential {
+    /// Bitwarden-native credential ID: a GUID string.
+    pub credential_id: Option<String>,
+    pub key_algorithm: Option<String>,
+    pub key_curve: Option<String>,
+    pub key_value: Option<Zeroizing<String>>,
+    pub rp_id: Option<String>,
+    pub rp_name: Option<String>,
+    /// Base64url user handle, as stored.
+    pub user_handle: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub counter: u32,
+    pub discoverable: bool,
+}
+
+impl std::fmt::Debug for DecryptedFido2Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedFido2Credential")
+            .field("credential_id", &self.credential_id)
+            .field("rp_id", &self.rp_id)
+            .field("key_value", &self.key_value.as_ref().map(|_| "[redacted]"))
+            .field("counter", &self.counter)
+            .field("discoverable", &self.discoverable)
             .finish()
     }
 }
@@ -529,11 +568,34 @@ impl VaultState {
             }
         }
 
+        let mut fido2_credentials = Vec::new();
+        if let Some(creds) = &login.fido2_credentials {
+            for c in creds {
+                fido2_credentials.push(DecryptedFido2Credential {
+                    credential_id: cipher::decrypt_field(&c.credential_id, keys, None)?,
+                    key_algorithm: cipher::decrypt_field(&c.key_algorithm, keys, None)?,
+                    key_curve: cipher::decrypt_field(&c.key_curve, keys, None)?,
+                    key_value: cipher::decrypt_field_sensitive(&c.key_value, keys, None)?,
+                    rp_id: cipher::decrypt_field(&c.rp_id, keys, None)?,
+                    rp_name: cipher::decrypt_field(&c.rp_name, keys, None)?,
+                    user_handle: cipher::decrypt_field(&c.user_handle, keys, None)?,
+                    user_name: cipher::decrypt_field(&c.user_name, keys, None)?,
+                    user_display_name: cipher::decrypt_field(&c.user_display_name, keys, None)?,
+                    counter: cipher::decrypt_field(&c.counter, keys, None)?
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
+                    discoverable: cipher::decrypt_field(&c.discoverable, keys, None)?
+                        .is_some_and(|s| s == "true"),
+                });
+            }
+        }
+
         Ok(DecryptedLogin {
             username,
             password,
             totp,
             uris,
+            fido2_credentials,
         })
     }
 

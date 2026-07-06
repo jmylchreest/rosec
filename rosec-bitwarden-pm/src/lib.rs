@@ -1682,16 +1682,224 @@ pub fn get_ssh_private_key(
     }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// FIDO2 / passkeys
+// ═══════════════════════════════════════════════════════════════════
+
+/// Convert a Bitwarden credential ID (GUID string) to the 16 raw bytes used
+/// on the WebAuthn wire, in RFC 4122 textual order (matching the official
+/// SDK's `string_to_guid_bytes`, which round-trips through `Uuid`).
+fn guid_to_bytes(guid: &str) -> Option<[u8; 16]> {
+    let hex: String = guid.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Wrap Bitwarden's base64url (unpadded) PKCS#8 DER key value into the PEM
+/// form used at the rosec boundary.
+fn pkcs8_b64url_to_pem(key_value: &str) -> Option<Zeroizing<String>> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    let der = URL_SAFE_NO_PAD
+        .decode(key_value.trim_end_matches('='))
+        .ok()?;
+    let b64 = Zeroizing::new(STANDARD.encode(&der));
+    let mut pem = String::with_capacity(b64.len() + 64);
+    pem.push_str("-----BEGIN PRIVATE KEY-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        // Chunks of the base64 alphabet are always valid UTF-8.
+        pem.push_str(std::str::from_utf8(chunk).ok()?);
+        pem.push('\n');
+    }
+    pem.push_str("-----END PRIVATE KEY-----\n");
+    Some(Zeroizing::new(pem))
+}
+
+/// Map one decrypted credential to wire metadata. Returns `None` (with a
+/// debug log) for credentials that are unusable for assertions: missing
+/// rpId/credentialId/key material, or an algorithm other than ES256 —
+/// Bitwarden only ever creates ECDSA/P-256 keys.
+fn to_fido2_meta(
+    dc: &DecryptedCipher,
+    cred: &crate::vault::DecryptedFido2Credential,
+) -> Option<WasmFido2CredentialMeta> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let rp_id = cred.rp_id.clone()?;
+    let guid = cred.credential_id.as_deref()?;
+    let Some(raw_id) = guid_to_bytes(guid) else {
+        extism_pdk::debug!("fido2: item {} credential id is not a GUID, skipping", dc.id);
+        return None;
+    };
+    cred.key_value.as_ref()?;
+
+    let es256 = cred.key_algorithm.as_deref() == Some("ECDSA")
+        && cred.key_curve.as_deref() == Some("P-256");
+    if !es256 {
+        extism_pdk::debug!(
+            "fido2: item {} credential {} uses unsupported algorithm {:?}/{:?}, skipping",
+            dc.id,
+            guid,
+            cred.key_algorithm,
+            cred.key_curve
+        );
+        return None;
+    }
+
+    Some(WasmFido2CredentialMeta {
+        item_id: dc.id.clone(),
+        credential_id: URL_SAFE_NO_PAD.encode(raw_id),
+        item_name: dc.name.clone(),
+        rp_id,
+        rp_name: cred.rp_name.clone(),
+        user_handle: cred.user_handle.clone(),
+        user_name: cred.user_name.clone(),
+        user_display_name: cred.user_display_name.clone(),
+        algorithm: -7, // COSE ES256
+        counter: cred.counter,
+        discoverable: cred.discoverable,
+        require_uv: false,
+        revision_date_epoch_secs: dc
+            .revision_date
+            .as_deref()
+            .and_then(parse_iso8601)
+            .map(to_epoch_secs),
+    })
+}
+
+/// List FIDO2 credentials (passkeys) across all login ciphers.
+#[plugin_fn]
+pub fn list_fido2_credentials(_input: ()) -> FnResult<Json<Fido2CredentialListResponse>> {
+    let guard = STATE.lock();
+
+    let Some(state) = guard.as_ref() else {
+        return Ok(Json(Fido2CredentialListResponse {
+            ok: false,
+            error: Some("plugin not initialised".to_string()),
+            error_kind: Some(ErrorKind::Unavailable),
+            credentials: Vec::new(),
+        }));
+    };
+
+    let Some(auth) = &state.auth else {
+        return Ok(Json(Fido2CredentialListResponse {
+            ok: false,
+            error: Some("vault is locked".to_string()),
+            error_kind: Some(ErrorKind::Locked),
+            credentials: Vec::new(),
+        }));
+    };
+
+    let credentials: Vec<WasmFido2CredentialMeta> = auth
+        .vault
+        .ciphers()
+        .iter()
+        .filter_map(|dc| dc.login.as_ref().map(|l| (dc, l)))
+        .flat_map(|(dc, login)| {
+            login
+                .fido2_credentials
+                .iter()
+                .filter_map(|cred| to_fido2_meta(dc, cred))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    Ok(Json(Fido2CredentialListResponse {
+        ok: true,
+        error: None,
+        error_kind: None,
+        credentials,
+    }))
+}
+
+/// Get the PEM-encoded PKCS#8 private key for one FIDO2 credential.
+#[plugin_fn]
+pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2KeyResponse>> {
+    let guard = STATE.lock();
+
+    let Some(state) = guard.as_ref() else {
+        return Ok(Json(Fido2KeyResponse {
+            ok: false,
+            error: Some("plugin not initialised".to_string()),
+            error_kind: Some(ErrorKind::Unavailable),
+            pem: None,
+        }));
+    };
+
+    let Some(auth) = &state.auth else {
+        return Ok(Json(Fido2KeyResponse {
+            ok: false,
+            error: Some("vault is locked".to_string()),
+            error_kind: Some(ErrorKind::Locked),
+            pem: None,
+        }));
+    };
+
+    let not_found = |msg: String| {
+        Ok(Json(Fido2KeyResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::NotFound),
+            pem: None,
+        }))
+    };
+
+    let Some(dc) = auth.vault.cipher_by_id(&req.item_id) else {
+        return not_found(format!("item not found: {}", req.item_id));
+    };
+    let Some(login) = dc.login.as_ref() else {
+        return not_found(format!("item {} has no login data", req.item_id));
+    };
+
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let cred = login.fido2_credentials.iter().find(|c| {
+        c.credential_id
+            .as_deref()
+            .and_then(guid_to_bytes)
+            .is_some_and(|raw| URL_SAFE_NO_PAD.encode(raw) == req.credential_id)
+    });
+    let Some(cred) = cred else {
+        return not_found(format!(
+            "credential {} not found on item {}",
+            req.credential_id, req.item_id
+        ));
+    };
+
+    match cred.key_value.as_ref().and_then(|k| pkcs8_b64url_to_pem(k)) {
+        Some(pem) => Ok(Json(Fido2KeyResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            pem: Some(pem.to_string()),
+        })),
+        None => not_found(format!(
+            "credential {} on item {} has no usable key material",
+            req.credential_id, req.item_id
+        )),
+    }
+}
+
 /// Return the provider's capabilities.
 ///
-/// Bitwarden PM supports: Sync, Ssh, OfflineCache, Notifications, Totp
-/// (NOT Write, NOT PasswordChange).
+/// Bitwarden PM supports: Sync, Ssh, Fido2, OfflineCache, Notifications,
+/// Totp (NOT Write, NOT PasswordChange).
 #[plugin_fn]
 pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
     Ok(Json(CapabilitiesResponse {
         capabilities: vec![
             "sync".to_string(),
             "ssh".to_string(),
+            "fido2".to_string(),
             "offline_cache".to_string(),
             "notifications".to_string(),
             "totp".to_string(),
@@ -2167,3 +2375,4 @@ pub fn parse_notification(
 
     Ok(Json(protocol::NotificationAction { action: result }))
 }
+

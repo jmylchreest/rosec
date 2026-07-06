@@ -589,3 +589,79 @@ pub enum NotificationActionKind {
     /// Ignore this frame (ping, ack, handshake response, unknown).
     Ignore,
 }
+
+// ── FIDO2 / passkeys ─────────────────────────────────────────────
+
+/// Returned by `list_fido2_credentials`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Fido2CredentialListResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_kind: Option<ErrorKind>,
+    #[serde(default)]
+    pub credentials: Vec<WasmFido2CredentialMeta>,
+}
+
+/// One FIDO2 credential's metadata — the WASM wire equivalent of
+/// `rosec_core::Fido2CredentialMeta`. Discovery/selection data only; key
+/// material travels exclusively through `get_fido2_key`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WasmFido2CredentialMeta {
+    pub item_id: String,
+    /// Base64url (unpadded) raw credential ID bytes.
+    pub credential_id: String,
+    pub item_name: String,
+    pub rp_id: String,
+    #[serde(default)]
+    pub rp_name: Option<String>,
+    /// Base64url (unpadded) user handle bytes.
+    #[serde(default)]
+    pub user_handle: Option<String>,
+    #[serde(default)]
+    pub user_name: Option<String>,
+    #[serde(default)]
+    pub user_display_name: Option<String>,
+    /// COSE algorithm: `-7` ES256, `-8` EdDSA, `-257` RS256.
+    pub algorithm: i64,
+    #[serde(default)]
+    pub counter: u32,
+    #[serde(default)]
+    pub discoverable: bool,
+    #[serde(default)]
+    pub require_uv: bool,
+    #[serde(default)]
+    pub revision_date_epoch_secs: Option<u64>,
+}
+
+/// Sent to `get_fido2_key`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Fido2KeyRequest {
+    pub item_id: String,
+    pub credential_id: String,
+}
+
+/// Returned by `get_fido2_key`.
+#[derive(Serialize, Deserialize)]
+pub struct Fido2KeyResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_kind: Option<ErrorKind>,
+    /// PEM-encoded PKCS#8 private key.
+    #[serde(default)]
+    pub pem: Option<String>,
+}
+
+impl std::fmt::Debug for Fido2KeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fido2KeyResponse")
+            .field("ok", &self.ok)
+            .field("error", &self.error)
+            .field("error_kind", &self.error_kind)
+            .field("pem", &self.pem.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
