@@ -35,6 +35,10 @@ pub(super) struct SelectApp {
     label_color: iced::Color,
     accent: iced::Color,
     input_bg: iced::Color,
+    /// Text colour for the selected (accent-filled) row.
+    selected_text: iced::Color,
+    /// Secondary text colour for the selected row (muted `selected_text`).
+    selected_text_muted: iced::Color,
     cancel_bg: iced::Color,
     cancel_text_color: iced::Color,
     font: iced::Font,
@@ -109,6 +113,21 @@ impl SelectApp {
             parse_color(&req.theme.cancel_text, label_color)
         };
         let font = font_from_string(&req.theme.font_family);
+        // Text on the accent-filled selected row must contrast with the
+        // accent regardless of theme: dark ink on a light accent, light ink
+        // on a dark one. Relative luminance (Rec. 601) picks the side.
+        let accent_luma = 0.299 * accent.r + 0.587 * accent.g + 0.114 * accent.b;
+        let (selected_text, selected_text_muted) = if accent_luma > 0.55 {
+            (
+                iced::Color::from_rgb(0.08, 0.08, 0.10),
+                iced::Color::from_rgba(0.08, 0.08, 0.10, 0.75),
+            )
+        } else {
+            (
+                iced::Color::WHITE,
+                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+            )
+        };
         Self {
             title: req.title.clone(),
             message: req.message.clone(),
@@ -121,6 +140,8 @@ impl SelectApp {
             label_color,
             accent,
             input_bg,
+            selected_text,
+            selected_text_muted,
             cancel_bg,
             cancel_text_color: cancel_text,
             font,
@@ -143,6 +164,33 @@ impl SelectApp {
     }
 }
 
+/// Stable id for the option scrollable, so `update` can scroll it to follow
+/// the keyboard highlight (iced's scrollable does not auto-follow a
+/// programmatically-moved selection).
+fn list_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("rosec-select-list")
+}
+
+/// A scroll task that brings the highlighted row into view. Maps the
+/// highlighted index to a 0.0–1.0 relative offset; the widget clamps and
+/// only scrolls when needed, so short lists are unaffected. `x: None`
+/// leaves the horizontal offset untouched.
+fn follow_highlight(state: &SelectApp) -> iced::Task<SelectMessage> {
+    use iced::advanced::widget::operation::scrollable::{RelativeOffset, snap_to};
+    let n = state.options.len();
+    if n <= 1 {
+        return iced::Task::none();
+    }
+    let y = state.highlighted as f32 / (n - 1) as f32;
+    iced::advanced::widget::operate(snap_to(
+        list_id(),
+        RelativeOffset {
+            x: None,
+            y: Some(y),
+        },
+    ))
+}
+
 fn update(state: &mut SelectApp, message: SelectMessage) -> iced::Task<SelectMessage> {
     match message {
         SelectMessage::Choose(i) => state.choose(i),
@@ -150,12 +198,13 @@ fn update(state: &mut SelectApp, message: SelectMessage) -> iced::Task<SelectMes
         SelectMessage::Cancel => std::process::exit(1),
         SelectMessage::MoveUp => {
             state.highlighted = state.highlighted.saturating_sub(1);
+            follow_highlight(state)
         }
         SelectMessage::MoveDown => {
             state.highlighted = (state.highlighted + 1).min(state.options.len().saturating_sub(1));
+            follow_highlight(state)
         }
     }
-    iced::Task::none()
 }
 
 fn subscription(_state: &SelectApp) -> iced::Subscription<SelectMessage> {
@@ -195,17 +244,27 @@ fn view(state: &SelectApp) -> iced::Element<'_, SelectMessage> {
     let mut items = column![].spacing(6).width(Length::Fill);
     for (i, opt) in state.options.iter().enumerate() {
         let selected = i == state.highlighted;
-        let row_fg = if selected { state.accent } else { state.fg };
+        // On the selected row the fill is the accent colour, so text must
+        // contrast with the accent — the window background does, by
+        // construction (accent is a highlight chosen against `bg`). On
+        // unselected rows keep the normal foreground on the subtle input
+        // fill. Using accent as *both* fill and text made the selection
+        // unreadable.
+        let (primary_fg, secondary_fg) = if selected {
+            (state.selected_text, state.selected_text_muted)
+        } else {
+            (state.fg, state.label_color)
+        };
         let primary = text(&opt.primary)
             .size(font_size)
-            .color(row_fg)
+            .color(primary_fg)
             .font(bold_font);
         let mut rowcol = column![primary].spacing(2).width(Length::Fill);
         if !opt.secondary.is_empty() {
             rowcol = rowcol.push(
                 text(&opt.secondary)
                     .size(font_size - 2.0)
-                    .color(state.label_color)
+                    .color(secondary_fg)
                     .font(state.font),
             );
         }
@@ -221,24 +280,21 @@ fn view(state: &SelectApp) -> iced::Element<'_, SelectMessage> {
                 .padding(10)
                 .on_press(SelectMessage::Choose(i))
                 .style(move |_, s| {
-                    let mut st = button_style(row_bg, row_fg, s);
-                    // Keep the fill subtle for unselected rows: reuse the
-                    // input background rather than the accent.
-                    if !selected {
-                        st.background = Some(Background::Color(state.input_bg));
-                        st.text_color = state.fg;
-                        st.border = iced::Border {
-                            color: row_border,
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        };
-                    }
+                    let mut st = button_style(row_bg, primary_fg, s);
+                    st.background = Some(Background::Color(row_bg));
+                    st.text_color = primary_fg;
+                    st.border = iced::Border {
+                        color: row_border,
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    };
                     st
                 }),
         );
     }
 
     let list: Element<'_, SelectMessage> = scrollable(items)
+        .id(list_id())
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
