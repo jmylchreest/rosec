@@ -15,7 +15,7 @@ path = "src/main.rs"
 rosec-wasm = { path = "../rosec-wasm" }
 anyhow = { workspace = true }
 clap = { workspace = true }
-minisign = "0.7"
+minisign = "0.9"
 rpassword = { workspace = true }
 
 [dev-dependencies]

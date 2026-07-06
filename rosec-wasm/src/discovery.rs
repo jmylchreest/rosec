@@ -738,7 +738,7 @@ mod tests {
 
     fn signed_bundle(dir: &Path, kind: &str) -> (PluginBundle, String) {
         let wasm = write_bundle(dir, kind);
-        let kp = minisign::KeyPair::generate_encrypted_keypair(Some(String::new())).unwrap();
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         let unsigned = PluginBundle::load(&wasm).unwrap();
         let combined = policy::signature_input(&unsigned.wasm_bytes, &unsigned.policy_bytes);
         let sig = minisign::sign(Some(&kp.pk), &kp.sk, combined.as_slice(), None, None).unwrap();
@@ -747,7 +747,7 @@ mod tests {
     }
 
     fn other_key() -> String {
-        minisign::KeyPair::generate_encrypted_keypair(Some(String::new()))
+        minisign::KeyPair::generate_unencrypted_keypair()
             .unwrap()
             .pk
             .to_base64()

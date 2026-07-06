@@ -173,9 +173,10 @@ fn keygen(args: &KeygenArgs) -> Result<()> {
     } else {
         prompt_new_password()?
     };
-    // An empty password produces an unencrypted (CI-friendly) key; the
-    // "encrypted" generator is still required because it is the one that
-    // writes the key checksum serialization depends on.
+    // An empty password yields a scrypt("")-protected key — byte-compatible
+    // with `rsign generate -W`, so keys move freely between this tool and
+    // rsign. The "encrypted" generator is also the one that writes the key
+    // checksum serialization depends on.
     let keypair = KeyPair::generate_encrypted_keypair(Some(password))
         .map_err(|e| anyhow::anyhow!("keypair generation failed: {e}"))?;
 
@@ -379,9 +380,6 @@ fn load_secret_key(key_file: Option<&Path>, no_password: bool) -> Result<SecretK
             )
         })?,
     };
-    let sk_box = SecretKeyBox::from_string(&contents)
-        .map_err(|e| anyhow::anyhow!("parsing secret key: {e}"))?;
-
     let password = if no_password {
         Some(String::new())
     } else if let Ok(p) = std::env::var(KEY_PASSWORD_ENV) {
@@ -394,9 +392,20 @@ fn load_secret_key(key_file: Option<&Path>, no_password: bool) -> Result<SecretK
         Some(String::new())
     };
 
-    sk_box
-        .into_secret_key(password)
-        .map_err(|e| anyhow::anyhow!("decrypting secret key: {e}"))
+    // Passwordless keys come in two dialects: `rsign generate -W` encrypts
+    // with an empty scrypt password (kdf = scrypt), while fully unencrypted
+    // keys carry kdf = none and must skip the KDF entirely. Try the scrypt
+    // path first, fall back on the "not encrypted" refusal.
+    let parse = || {
+        SecretKeyBox::from_string(&contents).map_err(|e| anyhow::anyhow!("parsing secret key: {e}"))
+    };
+    match parse()?.into_secret_key(password) {
+        Ok(sk) => Ok(sk),
+        Err(e) if e.to_string().contains("not encrypted") => parse()?
+            .into_unencrypted_secret_key()
+            .map_err(|e| anyhow::anyhow!("reading unencrypted secret key: {e}")),
+        Err(e) => Err(anyhow::anyhow!("decrypting secret key: {e}")),
+    }
 }
 
 /// Accept either a `.pub` file path or a raw base64 minisign public key.
@@ -531,6 +540,44 @@ mod tests {
         )
         .unwrap();
         assert!(PluginBundle::load(&wasm).is_err());
+    }
+
+    /// The existing CI secret (and any author key from `rsign generate -W`)
+    /// is a scrypt("")-protected minisign key. Regression-locks the
+    /// minisign-0.9 bump: 0.7 could not read this dialect at all.
+    #[test]
+    fn loads_rsign_generated_passwordless_key_and_signs() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let sk = load_secret_key(Some(&fixtures.join("rsign-passwordless-test.key")), true)
+            .expect("rsign -W key must load with --no-password");
+        let pk = PublicKey::from_file(fixtures.join("rsign-passwordless-test.pub")).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = write_bundle(dir.path(), "test_plugin", "test");
+        sign_bundle(&wasm, &sk, &pk);
+        PluginBundle::load(&wasm)
+            .unwrap()
+            .verify_signature_with(&pk.to_base64())
+            .expect("signature from rsign-generated key must verify");
+    }
+
+    /// Fully unencrypted keys (kdf = none) are the other passwordless
+    /// dialect; load_secret_key falls back to the no-KDF path for them.
+    #[test]
+    fn loads_kdf_none_key_via_fallback() {
+        let kp = KeyPair::generate_unencrypted_keypair().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("unencrypted.key");
+        std::fs::write(&key_path, kp.sk.to_box(None).unwrap().into_string()).unwrap();
+
+        let sk = load_secret_key(Some(&key_path), true)
+            .expect("kdf=none key must load via the unencrypted fallback");
+        let wasm = write_bundle(dir.path(), "test_plugin", "test");
+        sign_bundle(&wasm, &sk, &kp.pk);
+        PluginBundle::load(&wasm)
+            .unwrap()
+            .verify_signature_with(&kp.pk.to_base64())
+            .unwrap();
     }
 
     #[test]
