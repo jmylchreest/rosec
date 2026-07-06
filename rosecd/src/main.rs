@@ -1848,44 +1848,31 @@ async fn build_single_provider(
             // Effective allowed_hosts:
             //   policy baseline             ↦  user.allowed_hosts replaces it (loud warn)
             //                               ↦  user.additional_hosts always extends (info)
-            let mut allowed_hosts: Vec<String> = match &entry.allowed_hosts {
-                Some(replacement) => {
-                    tracing::warn!(
-                        provider = %entry.id,
-                        kind = %kind,
-                        count = replacement.len(),
-                        "user config replaced policy network.allowed_hosts via allowed_hosts"
-                    );
-                    replacement.clone()
-                }
-                None => policy.network.allowed_hosts.clone(),
-            };
-
-            // Always-extending user knob, plus auto-derive hostnames from
-            // URL-valued options so self-hosted servers work without manual
-            // override (only when the user hasn't explicitly replaced).
-            if entry.allowed_hosts.is_none() {
-                let derived: Vec<String> = ["base_url", "api_url", "identity_url"]
-                    .iter()
-                    .filter_map(|k| entry.options.get(*k).and_then(|v| v.as_str()))
-                    .filter_map(extract_host_from_url)
-                    .filter(|h| !allowed_hosts.contains(h))
-                    .collect();
-                allowed_hosts.extend(derived);
+            // Shared with `rosec provider validate` so the CLI dry-run shows
+            // exactly what the daemon will enforce.
+            let effective = rosec_wasm::policy::effective_allowed_hosts(
+                policy,
+                entry.allowed_hosts.as_deref(),
+                &entry.additional_hosts,
+                &entry.options,
+            );
+            if effective.replaced {
+                tracing::warn!(
+                    provider = %entry.id,
+                    kind = %kind,
+                    count = entry.allowed_hosts.as_ref().map_or(0, Vec::len),
+                    "user config replaced policy network.allowed_hosts via allowed_hosts"
+                );
             }
-            if !entry.additional_hosts.is_empty() {
+            if !effective.added.is_empty() {
                 tracing::info!(
                     provider = %entry.id,
                     kind = %kind,
-                    added = ?entry.additional_hosts,
+                    added = ?effective.added,
                     "extending allowed_hosts with user additional_hosts"
                 );
-                for h in &entry.additional_hosts {
-                    if !allowed_hosts.contains(h) {
-                        allowed_hosts.push(h.clone());
-                    }
-                }
             }
+            let allowed_hosts = effective.hosts;
 
             let wasm_config = rosec_wasm::WasmProviderConfig {
                 id: entry.id.clone(),
@@ -1916,12 +1903,6 @@ async fn build_single_provider(
 }
 
 /// Extract the hostname from a URL string.  Returns `None` for malformed input.
-fn extract_host_from_url(url_str: &str) -> Option<String> {
-    url::Url::parse(url_str)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-}
-
 /// Expand path-like variables in any string-valued option: a leading `~/`,
 /// `$home`, `$xdg_data_home`, `$xdg_config_home`. Unknown variables and
 /// `$option:KEY` refs are left literally — policy resolution handles those,
@@ -2151,7 +2132,7 @@ fn load_or_create_device_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use rosec_wasm::policy::extract_host_from_url;
 
     #[test]
     fn extract_host_from_base_url() {

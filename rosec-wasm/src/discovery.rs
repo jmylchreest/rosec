@@ -348,8 +348,105 @@ enum VerifyOutcome {
 }
 
 /// Path of the policy sidecar for a given `.wasm` file.
-fn policy_path_for(wasm_path: &Path) -> PathBuf {
+pub fn policy_path_for(wasm_path: &Path) -> PathBuf {
     wasm_path.with_extension("wasm.policy.toml")
+}
+
+/// Path of the detached signature for a given `.wasm` file.
+pub fn signature_path_for(wasm_path: &Path) -> PathBuf {
+    wasm_path.with_extension("wasm.minisig")
+}
+
+/// A `.wasm` + `.wasm.policy.toml` pair read from disk with the policy
+/// parsed and schema-validated. The signature is NOT yet checked — call
+/// [`PluginBundle::verify_signature`].
+///
+/// This is the shared load path for the daemon's discovery scan and the
+/// out-of-daemon tooling (`rosec provider validate`, `rosec-package-wasm`),
+/// so all consumers agree on sidecar naming and the signed byte layout.
+#[derive(Debug, Clone)]
+pub struct PluginBundle {
+    pub wasm_path: PathBuf,
+    pub policy_path: PathBuf,
+    pub signature_path: PathBuf,
+    pub wasm_bytes: Vec<u8>,
+    pub policy_bytes: Vec<u8>,
+    pub policy: PluginPolicy,
+}
+
+impl PluginBundle {
+    /// Read `wasm_path` and its mandatory `.wasm.policy.toml` sidecar,
+    /// parsing (and schema-validating) the policy. The `Err` variant
+    /// carries the rejection reason as a single human-readable string.
+    pub fn load(wasm_path: &Path) -> Result<Self, String> {
+        let wasm_bytes = std::fs::read(wasm_path)
+            .map_err(|e| format!("failed to read WASM file '{}': {e}", wasm_path.display()))?;
+
+        let policy_path = policy_path_for(wasm_path);
+        let policy_bytes = std::fs::read(&policy_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "policy file '{}' not found (required for all wasm_verify modes; \
+                     disabled mode skips the signature check, not the policy)",
+                    policy_path.display()
+                )
+            } else {
+                format!(
+                    "failed to read policy file '{}': {e}",
+                    policy_path.display()
+                )
+            }
+        })?;
+
+        let policy = PluginPolicy::from_toml_bytes(&policy_bytes)
+            .map_err(|e| format!("policy file '{}' parse failed: {e}", policy_path.display()))?;
+
+        Ok(Self {
+            signature_path: signature_path_for(wasm_path),
+            wasm_path: wasm_path.to_path_buf(),
+            policy_path,
+            wasm_bytes,
+            policy_bytes,
+            policy,
+        })
+    }
+
+    /// Verify the detached `.minisig` over `(wasm_bytes || policy_bytes)`
+    /// against the embedded release public key.
+    pub fn verify_signature(&self) -> Result<(), String> {
+        self.verify_signature_with(WASM_SIGNING_PUBKEY)
+    }
+
+    /// Verify against an arbitrary base64 minisign public key (the second
+    /// line of a `.pub` file). Used by author tooling to check bundles
+    /// signed with a non-release key.
+    pub fn verify_signature_with(&self, pubkey_base64: &str) -> Result<(), String> {
+        if !self.signature_path.exists() {
+            return Err(format!(
+                "signature file '{}' not found (set wasm_verify = \"disabled\" \
+                 to load unsigned plugins for local development)",
+                self.signature_path.display(),
+            ));
+        }
+
+        let pk = PublicKey::from_base64(pubkey_base64)
+            .map_err(|e| format!("invalid public key: {e}"))?;
+        let signature = Signature::from_file(&self.signature_path).map_err(|e| {
+            format!(
+                "failed to read signature file '{}': {e}",
+                self.signature_path.display()
+            )
+        })?;
+
+        let combined = policy::signature_input(&self.wasm_bytes, &self.policy_bytes);
+        pk.verify(&combined, &signature, false).map_err(|e| {
+            format!(
+                "combined signature verification failed for '{}' (policy '{}'): {e}",
+                self.wasm_path.display(),
+                self.policy_path.display(),
+            )
+        })
+    }
 }
 
 /// Read wasm bytes + sidecar policy and verify the combined signature.
@@ -374,27 +471,7 @@ fn verify_plugin(
     wasm_path: &Path,
     verify: WasmVerify,
 ) -> Result<(VerifyOutcome, VerifiedPlugin), String> {
-    let wasm_bytes = std::fs::read(wasm_path)
-        .map_err(|e| format!("failed to read WASM file '{}': {e}", wasm_path.display()))?;
-
-    let policy_path = policy_path_for(wasm_path);
-    let policy_bytes = std::fs::read(&policy_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!(
-                "policy file '{}' not found (required for all wasm_verify modes; \
-                 disabled mode skips the signature check, not the policy)",
-                policy_path.display()
-            )
-        } else {
-            format!(
-                "failed to read policy file '{}': {e}",
-                policy_path.display()
-            )
-        }
-    })?;
-
-    let policy = PluginPolicy::from_toml_bytes(&policy_bytes)
-        .map_err(|e| format!("policy file '{}' parse failed: {e}", policy_path.display()))?;
+    let bundle = PluginBundle::load(wasm_path)?;
 
     if verify == WasmVerify::Disabled {
         warn!(
@@ -404,40 +481,21 @@ fn verify_plugin(
         );
         return Ok((
             VerifyOutcome::NotVerified { reason: "disabled" },
-            VerifiedPlugin { wasm_bytes, policy },
+            VerifiedPlugin {
+                wasm_bytes: bundle.wasm_bytes,
+                policy: bundle.policy,
+            },
         ));
     }
 
-    let sig_path = wasm_path.with_extension("wasm.minisig");
-    if !sig_path.exists() {
-        return Err(format!(
-            "signature file '{}' not found (set wasm_verify = \"disabled\" \
-             to load unsigned plugins for local development)",
-            sig_path.display(),
-        ));
-    }
-
-    let pk = PublicKey::from_base64(WASM_SIGNING_PUBKEY)
-        .map_err(|e| format!("invalid embedded public key: {e}"))?;
-    let signature = Signature::from_file(&sig_path).map_err(|e| {
-        format!(
-            "failed to read signature file '{}': {e}",
-            sig_path.display()
-        )
-    })?;
-
-    let combined = policy::signature_input(&wasm_bytes, &policy_bytes);
-    pk.verify(&combined, &signature, false).map_err(|e| {
-        format!(
-            "combined signature verification failed for '{}' (policy '{}'): {e}",
-            wasm_path.display(),
-            policy_path.display(),
-        )
-    })?;
+    bundle.verify_signature()?;
 
     Ok((
         VerifyOutcome::Verified,
-        VerifiedPlugin { wasm_bytes, policy },
+        VerifiedPlugin {
+            wasm_bytes: bundle.wasm_bytes,
+            policy: bundle.policy,
+        },
     ))
 }
 

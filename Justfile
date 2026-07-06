@@ -181,9 +181,13 @@ profile-record duration="30":
 # Copy dist/providers/* to your provider install dir to exercise the
 # wasm_verify = "required" code path locally.
 #
+# Delegates to rosec-package-wasm (rosec-tools crate), which validates each
+# policy schema before signing. Downstream plugin authors should use that
+# binary directly — see docs/developers/wasm-policy-sidecar.
+#
 # Requires:
 #   - WASM_SIGNING_KEY env var: contents of an rsign/minisign secret-key file
-#   - rsign2 in PATH (cargo install rsign2)
+#     (generate one with: rosec-package-wasm keygen)
 #   - 'just build-wasm' has produced the .wasm artefacts
 
 # Sign + stage WASM providers (uses WASM_SIGNING_KEY env var)
@@ -203,17 +207,7 @@ sign-wasm:
     exit 1
   fi
 
-  if ! command -v rsign >/dev/null 2>&1; then
-    echo "error: 'rsign' not found in PATH — install with: cargo install rsign2" >&2
-    exit 1
-  fi
-
-  KEYFILE=$(mktemp)
-  trap 'rm -f "${KEYFILE}"' EXIT
-  printf '%s' "${WASM_SIGNING_KEY}" > "${KEYFILE}"
-
-  install -d -m 755 dist/providers
-
+  wasm_srcs=()
   for crate in {{ _wasm_crates }}; do
     stem="${crate//-/_}"
     wasm_src="${crate}/target/wasm32-wasip1/release/${stem}.wasm"
@@ -228,21 +222,15 @@ sign-wasm:
       exit 1
     fi
 
-    wasm_dst="dist/providers/${stem}.wasm"
-    policy_dst="dist/providers/${stem}.wasm.policy.toml"
-    sig_dst="dist/providers/${stem}.wasm.minisig"
-
-    install -m 644 "${wasm_src}" "${wasm_dst}"
-    install -m 644 "${policy_src}" "${policy_dst}"
-
-    combined=$(mktemp)
-    cat "${wasm_dst}" "${policy_dst}" > "${combined}"
-    rsign sign -s "${KEYFILE}" -W "${combined}"
-    mv "${combined}.minisig" "${sig_dst}"
-    rm -f "${combined}"
-
-    echo "signed: ${wasm_dst} (+ ${policy_dst##*/}, ${sig_dst##*/})"
+    # The bundler locates the sidecar next to the .wasm; the in-tree policy
+    # lives at the crate root, so stage a copy alongside the build artefact.
+    install -m 644 "${policy_src}" "${wasm_src}.policy.toml"
+    wasm_srcs+=("${wasm_src}")
   done
+
+  install -d -m 755 dist/providers
+  cargo run --quiet --release -p rosec-tools --bin rosec-package-wasm -- \
+    sign --no-password --output-dir dist/providers "${wasm_srcs[@]}"
 
   echo ""
   echo "Output staged in dist/providers/ — to test wasm_verify = \"required\":"

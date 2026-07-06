@@ -383,6 +383,22 @@ pub enum ProviderCommands {
     /// List available provider kinds
     Kinds,
 
+    /// Verify a WASM plugin's signature and show the sandbox it will get
+    #[command(
+        long_about = "Verify a WASM plugin bundle and show the sandbox it will get.\n\n\
+            Checks the combined (wasm + policy) signature against the public key \
+            embedded in this build, pretty-prints the plugin's declared policy, and \
+            dry-runs template resolution against your rosec.toml so you can see the \
+            effective network allow-list and filesystem access BEFORE enabling the \
+            provider — including where your config replaced or extended the policy.",
+        after_long_help = "\
+EXAMPLES:
+    rosec provider validate                     validate every discovered plugin
+    rosec provider validate keepassxc-file      validate one kind + your config for it
+    rosec provider validate --wasm ./foo.wasm   validate a plugin file before installing it"
+    )]
+    Validate(ProviderValidateArgs),
+
     /// Authenticate/unlock a provider
     Auth(ProviderAuthArgs),
 
@@ -435,6 +451,18 @@ EXAMPLES:
 
     /// Change the unlock password for a provider
     ChangePassword(ProviderIdArg),
+}
+
+#[derive(Parser)]
+pub struct ProviderValidateArgs {
+    /// Provider kind to validate (as shown by `rosec provider kinds`);
+    /// omit to validate all discovered WASM plugins
+    pub kind: Option<String>,
+
+    /// Validate a specific .wasm file (with its .wasm.policy.toml sidecar)
+    /// instead of a plugin discovered from the provider directories
+    #[arg(long)]
+    pub wasm: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser)]

@@ -24,6 +24,7 @@ pub mod list_passwords;
 pub mod remove;
 pub mod remove_password;
 pub mod set_enabled;
+pub mod validate;
 
 pub async fn dispatch(action: Option<ProviderCommands>) -> Result<()> {
     let action = action.unwrap_or(ProviderCommands::List);
@@ -33,6 +34,7 @@ pub async fn dispatch(action: Option<ProviderCommands>) -> Result<()> {
             kinds::run();
             Ok(())
         }
+        ProviderCommands::Validate(args) => validate::run(&args),
         ProviderCommands::Auth(args) => auth::run(&args).await,
         ProviderCommands::Add(args) => add::run(args).await,
         ProviderCommands::Remove(args) => remove::run(&args.id).await,

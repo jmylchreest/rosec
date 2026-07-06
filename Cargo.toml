@@ -11,6 +11,7 @@ members = [
     "rosec-prompt",
     "rosec-pam",
     "rosec-wasm",
+    "rosec-tools",
 ]
 exclude = [
     "rosec-bitwarden-pm",

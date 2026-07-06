@@ -5,9 +5,10 @@ title: WASM policy sidecar
 
 # WASM policy sidecar
 
-Status: **implemented**. Plugin-author/user CLI tooling
-(`rosec-package-wasm`, `rosec-validate-plugin`) is tracked separately
-in [#22](https://github.com/jmylchreest/rosec/issues/22).
+Status: **implemented**, including the plugin-author/user CLI tooling
+(`rosec-package-wasm`, `rosec provider validate`) from
+[#22](https://github.com/jmylchreest/rosec/issues/22) — see
+[Tooling](#tooling) below.
 
 ## Problem
 
@@ -248,17 +249,83 @@ vulnerability window for too little gain.
   `allowed_hosts: Option<Vec<String>>` and
   `additional_hosts: Vec<String>` fields.
 - In-tree provider crates ship `*.wasm.policy.toml` files.
-- `Justfile` `sign-wasm` recipe stages
-  `dist/providers/{stem}.wasm{,.policy.toml,.minisig}` for local
+- `rosec-tools/` — the `rosec-package-wasm` binary (keygen, sign,
+  verify); shares `PluginBundle` and the policy schema validator with
+  the daemon's discovery path.
+- `rosec/src/provider/validate.rs` — `rosec provider validate`, the
+  user-side audit/dry-run command.
+- `Justfile` `sign-wasm` recipe delegates to `rosec-package-wasm` and
+  stages `dist/providers/{stem}.wasm{,.policy.toml,.minisig}` for local
   testing of the `wasm_verify = "required"` path.
 
-### Deferred / follow-up
+## Tooling
 
-- `rosec-package-wasm` (plugin-author bundling, key rotation) and
-  `rosec-validate-plugin` / `rosec provider validate <kind>`
-  (user-side inspection and dry-run) are tracked in
-  [#22](https://github.com/jmylchreest/rosec/issues/22). The
-  day-to-day signing flow is currently the `just sign-wasm` recipe.
+### `rosec-package-wasm` (plugin authors)
+
+Built from the `rosec-tools` crate (`cargo build -p rosec-tools`).
+Replaces the ad-hoc rsign invocation for downstream plugin authors —
+the policy schema is validated *before* anything is signed, so a typo'd
+sidecar fails at packaging time rather than at every user's daemon
+startup.
+
+```console
+# One-time: generate a signing keypair (use --no-password for a key
+# destined for a CI secret, like 'rsign generate -W')
+$ rosec-package-wasm keygen --output-dir ~/keys
+
+# Bundle + sign: validates foo.wasm.policy.toml, signs
+# (wasm_bytes || policy_bytes), emits foo.wasm.minisig
+$ rosec-package-wasm sign --key ~/keys/rosec-wasm-signing.key foo.wasm
+
+# Stage a release layout (copies .wasm + .policy.toml, signs there)
+$ rosec-package-wasm sign --key ~/keys/rosec-wasm-signing.key \
+    --output-dir dist/providers foo.wasm
+
+# Check bundles (defaults to the embedded rosec release key)
+$ rosec-package-wasm verify --pubkey ~/keys/rosec-wasm-signing.pub dist/providers/
+```
+
+Key rotation is the same `sign` command pointed at existing artefacts —
+signing never rebuilds the `.wasm`:
+
+```console
+$ rosec-package-wasm sign --key ~/keys/new-signing.key dist/providers/
+```
+
+Non-interactive signing reads the key from the `WASM_SIGNING_KEY` env
+var (the *contents* of the secret-key file, same contract as the CI
+secret) and the password from `WASM_SIGNING_KEY_PASSWORD` (empty or
+unset with `--no-password` for passwordless keys).
+
+### `rosec provider validate` (users)
+
+One command that answers "is this plugin's signature good, what does it
+*claim* to need, and what will the sandbox *actually* be with my
+config?":
+
+```console
+$ rosec provider validate                    # every discovered plugin
+$ rosec provider validate keepassxc-file     # one kind
+$ rosec provider validate --wasm ./foo.wasm  # a file, before installing it
+```
+
+For each plugin it prints:
+
+- **signature** — verified against the embedded `WASM_SIGNING_PUBKEY`
+  (with a note when `wasm_verify = "disabled"` means the daemon would
+  load it anyway);
+- **the policy claim** — `allowed_hosts`, preopens, `allowed_files`,
+  required/optional options and defaults, as signed by the author;
+- **a dry-run per configured provider** — templates resolved against
+  the options in your `rosec.toml` (so `$option:...`/`$home` become real
+  paths), the effective `allowed_hosts` with per-host provenance, and
+  the same replace/extend/unknown-option warnings rosecd logs at
+  startup. The computation is shared with the daemon
+  (`rosec_wasm::policy::effective_allowed_hosts`), not re-implemented.
+
+Exit status is non-zero when a signature fails or a configured provider
+can't resolve the policy (e.g. missing required options), so it can
+gate scripts.
 
 ## Threat model
 

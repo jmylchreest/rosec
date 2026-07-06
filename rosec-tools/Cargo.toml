@@ -1,0 +1,22 @@
+[package]
+name = "rosec-tools"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Author-side tooling for rosec WASM provider plugins (packaging, signing, verification)"
+
+[[bin]]
+name = "rosec-package-wasm"
+path = "src/main.rs"
+
+[dependencies]
+rosec-wasm = { path = "../rosec-wasm" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+minisign = "0.7"
+rpassword = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -259,13 +259,10 @@ impl PluginPolicy {
         })
     }
 
-    /// Warn (via `tracing::warn`) about user-supplied options not declared in
-    /// the policy. Lenient: typos and stale options don't block load.
-    pub fn report_unknown_options(
-        &self,
-        provider_id: &str,
-        options: &HashMap<String, serde_json::Value>,
-    ) {
+    /// User-supplied options not declared in the policy's `[options]`.
+    /// Sorted for deterministic output. Lenient by design: typos and stale
+    /// options don't block load — callers decide how to surface them.
+    pub fn unknown_options(&self, options: &HashMap<String, serde_json::Value>) -> Vec<String> {
         let known: HashSet<&str> = self
             .options
             .required
@@ -273,17 +270,106 @@ impl PluginPolicy {
             .chain(self.options.optional.iter())
             .map(String::as_str)
             .collect();
-        for key in options.keys() {
-            if !known.contains(key.as_str()) {
-                tracing::warn!(
-                    provider = %provider_id,
-                    kind = %self.kind,
-                    option = %key,
-                    "unknown option for plugin kind, ignored (not declared in policy)"
-                );
+        let mut unknown: Vec<String> = options
+            .keys()
+            .filter(|k| !known.contains(k.as_str()))
+            .cloned()
+            .collect();
+        unknown.sort_unstable();
+        unknown
+    }
+
+    /// Warn (via `tracing::warn`) about user-supplied options not declared in
+    /// the policy. Lenient: typos and stale options don't block load.
+    pub fn report_unknown_options(
+        &self,
+        provider_id: &str,
+        options: &HashMap<String, serde_json::Value>,
+    ) {
+        for key in self.unknown_options(options) {
+            tracing::warn!(
+                provider = %provider_id,
+                kind = %self.kind,
+                option = %key,
+                "unknown option for plugin kind, ignored (not declared in policy)"
+            );
+        }
+    }
+}
+
+/// Option keys whose URL values contribute an auto-derived hostname to the
+/// effective allow-list (only when the user hasn't replaced the policy set),
+/// so self-hosted servers work without a manual `additional_hosts` override.
+pub const URL_HOST_OPTIONS: [&str; 3] = ["base_url", "api_url", "identity_url"];
+
+/// Effective network allow-list for one configured provider, with the
+/// provenance of each adjustment so callers (rosecd startup logging,
+/// `rosec provider validate`) can surface overrides consistently.
+#[derive(Debug, Clone, Default)]
+pub struct EffectiveHosts {
+    /// Final ordered allow-list handed to the WASM runtime.
+    pub hosts: Vec<String>,
+    /// `true` when the user's `allowed_hosts` replaced the policy baseline.
+    pub replaced: bool,
+    /// Hosts auto-derived from URL-valued options ([`URL_HOST_OPTIONS`]).
+    pub derived: Vec<String>,
+    /// `additional_hosts` entries that extended the set (deduplicated).
+    pub added: Vec<String>,
+}
+
+/// Compute the effective `allowed_hosts` for a provider entry:
+///
+/// - policy baseline  ↦  `user_allowed_hosts` replaces it entirely when set
+/// - hostnames derived from URL-valued options extend the baseline (skipped
+///   when the user replaced the set — an explicit replacement is exact)
+/// - `additional_hosts` always extends, deduplicated
+pub fn effective_allowed_hosts(
+    policy: &PluginPolicy,
+    user_allowed_hosts: Option<&[String]>,
+    additional_hosts: &[String],
+    options: &HashMap<String, serde_json::Value>,
+) -> EffectiveHosts {
+    let (mut hosts, replaced) = match user_allowed_hosts {
+        Some(replacement) => (replacement.to_vec(), true),
+        None => (policy.network.allowed_hosts.clone(), false),
+    };
+
+    let mut derived = Vec::new();
+    if !replaced {
+        for key in URL_HOST_OPTIONS {
+            if let Some(host) = options
+                .get(key)
+                .and_then(|v| v.as_str())
+                .and_then(extract_host_from_url)
+                && !hosts.contains(&host)
+            {
+                hosts.push(host.clone());
+                derived.push(host);
             }
         }
     }
+
+    let mut added = Vec::new();
+    for h in additional_hosts {
+        if !hosts.contains(h) {
+            hosts.push(h.clone());
+            added.push(h.clone());
+        }
+    }
+
+    EffectiveHosts {
+        hosts,
+        replaced,
+        derived,
+        added,
+    }
+}
+
+/// Extract the hostname from a URL string, if it parses as a URL with a host.
+pub fn extract_host_from_url(url_str: &str) -> Option<String> {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
 }
 
 /// Expand `$option:KEY`, `$home`, `$xdg_data_home`, `$xdg_config_home`.
@@ -749,6 +835,83 @@ a = "$option:b"
     fn expand_env_vars_leaves_unknown_vars_alone() {
         let s = super::expand_env_vars("$something_else/foo");
         assert_eq!(s, "$something_else/foo");
+    }
+
+    fn hosts_policy(hosts: &[&str]) -> PluginPolicy {
+        let toml = format!(
+            "schema_version = 1\nkind = \"test\"\nname = \"Test\"\n[network]\nallowed_hosts = [{}]\n",
+            hosts
+                .iter()
+                .map(|h| format!("\"{h}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        PluginPolicy::from_toml_bytes(toml.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn effective_hosts_policy_baseline() {
+        let p = hosts_policy(&["api.example.com"]);
+        let e = effective_allowed_hosts(&p, None, &[], &opts(&[]));
+        assert_eq!(e.hosts, vec!["api.example.com"]);
+        assert!(!e.replaced);
+        assert!(e.derived.is_empty());
+        assert!(e.added.is_empty());
+    }
+
+    #[test]
+    fn effective_hosts_user_replacement_wins_and_skips_derivation() {
+        let p = hosts_policy(&["api.example.com"]);
+        let user = vec!["only.example.org".to_string()];
+        let e = effective_allowed_hosts(
+            &p,
+            Some(&user),
+            &[],
+            &opts(&[("base_url", "https://self-hosted.example.net/api")]),
+        );
+        assert_eq!(e.hosts, vec!["only.example.org"]);
+        assert!(e.replaced);
+        assert!(e.derived.is_empty());
+    }
+
+    #[test]
+    fn effective_hosts_derives_from_url_options() {
+        let p = hosts_policy(&["api.example.com"]);
+        let e = effective_allowed_hosts(
+            &p,
+            None,
+            &[],
+            &opts(&[("base_url", "https://self-hosted.example.net/api")]),
+        );
+        assert_eq!(e.hosts, vec!["api.example.com", "self-hosted.example.net"]);
+        assert_eq!(e.derived, vec!["self-hosted.example.net"]);
+    }
+
+    #[test]
+    fn effective_hosts_additional_extends_and_dedupes() {
+        let p = hosts_policy(&["api.example.com"]);
+        let extra = vec!["api.example.com".to_string(), "proxy.corp".to_string()];
+        let e = effective_allowed_hosts(&p, None, &extra, &opts(&[]));
+        assert_eq!(e.hosts, vec!["api.example.com", "proxy.corp"]);
+        assert_eq!(e.added, vec!["proxy.corp"]);
+    }
+
+    #[test]
+    fn effective_hosts_additional_extends_replacement() {
+        let p = hosts_policy(&["api.example.com"]);
+        let user = vec!["only.example.org".to_string()];
+        let extra = vec!["proxy.corp".to_string()];
+        let e = effective_allowed_hosts(&p, Some(&user), &extra, &opts(&[]));
+        assert_eq!(e.hosts, vec!["only.example.org", "proxy.corp"]);
+        assert!(e.replaced);
+        assert_eq!(e.added, vec!["proxy.corp"]);
+    }
+
+    #[test]
+    fn unknown_options_sorted() {
+        let p = hosts_policy(&[]);
+        let o = opts(&[("zeta", "1"), ("alpha", "2")]);
+        assert_eq!(p.unknown_options(&o), vec!["alpha", "zeta"]);
     }
 
     #[test]

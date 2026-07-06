@@ -18,6 +18,27 @@ gnome-keyring   GNOME Keyring    gnome-keyring           unlocked
 
 The **CAPS** column packs each provider's capabilities into a single token (`WsKP`, `SsCN`, etc). Decoding rules and a per-provider matrix live in the [provider capabilities reference](./providers/capabilities). The same column is shown by `rosec status`.
 
+## Provider Validate
+
+```bash
+rosec provider validate                    # every discovered WASM plugin
+rosec provider validate keepassxc-file     # one kind
+rosec provider validate --wasm ./foo.wasm  # a plugin file, before installing it
+```
+
+Audits a WASM provider plugin without starting the daemon: verifies the
+combined `(wasm + policy)` signature against the public key embedded in this
+build, pretty-prints the plugin's declared policy (network allow-list,
+filesystem preopens, required/optional options), and dry-runs template
+resolution against your `rosec.toml` — so you can see the effective sandbox,
+including where your `allowed_hosts` replaced or `additional_hosts` extended
+the policy, *before* enabling the provider.
+
+Exits non-zero when a signature fails or a configured provider can't resolve
+the policy (e.g. a missing required option). See the
+[WASM policy sidecar](./developers/wasm-policy-sidecar#tooling) page for
+details and the plugin-author packaging tool (`rosec-package-wasm`).
+
 ## Search
 
 ```bash
