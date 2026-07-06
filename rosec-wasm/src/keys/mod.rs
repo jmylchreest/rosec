@@ -32,4 +32,15 @@ pub const WASM_SIGNING_PUBKEY: &str = "RWTn6nvrCuaMdWkYb2aZOTsyKh1XW36iFZZGNw3ki
 /// outside a rotation window; old + new during one. Signature verification
 /// tries each in order (minisign key IDs make a wrong key a cheap, explicit
 /// mismatch).
-pub const WASM_SIGNING_PUBKEYS: &[&str] = &[WASM_SIGNING_PUBKEY];
+///
+/// There is deliberately no runtime expiry: removing an entry here in a
+/// release *is* the expiry mechanism — instant per-release and independent
+/// of the user's clock. Instead, annotate every entry with its history so
+/// the deprecation window is enforced by the release checklist:
+///
+/// ```text
+/// KEY,                // added v0.0.x (primary) — remove by v0.0.y
+/// ```
+pub const WASM_SIGNING_PUBKEYS: &[&str] = &[
+    WASM_SIGNING_PUBKEY, // added pre-v0.0.32 (primary)
+];
