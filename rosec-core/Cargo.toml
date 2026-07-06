@@ -32,7 +32,6 @@ url = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
-semver = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

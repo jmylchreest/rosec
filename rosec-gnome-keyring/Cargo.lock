@@ -384,7 +384,6 @@ version = "0.0.32"
 dependencies = [
  "aes",
  "base64",
- "block-padding",
  "cbc",
  "extism-pdk",
  "md-5",

@@ -8,9 +8,7 @@ repository = { workspace = true }
 description = "SSH agent for rosec — serves vault SSH keys over the OpenSSH agent protocol"
 
 [dependencies]
-rosec-core = { path = "../rosec-core" }
 anyhow     = { workspace = true }
-thiserror  = { workspace = true }
 tracing    = { workspace = true }
 zeroize    = { workspace = true }
 tokio      = { workspace = true, features = ["net", "io-util"] }

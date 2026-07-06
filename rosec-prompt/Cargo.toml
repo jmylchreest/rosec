@@ -9,7 +9,6 @@ repository = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 cosmic-text = "0.15"
-futures-util = { workspace = true }
 iced = { workspace = true }
 libc = { workspace = true }
 rpassword = { workspace = true }

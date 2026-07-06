@@ -30,7 +30,6 @@ pbkdf2 = "0.12"
 argon2 = "0.5"
 hkdf = "0.12"
 rsa = "0.9"
-pkcs8 = { version = "0.10", features = ["pkcs5", "encryption"] }
 base64 = "0.22"
 block-padding = "0.3"
 
