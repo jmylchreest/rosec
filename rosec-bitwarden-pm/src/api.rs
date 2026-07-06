@@ -639,6 +639,42 @@ pub struct SyncLogin {
     pub totp: Option<String>,
     #[serde(alias = "Uris", default)]
     pub uris: Option<Vec<SyncUri>>,
+    #[serde(rename = "fido2Credentials", alias = "Fido2Credentials", default)]
+    pub fido2_credentials: Option<Vec<SyncFido2Credential>>,
+}
+
+/// One FIDO2 credential (passkey) attached to a login cipher. Every field
+/// is an encrypted cipher string, decrypted alongside the login.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncFido2Credential {
+    #[serde(alias = "CredentialId", default)]
+    pub credential_id: Option<String>,
+    #[serde(alias = "KeyType", default)]
+    pub key_type: Option<String>,
+    #[serde(alias = "KeyAlgorithm", default)]
+    pub key_algorithm: Option<String>,
+    #[serde(alias = "KeyCurve", default)]
+    pub key_curve: Option<String>,
+    #[serde(alias = "KeyValue", default)]
+    pub key_value: Option<String>,
+    #[serde(alias = "RpId", default)]
+    pub rp_id: Option<String>,
+    #[serde(alias = "RpName", default)]
+    pub rp_name: Option<String>,
+    #[serde(alias = "UserHandle", default)]
+    pub user_handle: Option<String>,
+    #[serde(alias = "UserName", default)]
+    pub user_name: Option<String>,
+    #[serde(alias = "UserDisplayName", default)]
+    pub user_display_name: Option<String>,
+    #[serde(alias = "Counter", default)]
+    pub counter: Option<String>,
+    #[serde(alias = "Discoverable", default)]
+    pub discoverable: Option<String>,
+    #[serde(alias = "CreationDate", default)]
+    #[allow(dead_code)]
+    pub creation_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

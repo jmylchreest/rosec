@@ -13,6 +13,8 @@ Each provider declares a set of capabilities — the optional pieces of function
 | `P` | PasswordChange | Provider supports changing the unlock password via `rosec provider change-password`. |
 | `C` | OfflineCache | Provider supports offline cache export/restore. Previously synced data is available after reboot without network access. Requires both the provider capability and host-side `offline_cache = true` in config. |
 | `N` | Notifications | Provider supports real-time push notifications via a WebSocket connection managed by the host. Enables immediate sync on remote vault changes. |
+| `F` | Fido2 | Provider stores FIDO2/WebAuthn credentials (passkeys). Storage only today — WebAuthn frontends are tracked in [#13](https://github.com/jmylchreest/rosec/issues/13); see [FIDO2 passkeys](../developers/fido2-passkeys.md). |
+| `F` | Fido2 | Provider stores FIDO2/WebAuthn credentials (passkeys). Storage only today — WebAuthn frontends are tracked in [#13](https://github.com/jmylchreest/rosec/issues/13); see [FIDO2 passkeys](../developers/fido2-passkeys.md). |
 | _(none)_ | Totp | Provider stores TOTP seeds. Items expose `rosec:totp=true` and can be read via `rosec totp get` or the TOTP FUSE filesystem. |
 
 > **Note:** `Totp` is not currently assigned a single-letter display code and does not appear in the **CAPS** column of `rosec provider list`.

@@ -932,6 +932,7 @@ pub(crate) fn capability_codes(caps: &[String]) -> String {
         ("PasswordChange", 'P'),
         ("OfflineCache", 'C'),
         ("Notifications", 'N'),
+        ("Fido2", 'F'),
     ] {
         if caps.iter().any(|c| c == name) {
             out.push(code);

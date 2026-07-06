@@ -121,6 +121,14 @@ pub enum Capability {
     /// Provider can return [`ItemMeta`] while locked, carrying
     /// `attribute_hashes` (HMAC fingerprints) in place of plaintext values.
     MetadataCache,
+    /// Provider exposes FIDO2/WebAuthn credentials — passkeys —
+    /// ([`Provider::list_fido2_credentials`], [`Provider::get_fido2_key`]).
+    ///
+    /// Storage only: WebAuthn ceremonies (authenticatorData assembly,
+    /// assertion signing) are performed by host-side frontends, mirroring
+    /// how [`Capability::Ssh`] providers store keys that `rosec-ssh-agent`
+    /// signs with.
+    Fido2,
 }
 
 /// Check that `provider` declares `cap`; return `ProviderError::NotSupported` if not.
@@ -759,6 +767,91 @@ impl std::fmt::Debug for SshPrivateKeyMaterial {
     }
 }
 
+/// Metadata for one FIDO2/WebAuthn credential (passkey) stored by a provider.
+///
+/// Carries everything a WebAuthn frontend (credentialsd provider bridge,
+/// CTAP2 virtual authenticator) needs for credential *discovery and
+/// selection* — matching by relying party, rendering an account chooser —
+/// without touching private key material. Key material is fetched
+/// separately via [`Provider::get_fido2_key`] at ceremony time.
+///
+/// One vault item may carry several credentials (Bitwarden models
+/// `fido2Credentials` as an array), so the pair
+/// (`item_id`, `credential_id`) is the unique handle.
+#[derive(Debug, Clone)]
+pub struct Fido2CredentialMeta {
+    /// Opaque provider item identifier owning this credential.
+    pub item_id: String,
+
+    /// Base64url (unpadded) encoding of the raw credential ID bytes as they
+    /// appear on the WebAuthn wire. Providers normalise their native format
+    /// (e.g. Bitwarden's GUID string → 16 raw bytes) before reporting.
+    pub credential_id: String,
+
+    /// Human-readable vault item name.
+    pub item_name: String,
+
+    /// Provider that owns this credential.
+    pub provider_id: String,
+
+    /// Relying party identifier (e.g. `"github.com"`).
+    pub rp_id: String,
+
+    /// Relying party display name, if stored.
+    pub rp_name: Option<String>,
+
+    /// Base64url (unpadded) user handle bytes, if stored. Required for
+    /// discoverable-credential (username-less) flows.
+    pub user_handle: Option<String>,
+
+    /// Account username at the relying party, if stored.
+    pub user_name: Option<String>,
+
+    /// Account display name at the relying party, if stored.
+    pub user_display_name: Option<String>,
+
+    /// COSE algorithm identifier of the key pair:
+    /// `-7` = ES256 (P-256), `-8` = EdDSA (Ed25519), `-257` = RS256.
+    pub algorithm: i64,
+
+    /// Stored signature counter. Synced passkeys conventionally keep this
+    /// at `0` permanently (Bitwarden and KeePassXC both do); a ceremony
+    /// engine must not invent increments for a zero counter.
+    pub counter: u32,
+
+    /// Whether the credential was created as a discoverable (resident)
+    /// credential. Non-discoverable credentials are only offered when the
+    /// relying party supplies them in `allowCredentials`.
+    pub discoverable: bool,
+
+    /// Whether user verification must be performed before this credential
+    /// is released for an assertion, independent of what the relying party
+    /// requests. Set from provider-side item configuration.
+    pub require_uv: bool,
+
+    /// Last revision timestamp, when the provider tracks one.
+    pub revision_date: Option<SystemTime>,
+}
+
+/// Raw FIDO2 private key material retrieved from a provider.
+///
+/// PEM-encoded PKCS#8, the normalised interchange form at the rosec
+/// boundary (KeePassXC stores this natively; Bitwarden's base64url PKCS#8
+/// DER is wrapped by the plugin). Never stored to disk by the host;
+/// zeroized on drop.
+pub struct Fido2KeyMaterial {
+    /// PEM-encoded PKCS#8 private key (`-----BEGIN PRIVATE KEY-----`).
+    pub pem: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for Fido2KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fido2KeyMaterial")
+            .field("pem", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Cheaply-cloneable zero-argument event callback.
 pub type CallbackFn = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -1089,6 +1182,33 @@ pub trait Provider: Send + Sync {
     /// [`ProviderError::NotSupported`] if the provider never exposes private keys
     /// (default).
     async fn get_ssh_private_key(&self, _id: &str) -> Result<SshPrivateKeyMaterial, ProviderError> {
+        Err(ProviderError::NotSupported)
+    }
+
+    /// Gated behind [`Capability::Fido2`]. Returns one
+    /// [`Fido2CredentialMeta`] per stored passkey. Called by WebAuthn
+    /// frontends after each sync and after unlock to build their
+    /// credential registry; must not expose private key material.
+    ///
+    /// The default returns an empty list (provider stores no passkeys).
+    async fn list_fido2_credentials(&self) -> Result<Vec<Fido2CredentialMeta>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    /// Retrieve private key material for one FIDO2 credential, addressed by
+    /// the (`item_id`, `credential_id`) pair from its
+    /// [`Fido2CredentialMeta`]. Fetched at ceremony time only; callers
+    /// zeroize after use.
+    ///
+    /// Returns [`ProviderError::NotFound`] if the pair doesn't resolve,
+    /// [`ProviderError::Locked`] if the provider is locked, or
+    /// [`ProviderError::NotSupported`] if the provider never exposes
+    /// passkey material (default).
+    async fn get_fido2_key(
+        &self,
+        _item_id: &str,
+        _credential_id: &str,
+    ) -> Result<Fido2KeyMaterial, ProviderError> {
         Err(ProviderError::NotSupported)
     }
     // Write operations (gated behind Capability::Write)
