@@ -169,6 +169,31 @@ only concurrent *local* sessions are in scope. This frontend is a desktop
 feature and should be opt-in per user, not enabled system-wide on shared
 servers.
 
+### Device lifecycle — idempotency and cleanup
+
+The passed fd is the ownership token, which makes the lifecycle
+self-cleaning:
+
+- **Singleton per rosecd**: rosecd holds the device fd for its lifetime and
+  treats it as a singleton. It already single-instances via its D-Bus name
+  lock, so it never opens two.
+- **Already-exists = double-start only**: the broker enforces
+  one-device-per-uid (keyed on `SO_PEERCRED`), refusing or returning the
+  existing device rather than stacking a second authenticator for the same
+  user. There is no *stale* node to reconcile — see cleanup.
+- **Cleanup is automatic on every exit path**. Closing the fd destroys the
+  uhid device, and the kernel closes the fd when the process dies. So:
+  normal shutdown sends `UHID_DESTROY` then closes (device gone
+  immediately); a crash/`SIGKILL` closes the fd as the process dies →
+  kernel destroys the device (**a badly-dying daemon cannot leak a virtual
+  FIDO device** — the key safety property). The broker holds nothing after
+  fd-passing, so it has no cleanup responsibility and no persistent
+  privileged state.
+- **Lock / logout**: on vault lock or session end, destroy the device
+  (default — no authenticator present while locked, browser sees the key
+  unplugged) rather than leaving it to fail every ceremony against a locked
+  provider. This matches rosec's autolock model.
+
 "User level" is achievable, with one caveat: `/dev/uhid` itself is
 root-only by default — deliberately, because uhid can create *any* HID
 device, including virtual keyboards (an input-injection primitive). Two
