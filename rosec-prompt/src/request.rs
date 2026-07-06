@@ -47,6 +47,26 @@ pub(crate) struct TotpDisplayRequest {
     pub(crate) seed: Option<String>,
 }
 
+/// One selectable row in a selection prompt.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SelectOption {
+    /// Opaque handle returned as `{"selected": id}` when this row is chosen.
+    pub(crate) id: String,
+    /// Primary line (e.g. `alice@github.com`).
+    pub(crate) primary: String,
+    /// Optional secondary line (e.g. the source provider name).
+    #[serde(default)]
+    pub(crate) secondary: String,
+}
+
+/// When present, the prompt shows a single-select scrollable list instead of
+/// input fields. Used to disambiguate multiple matches (e.g. several passkeys
+/// for one relying party). Choosing a row is the confirmation gesture.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SelectRequest {
+    pub(crate) options: Vec<SelectOption>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PromptRequest {
     #[serde(alias = "t", default)]
@@ -77,6 +97,10 @@ pub(crate) struct PromptRequest {
     /// When set, display a TOTP code instead of input fields.
     #[serde(default)]
     pub(crate) totp_display: Option<TotpDisplayRequest>,
+    /// When set, show a single-select scrollable list instead of input
+    /// fields. Output is `{"selected": "<option id>"}`; cancel exits 1.
+    #[serde(default)]
+    pub(crate) select: Option<SelectRequest>,
     /// When `true`, enter QR scan mode: show a compact window with a "Scan"
     /// button that captures the screen and decodes a QR code containing an
     /// `otpauth://` URI.
@@ -197,4 +221,36 @@ fn default_input_text() -> String {
 }
 fn default_font_size() -> f32 {
     theme_defaults().font_size as f32
+}
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+
+    #[test]
+    fn parses_selection_request() {
+        let raw = r#"{
+            "title": "Choose a passkey",
+            "message": "Sign in to github.com",
+            "select": {
+                "options": [
+                    {"id": "a", "primary": "alice@github.com", "secondary": "bitwarden"},
+                    {"id": "b", "primary": "bob@github.com"}
+                ]
+            }
+        }"#;
+        let req: PromptRequest = serde_json::from_str(raw).unwrap();
+        let select = req.select.expect("select present");
+        assert_eq!(select.options.len(), 2);
+        assert_eq!(select.options[0].id, "a");
+        assert_eq!(select.options[0].secondary, "bitwarden");
+        // secondary defaults to empty when omitted
+        assert_eq!(select.options[1].secondary, "");
+    }
+
+    #[test]
+    fn absent_select_is_none() {
+        let req: PromptRequest = serde_json::from_str(r#"{"title": "x"}"#).unwrap();
+        assert!(req.select.is_none());
+    }
 }

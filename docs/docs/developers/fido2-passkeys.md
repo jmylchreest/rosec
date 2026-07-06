@@ -46,6 +46,27 @@ The pieces:
   semantics: a stored counter of `0` stays `0` (Bitwarden and KeePassXC
   both do this; RPs treat zero counters as "counter not supported").
 
+### Multiple matching credentials
+
+When a `getAssertion` matches more than one credential (an `allowList` with
+several, or a discoverable-credential request against a vault holding
+multiple passkeys for the RP), rosec follows the platform-authenticator
+pattern rather than the CTAP `getNextAssertion` paging dance: it presents
+its **own** account chooser and returns a single assertion
+(`numberOfCredentials = 1`). Choosing an account *is* the user
+presence/verification gesture.
+
+The chooser is `rosec-prompt`'s **selection mode** (implemented now):
+`{"select": {"options": [{id, primary, secondary}]}}` renders a scrollable
+single-select list (GUI: iced, keyboard + click, Enter/Esc; no-display
+fallback: a numbered TTY menu reading `/dev/tty`), emitting
+`{"selected": "<id>"}`. The engine passes `primary = user@rpId` and
+`secondary = source provider`, using the returned id as the credential
+handle to sign with. Cancel (exit 1) maps to CTAP2 `0x27`
+(operation denied); zero matches to `0x2b` (no credentials). The same
+selection prompt is reusable for other "which of these?" flows such as
+multiple matching SSH keys.
+
 ### Normalisation at the rosec boundary
 
 | Field | Canonical form | Bitwarden native | KeePassXC native |

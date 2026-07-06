@@ -2,6 +2,7 @@
 
 mod prompt;
 mod qr;
+mod select;
 mod totp;
 
 use anyhow::Result;
@@ -15,6 +16,8 @@ pub(crate) fn run(request: PromptRequest) -> Result<()> {
         qr::run(request)
     } else if request.totp_display.is_some() {
         totp::run(request)
+    } else if request.select.is_some() {
+        select::run(request)
     } else {
         prompt::run(request)
     }
