@@ -14,17 +14,18 @@ use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 use rosec_core::{
-    AttributeDescriptor, Attributes, AuthField, AuthFieldKind, Capability, ItemAttributes,
-    ItemMeta, Provider, ProviderCallbacks, ProviderError, ProviderStatus, RegistrationInfo,
-    SecretBytes, SshKeyMeta, SshPrivateKeyMaterial, UnlockInput,
+    AttributeDescriptor, Attributes, AuthField, AuthFieldKind, Capability, Fido2CredentialMeta,
+    Fido2KeyMaterial, ItemAttributes, ItemMeta, Provider, ProviderCallbacks, ProviderError,
+    ProviderStatus, RegistrationInfo, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial, UnlockInput,
 };
 
 use crate::protocol::{
-    AuthFieldsResponse, CapabilitiesResponse, ErrorKind, InitRequest, InitResponse,
-    ItemAttributesResponse, ItemIdRequest, ItemListResponse, RegistrationInfoResponse,
-    SearchRequest, SecretAttrRequest, SecretAttrResponse, SimpleResponse, SshKeyListResponse,
-    SshPrivateKeyRequest, SshPrivateKeyResponse, StatusResponse, UnlockRequest,
-    WasmAttributeDescriptor, WasmSshKeyMeta,
+    AuthFieldsResponse, CapabilitiesResponse, ErrorKind, Fido2CredentialListResponse,
+    Fido2KeyRequest, Fido2KeyResponse, InitRequest, InitResponse, ItemAttributesResponse,
+    ItemIdRequest, ItemListResponse, RegistrationInfoResponse, SearchRequest, SecretAttrRequest,
+    SecretAttrResponse, SimpleResponse, SshKeyListResponse, SshPrivateKeyRequest,
+    SshPrivateKeyResponse, StatusResponse, UnlockRequest, WasmAttributeDescriptor,
+    WasmFido2CredentialMeta, WasmSshKeyMeta,
 };
 
 /// Hard wall-clock cap on a single guest function call.  Set high enough to
@@ -1136,6 +1137,71 @@ impl Provider for WasmProvider {
         })
     }
 
+    async fn list_fido2_credentials(&self) -> Result<Vec<Fido2CredentialMeta>, ProviderError> {
+        let resp: Option<Fido2CredentialListResponse> = self
+            .worker
+            .call(|plugin| {
+                if !plugin.function_exists("list_fido2_credentials") {
+                    return (
+                        Ok::<Option<Fido2CredentialListResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) = call_guest_json_no_input::<Fido2CredentialListResponse>(
+                    plugin,
+                    "list_fido2_credentials",
+                );
+                (result.map(Some), outcome)
+            })
+            .await?;
+        let Some(resp) = resp else {
+            return Ok(Vec::new());
+        };
+        if !resp.ok {
+            return Err(map_guest_error(resp.error, resp.error_kind));
+        }
+        Ok(resp
+            .credentials
+            .into_iter()
+            .map(|w| to_fido2_credential_meta(w, &self.config.id))
+            .collect())
+    }
+
+    async fn get_fido2_key(
+        &self,
+        item_id: &str,
+        credential_id: &str,
+    ) -> Result<Fido2KeyMaterial, ProviderError> {
+        let req = Fido2KeyRequest {
+            item_id: item_id.to_owned(),
+            credential_id: credential_id.to_owned(),
+        };
+        let resp: Option<Fido2KeyResponse> = self
+            .worker
+            .call(move |plugin| {
+                if !plugin.function_exists("get_fido2_key") {
+                    return (
+                        Ok::<Option<Fido2KeyResponse>, ProviderError>(None),
+                        CallOutcome::Clean,
+                    );
+                }
+                let (result, outcome) =
+                    call_guest_json::<_, Fido2KeyResponse>(plugin, "get_fido2_key", &req);
+                (result.map(Some), outcome)
+            })
+            .await?;
+        let Some(resp) = resp else {
+            return Err(ProviderError::NotSupported);
+        };
+        if !resp.ok {
+            return Err(map_guest_error(resp.error, resp.error_kind));
+        }
+        let pem = resp.pem.ok_or(ProviderError::NotFound)?;
+        Ok(Fido2KeyMaterial {
+            pem: Zeroizing::new(pem),
+        })
+    }
+
     /// Check whether the remote has changed since the last sync.
     ///
     /// If the guest exports `check_remote_changed`, delegate to it with an
@@ -1780,6 +1846,27 @@ fn to_ssh_key_meta(w: WasmSshKeyMeta, provider_id: &str) -> SshKeyMeta {
     }
 }
 
+fn to_fido2_credential_meta(w: WasmFido2CredentialMeta, provider_id: &str) -> Fido2CredentialMeta {
+    Fido2CredentialMeta {
+        item_id: w.item_id,
+        credential_id: w.credential_id,
+        item_name: w.item_name,
+        provider_id: provider_id.to_owned(),
+        rp_id: w.rp_id,
+        rp_name: w.rp_name,
+        user_handle: w.user_handle,
+        user_name: w.user_name,
+        user_display_name: w.user_display_name,
+        algorithm: w.algorithm,
+        counter: w.counter,
+        discoverable: w.discoverable,
+        require_uv: w.require_uv,
+        revision_date: w
+            .revision_date_epoch_secs
+            .map(|s| UNIX_EPOCH + Duration::from_secs(s)),
+    }
+}
+
 fn parse_capability(s: &str) -> Option<Capability> {
     match s {
         "sync" | "Sync" => Some(Capability::Sync),
@@ -1790,6 +1877,7 @@ fn parse_capability(s: &str) -> Option<Capability> {
         "offline_cache" | "OfflineCache" => Some(Capability::OfflineCache),
         "notifications" | "Notifications" => Some(Capability::Notifications),
         "totp" | "Totp" => Some(Capability::Totp),
+        "fido2" | "Fido2" => Some(Capability::Fido2),
 
         _ => None,
     }

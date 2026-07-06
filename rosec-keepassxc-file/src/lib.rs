@@ -27,6 +27,7 @@ mod host_file;
 mod host_watch;
 mod protocol;
 mod ssh;
+mod fido2;
 
 use std::io::Cursor;
 use std::sync::{Mutex, MutexGuard};
@@ -647,12 +648,72 @@ pub fn get_ssh_private_key(
 
 // ── Static metadata queried once at plugin load ───────────────────────────────
 
+
+#[plugin_fn]
+pub fn list_fido2_credentials(_: ()) -> FnResult<Json<Fido2CredentialListResponse>> {
+    let result = with_db(|_, db| {
+        db.iter_all_entries()
+            .filter_map(|e| fido2::entry_to_fido2_meta(&e))
+            .collect::<Vec<_>>()
+    });
+    match result {
+        Ok(credentials) => Ok(Json(Fido2CredentialListResponse {
+            ok: true,
+            error: None,
+            error_kind: None,
+            credentials,
+        })),
+        Err((msg, kind)) => Ok(Json(Fido2CredentialListResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(kind),
+            credentials: Vec::new(),
+        })),
+    }
+}
+
+#[plugin_fn]
+pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2KeyResponse>> {
+    let pem_result = with_db(|_, db| match lookup_entry_by_id(db, &req.item_id) {
+        Some(entry) => fido2::resolve_fido2_key(&entry, &req.credential_id),
+        None => Err(format!("item not found: {}", req.item_id)),
+    });
+
+    match pem_result {
+        Ok(Ok(pem)) => {
+            // Same unavoidable clone as get_ssh_private_key: serde owns the
+            // buffer; the Zeroizing source scrubs its copy on drop and the
+            // host re-wraps on receipt.
+            let response = Fido2KeyResponse {
+                ok: true,
+                error: None,
+                error_kind: None,
+                pem: Some(pem.to_string()),
+            };
+            drop(pem);
+            Ok(Json(response))
+        }
+        Ok(Err(msg)) => Ok(Json(Fido2KeyResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(ErrorKind::NotFound),
+            pem: None,
+        })),
+        Err((msg, kind)) => Ok(Json(Fido2KeyResponse {
+            ok: false,
+            error: Some(msg),
+            error_kind: Some(kind),
+            pem: None,
+        })),
+    }
+}
+
 #[plugin_fn]
 pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     // Phase 1: read-only, sync via mtime polling.
     // Ssh: SSH key extraction from KeeAgent.settings + binary attachments.
     Ok(Json(CapabilitiesResponse {
-        capabilities: vec!["Sync".into(), "Ssh".into()],
+        capabilities: vec!["Sync".into(), "Ssh".into(), "Fido2".into()],
     }))
 }
 
