@@ -67,6 +67,34 @@ handle to sign with. Cancel (exit 1) maps to CTAP2 `0x27`
 selection prompt is reusable for other "which of these?" flows such as
 multiple matching SSH keys.
 
+### No matching credential — stay silent
+
+The virtual authenticator is always present, so it is queried on *every*
+`getAssertion`, including sites where the user has no rosec passkey. When
+nothing matches — an empty `allowList` discoverable request with no resident
+credential for the RP, or an `allowList` containing none of rosec's
+credential IDs — the engine returns `CTAP2_ERR_NO_CREDENTIALS` (`0x2b`)
+**without showing a prompt**. Prompting on every no-match would make routine
+logins unusable and leak activity. rosec-prompt appears only when there is a
+real credential to confirm.
+
+### Creating a passkey — registration
+
+`makeCredential` (`navigator.credentials.create()`) is user-initiated, not
+something rosec pushes: the browser shows its own authenticator picker, and
+rosec is invoked only if the user selects it there. Having zero existing
+passkeys is the normal starting state and blocks nothing.
+
+A created credential needs a provider with **both `Write` and `Fido2`** — a
+writable passkey store. Today that is the **local vault** only;
+bitwarden-pm and keepassxc-file expose `Fido2` for reading but rosec does
+not write passkeys back to them, so they cannot be registration targets.
+The write target follows the existing `write_provider` config. If no
+writable `Fido2` provider is configured, `makeCredential` fails cleanly
+(rather than hanging the browser). Honour `excludeCredentials`: if rosec
+already holds a credential the RP lists there, return
+`CTAP2_ERR_CREDENTIAL_EXCLUDED`.
+
 ### Normalisation at the rosec boundary
 
 | Field | Canonical form | Bitwarden native | KeePassXC native |
