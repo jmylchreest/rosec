@@ -590,6 +590,92 @@ is plaintext from the guest's perspective.
 The CLI shows `cached` as `"unlocked (cached)"` in `rosec provider list`
 and `rosec status` to alert the user that secrets may be stale.
 
+## Packaging, signing, and distribution
+
+Writing the plugin is half the job; rosec only loads it once it is a signed
+**bundle** of three files sitting together in a provider directory:
+
+| File | What it is |
+|------|------------|
+| `foo.wasm` | your compiled provider (`cargo build --target wasm32-wasip1 --release`) |
+| `foo.wasm.policy.toml` | the policy sidecar declaring your network/filesystem needs and options — see the [WASM policy sidecar](./wasm-policy-sidecar.md) |
+| `foo.wasm.minisig` | one minisign signature over `(wasm_bytes || policy_bytes)` — substituting either file invalidates it |
+
+`rosec-package-wasm` (from the `rosec-tools` crate,
+`cargo build -p rosec-tools` in the rosec repo) produces and checks these
+bundles. It has three subcommands:
+
+### `keygen` — create your signing keypair (once)
+
+```console
+$ rosec-package-wasm keygen --output-dir ~/keys --prefix acme-signing
+```
+
+Prompts for a password (`--no-password` for a key destined for a CI secret,
+equivalent to `rsign generate -W`). Writes `acme-signing.key` (0600) and
+`acme-signing.pub`, and prints the `[[service.wasm_trusted_key]]` snippet your
+users will need (below). Keys are standard rsign/minisign format — if you
+already have an rsign key, use it directly; the tools are interchangeable.
+
+### `sign` — validate the policy and sign the bundle
+
+```console
+$ rosec-package-wasm sign --key ~/keys/acme-signing.key \
+    target/wasm32-wasip1/release/acme_vault.wasm
+```
+
+The policy sidecar must sit next to the `.wasm` and is **schema-validated
+before anything is signed** — a typo'd policy fails here, not on your users'
+machines. `--output-dir dist/` stages a distributable copy of all three files
+instead of signing in place. Non-interactive signing reads the key from the
+`WASM_SIGNING_KEY` env var (file *contents*) and the password from
+`WASM_SIGNING_KEY_PASSWORD`.
+
+Key rotation is the same command with a new key pointed at existing bundles —
+signing never rebuilds the wasm:
+
+```console
+$ rosec-package-wasm sign --key ~/keys/new-signing.key dist/
+```
+
+### `verify` — check bundles before shipping
+
+```console
+$ rosec-package-wasm verify --pubkey ~/keys/acme-signing.pub dist/
+$ rosec-package-wasm verify dist/   # against the rosec release keys instead
+```
+
+### Getting users to trust your plugin
+
+Stock rosec builds only load plugins signed by a rosec release key. Your
+users have two options, in order of preference:
+
+1. **Trust anchor** (recommended) — they add your public key to their
+   `rosec.toml`, scoped to your plugin's kind. Verification stays on for
+   everything else, and rosecd logs the extended trust at startup:
+
+   ```toml
+   [[service.wasm_trusted_key]]
+   key   = "RWQ..."          # your .pub file's second line
+   name  = "acme-corp"
+   kinds = ["acme-vault"]
+   ```
+
+2. **`wasm_verify = "disabled"`** — development only; turns verification off
+   for *all* plugins. Fine on your own machine while iterating (no `.minisig`
+   needed, the policy sidecar is still required and enforced); never ask
+   users to do this.
+
+Either way, users can audit exactly what they are enabling before they enable
+it:
+
+```console
+$ rosec provider validate --wasm ./acme_vault.wasm
+```
+
+shows your signature's provenance, your policy claim, and the resolved
+sandbox against their config. Point your install instructions at it.
+
 ## Checklist for new providers
 
 - [ ] All `#[plugin_fn]` exports return `Ok(Json(...))` for application errors
@@ -613,6 +699,10 @@ and `rosec status` to alert the user that secrets may be stale.
       `export_cache` serializes in-memory state (optionally including session
       tokens for automatic recovery), `restore_cache` deserializes it and
       makes data-access functions work
+- [ ] `*.wasm.policy.toml` sidecar written, declaring every host you contact
+      and every path you touch (see [Packaging](#packaging-signing-and-distribution))
+- [ ] Bundle signed with `rosec-package-wasm sign` and checked with
+      `rosec provider validate --wasm` before distribution
 
 ## Capabilities reference
 
