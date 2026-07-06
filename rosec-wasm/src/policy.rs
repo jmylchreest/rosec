@@ -372,6 +372,41 @@ pub fn extract_host_from_url(url_str: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(str::to_string))
 }
 
+/// Assemble the option map forwarded to a WASM guest from a config entry:
+/// drop the host-side shorthands (`name`, `allowed_hosts`), expand `~`/`$home`
+/// variables once at this boundary, and merge the top-level `path` /
+/// `collection` fields unless an explicit option of the same name exists.
+///
+/// Shared by rosecd's provider construction and the `rosec provider validate`
+/// dry-run so both always see the same effective options. The daemon layers
+/// host-managed extras (e.g. `device_id`) on top of this.
+pub fn guest_options_for_entry(
+    entry: &rosec_core::config::ProviderEntry,
+) -> HashMap<String, serde_json::Value> {
+    let expand = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => serde_json::Value::String(expand_env_vars(s)),
+        other => other.clone(),
+    };
+
+    let mut options: HashMap<String, serde_json::Value> = entry
+        .options
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "name" | "allowed_hosts"))
+        .map(|(k, v)| (k.clone(), expand(v)))
+        .collect();
+    if let Some(p) = entry.path.as_ref() {
+        options
+            .entry("path".to_string())
+            .or_insert_with(|| expand(&serde_json::Value::String(p.clone())));
+    }
+    if let Some(c) = entry.collection.as_ref() {
+        options
+            .entry("collection".to_string())
+            .or_insert_with(|| serde_json::Value::String(c.clone()));
+    }
+    options
+}
+
 /// Expand `$option:KEY`, `$home`, `$xdg_data_home`, `$xdg_config_home`.
 ///
 /// Variable names match `[A-Za-z0-9_:]+`. `$option:KEY` is rejected if KEY

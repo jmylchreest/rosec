@@ -24,9 +24,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use minisign::{KeyPair, PublicKey, SecretKey, SecretKeyBox};
 
-use rosec_wasm::discovery::{PluginBundle, policy_path_for, signature_path_for};
+use rosec_wasm::discovery::{PluginBundle, policy_path_for};
 use rosec_wasm::keys::WASM_SIGNING_PUBKEYS;
-use rosec_wasm::policy;
 
 /// Env var holding the *contents* of an rsign/minisign secret-key file
 /// (same contract as the old `just sign-wasm` recipe / CI secret).
@@ -234,53 +233,40 @@ fn sign(args: &SignArgs) -> Result<()> {
     }
 
     for wasm_src in &wasm_files {
-        // Validates policy presence + schema before anything is signed.
-        let bundle = PluginBundle::load(wasm_src).map_err(anyhow::Error::msg)?;
-
-        // Stage into --output-dir when given (release layout), else in place.
-        let wasm_dst = match &args.output_dir {
+        let staged = PluginBundle::load(wasm_src).map_err(anyhow::Error::msg)?;
+        let bundle = match &args.output_dir {
             Some(dir) => {
                 let file_name = wasm_src.file_name().context("wasm path has no file name")?;
                 let dst = dir.join(file_name);
                 std::fs::copy(wasm_src, &dst)
                     .with_context(|| format!("staging {}", dst.display()))?;
-                std::fs::copy(&bundle.policy_path, policy_path_for(&dst))
+                std::fs::copy(&staged.policy_path, policy_path_for(&dst))
                     .with_context(|| format!("staging {}", policy_path_for(&dst).display()))?;
-                dst
+                PluginBundle::load(&dst).map_err(anyhow::Error::msg)?
             }
-            None => wasm_src.clone(),
+            None => staged,
         };
 
         let trusted_comment = format!(
             "rosec-wasm-bundle kind={} version={} file={}",
             bundle.policy.kind,
             bundle.policy.version.as_deref().unwrap_or("unversioned"),
-            wasm_dst
+            bundle
+                .wasm_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         );
-        let combined = policy::signature_input(&bundle.wasm_bytes, &bundle.policy_bytes);
-        // Passing the public key makes minisign self-verify the fresh signature.
-        let sig_box = minisign::sign(
-            Some(&pk),
-            &sk,
-            combined.as_slice(),
-            Some(&trusted_comment),
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("signing {}: {e}", wasm_dst.display()))?;
-
-        let sig_path = signature_path_for(&wasm_dst);
-        std::fs::write(&sig_path, sig_box.to_string())
-            .with_context(|| format!("writing {}", sig_path.display()))?;
+        bundle
+            .sign_with(&sk, Some(&trusted_comment))
+            .map_err(anyhow::Error::msg)?;
 
         println!(
             "signed: {} (kind={}, policy={}, sig={})",
-            wasm_dst.display(),
+            bundle.wasm_path.display(),
             bundle.policy.kind,
-            policy_path_for(&wasm_dst).display(),
-            sig_path.display(),
+            bundle.policy_path.display(),
+            bundle.signature_path.display(),
         );
     }
 
@@ -466,11 +452,11 @@ mod tests {
         wasm
     }
 
-    fn sign_bundle(wasm: &Path, sk: &SecretKey, pk: &PublicKey) {
-        let bundle = PluginBundle::load(wasm).unwrap();
-        let combined = policy::signature_input(&bundle.wasm_bytes, &bundle.policy_bytes);
-        let sig = minisign::sign(Some(pk), sk, combined.as_slice(), None, None).unwrap();
-        std::fs::write(signature_path_for(wasm), sig.to_string()).unwrap();
+    fn sign_bundle(wasm: &Path, sk: &SecretKey) {
+        PluginBundle::load(wasm)
+            .unwrap()
+            .sign_with(sk, None)
+            .unwrap();
     }
 
     #[test]
@@ -478,7 +464,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
         let kp = KeyPair::generate_unencrypted_keypair().unwrap();
-        sign_bundle(&wasm, &kp.sk, &kp.pk);
+        sign_bundle(&wasm, &kp.sk);
 
         let bundle = PluginBundle::load(&wasm).unwrap();
         bundle
@@ -491,7 +477,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
         let kp = KeyPair::generate_unencrypted_keypair().unwrap();
-        sign_bundle(&wasm, &kp.sk, &kp.pk);
+        sign_bundle(&wasm, &kp.sk);
 
         // Tamper: policy grants an extra host after signing.
         std::fs::write(
@@ -509,7 +495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
         let kp = KeyPair::generate_unencrypted_keypair().unwrap();
-        sign_bundle(&wasm, &kp.sk, &kp.pk);
+        sign_bundle(&wasm, &kp.sk);
 
         std::fs::write(&wasm, b"\0asm-DIFFERENT-module").unwrap();
 
@@ -522,7 +508,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
         let kp = KeyPair::generate_unencrypted_keypair().unwrap();
-        sign_bundle(&wasm, &kp.sk, &kp.pk);
+        sign_bundle(&wasm, &kp.sk);
 
         let other = KeyPair::generate_unencrypted_keypair().unwrap();
         let bundle = PluginBundle::load(&wasm).unwrap();
@@ -554,7 +540,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
-        sign_bundle(&wasm, &sk, &pk);
+        sign_bundle(&wasm, &sk);
         PluginBundle::load(&wasm)
             .unwrap()
             .verify_signature_with(&pk.to_base64())
@@ -573,7 +559,7 @@ mod tests {
         let sk = load_secret_key(Some(&key_path), true)
             .expect("kdf=none key must load via the unencrypted fallback");
         let wasm = write_bundle(dir.path(), "test_plugin", "test");
-        sign_bundle(&wasm, &sk, &kp.pk);
+        sign_bundle(&wasm, &sk);
         PluginBundle::load(&wasm)
             .unwrap()
             .verify_signature_with(&kp.pk.to_base64())

@@ -237,32 +237,10 @@ fn print_policy_claim(policy: &PluginPolicy) {
 fn print_dry_run(policy: &PluginPolicy, entry: Option<&ProviderEntry>) -> usize {
     let mut problems = 0usize;
 
-    // Mirror rosecd's option pipeline: drop the host-side shorthands, expand
-    // `~`/`$home`-style variables once at the boundary, then merge the
-    // top-level `path`/`collection` fields plugins may declare as options.
-    let mut options: HashMap<String, serde_json::Value> = entry
-        .map(|e| {
-            e.options
-                .iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "name" | "allowed_hosts"))
-                .map(|(k, v)| (k.clone(), expand_tilde_in_value(v)))
-                .collect()
-        })
+    let mut options = entry
+        .map(policy::guest_options_for_entry)
         .unwrap_or_default();
-    if let Some(e) = entry {
-        if let Some(p) = e.path.as_ref() {
-            options
-                .entry("path".to_string())
-                .or_insert_with(|| expand_tilde_in_value(&serde_json::Value::String(p.clone())));
-        }
-        if let Some(c) = e.collection.as_ref() {
-            options
-                .entry("collection".to_string())
-                .or_insert_with(|| serde_json::Value::String(c.clone()));
-        }
-    }
 
-    // Effective network allow-list — same computation as rosecd startup.
     let empty_options = HashMap::new();
     let effective = policy::effective_allowed_hosts(
         policy,
@@ -299,8 +277,6 @@ fn print_dry_run(policy: &PluginPolicy, entry: Option<&ProviderEntry>) -> usize 
         );
     }
 
-    // Filesystem dry-run: defaults + template resolution, exactly as the
-    // daemon does before constructing the provider.
     if let Err(e) = policy.apply_defaults(&mut options) {
         println!("    error: policy defaults: {e}");
         return problems + 1;
@@ -324,20 +300,20 @@ fn print_dry_run(policy: &PluginPolicy, entry: Option<&ProviderEntry>) -> usize 
             }
         }
         Err(e) => {
-            problems += 1;
             println!("    error: policy resolve: {e}");
             if entry.is_none() {
+                // Nothing to resolve against, not a defect in the bundle.
                 println!(
                     "      (expected without a configured provider when the policy has \
                      required options — add one with `rosec provider add {}`)",
                     policy.kind
                 );
-                problems -= 1; // not a real problem, just nothing to resolve against
+            } else {
+                problems += 1;
             }
         }
     }
 
-    // Same lenient unknown-option warning the daemon logs at startup.
     for key in policy.unknown_options(&options) {
         println!(
             "    warning: unknown option '{key}' for plugin kind, ignored \
@@ -352,15 +328,5 @@ fn mode_str(mode: AccessMode) -> &'static str {
     match mode {
         AccessMode::Ro => "ro",
         AccessMode::Rw => "rw",
-    }
-}
-
-/// Daemon-boundary variable expansion for string option values (`~/`,
-/// `$home`, `$xdg_*`); non-strings pass through. Matches rosecd's
-/// `expand_tilde_in_value`.
-fn expand_tilde_in_value(v: &serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::String(s) => serde_json::Value::String(policy::expand_env_vars(s)),
-        other => other.clone(),
     }
 }

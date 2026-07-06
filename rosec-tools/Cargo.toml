@@ -12,10 +12,10 @@ name = "rosec-package-wasm"
 path = "src/main.rs"
 
 [dependencies]
-rosec-wasm = { path = "../rosec-wasm" }
+rosec-wasm = { path = "../rosec-wasm", features = ["sign"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
-minisign = "0.9"
+minisign = { workspace = true }
 rpassword = { workspace = true }
 
 [dev-dependencies]

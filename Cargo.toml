@@ -61,6 +61,7 @@ tokio-websockets = { version = "0.13", features = ["client", "rustls-native-root
 wildmatch = "2.6.1"
 chrono = { version = "0.4", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
+minisign = "0.9"
 minisign-verify = "0.2"
 pbkdf2 = "0.12.2"
 tempfile = "3"

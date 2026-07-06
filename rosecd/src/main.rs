@@ -1784,34 +1784,7 @@ async fn build_single_provider(
                 .unwrap_or(&entry.id)
                 .to_string();
 
-            // Forward all options except the legacy "name"/"allowed_hosts"
-            // string-shorthand options to the guest. Any string value that
-            // starts with `~/` is expanded against `$HOME` here — once, at
-            // the daemon-side boundary — so all downstream consumers see
-            // resolved paths without each re-implementing tilde handling.
-            // The on-disk config is left untouched so it stays portable.
-            let mut guest_options: std::collections::HashMap<String, serde_json::Value> = entry
-                .options
-                .iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "name" | "allowed_hosts"))
-                .map(|(k, v)| (k.clone(), expand_tilde_in_value(v)))
-                .collect();
-
-            // `path` and `collection` are top-level fields on ProviderEntry
-            // (historically local-vault-specific).  Plugins like
-            // keepassxc-file declare them as manifest options, so forward
-            // them into guest_options when set, unless an explicit option
-            // of the same name already exists (which takes precedence).
-            if let Some(p) = entry.path.as_ref() {
-                guest_options.entry("path".to_string()).or_insert_with(|| {
-                    expand_tilde_in_value(&serde_json::Value::String(p.clone()))
-                });
-            }
-            if let Some(c) = entry.collection.as_ref() {
-                guest_options
-                    .entry("collection".to_string())
-                    .or_insert_with(|| serde_json::Value::String(c.clone()));
-            }
+            let mut guest_options = rosec_wasm::policy::guest_options_for_entry(entry);
 
             // Inject host-managed device_id if the guest doesn't already have one.
             // Bitwarden APIs require a stable deviceIdentifier; the WASM sandbox
@@ -1849,11 +1822,6 @@ async fn build_single_provider(
                 }
             }
 
-            // Effective allowed_hosts:
-            //   policy baseline             ↦  user.allowed_hosts replaces it (loud warn)
-            //                               ↦  user.additional_hosts always extends (info)
-            // Shared with `rosec provider validate` so the CLI dry-run shows
-            // exactly what the daemon will enforce.
             let effective = rosec_wasm::policy::effective_allowed_hosts(
                 policy,
                 entry.allowed_hosts.as_deref(),
@@ -1907,20 +1875,6 @@ async fn build_single_provider(
 }
 
 /// Extract the hostname from a URL string.  Returns `None` for malformed input.
-/// Expand path-like variables in any string-valued option: a leading `~/`,
-/// `$home`, `$xdg_data_home`, `$xdg_config_home`. Unknown variables and
-/// `$option:KEY` refs are left literally — policy resolution handles those,
-/// and we don't want to mangle unrelated `$` occurrences (e.g. inside a
-/// passphrase or URL fragment).  Non-string values pass through unchanged.
-fn expand_tilde_in_value(v: &serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::String(s) => {
-            serde_json::Value::String(rosec_wasm::policy::expand_env_vars(s))
-        }
-        other => other.clone(),
-    }
-}
-
 /// Parse `--config <path>` from CLI args, falling back to XDG default.
 fn parse_config_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();

@@ -501,8 +501,6 @@ impl PluginBundle {
             }
         }
 
-        // Deduplicate: with several keys the dominant reason is usually the
-        // same "different key" message repeated per candidate.
         reasons.dedup();
         Err(format!(
             "signature not accepted by any trusted key ({} release, {} user): {}",
@@ -541,6 +539,28 @@ impl PluginBundle {
                 self.policy_path.display(),
             )
         })
+    }
+
+    /// Sign `(wasm_bytes || policy_bytes)` with a minisign secret key and
+    /// write the detached signature to [`Self::signature_path`]. The public
+    /// key is derived from the secret key so minisign self-verifies the
+    /// fresh signature before it is written.
+    ///
+    /// Only available to author-side tooling via the `sign` feature; the
+    /// daemon never signs.
+    #[cfg(any(test, feature = "sign"))]
+    pub fn sign_with(
+        &self,
+        sk: &minisign::SecretKey,
+        trusted_comment: Option<&str>,
+    ) -> Result<(), String> {
+        let pk = minisign::PublicKey::from_secret_key(sk)
+            .map_err(|e| format!("deriving public key from secret key: {e}"))?;
+        let combined = policy::signature_input(&self.wasm_bytes, &self.policy_bytes);
+        let sig_box = minisign::sign(Some(&pk), sk, combined.as_slice(), trusted_comment, None)
+            .map_err(|e| format!("signing {}: {e}", self.wasm_path.display()))?;
+        std::fs::write(&self.signature_path, sig_box.to_string())
+            .map_err(|e| format!("writing {}: {e}", self.signature_path.display()))
     }
 }
 
@@ -739,10 +759,10 @@ mod tests {
     fn signed_bundle(dir: &Path, kind: &str) -> (PluginBundle, String) {
         let wasm = write_bundle(dir, kind);
         let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-        let unsigned = PluginBundle::load(&wasm).unwrap();
-        let combined = policy::signature_input(&unsigned.wasm_bytes, &unsigned.policy_bytes);
-        let sig = minisign::sign(Some(&kp.pk), &kp.sk, combined.as_slice(), None, None).unwrap();
-        std::fs::write(signature_path_for(&wasm), sig.to_string()).unwrap();
+        PluginBundle::load(&wasm)
+            .unwrap()
+            .sign_with(&kp.sk, None)
+            .unwrap();
         (PluginBundle::load(&wasm).unwrap(), kp.pk.to_base64())
     }
 
