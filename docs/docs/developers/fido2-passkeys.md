@@ -148,6 +148,17 @@ After creation everything runs as the user.
 Known limitations: Flatpak/Snap-confined browsers need device access;
 attestation-enforcing RPs (e.g. Entra ID) reject software authenticators.
 
+Component split — the broker is privileged but trivial; all protocol
+logic is unprivileged:
+
+| | `rosec-uhid-broker` (system service) | fido2 frontend (in rosecd) |
+|---|---|---|
+| privilege | root, socket-activated, exits after fd-passing | user |
+| does | `SO_PEERCRED` caller check → open `/dev/uhid` → `UHID_CREATE2` with a hard-coded FIDO-only descriptor → pass fd via `SCM_RIGHTS` | event loop on the fd: `UHID_OUTPUT` in, `UHID_INPUT2` out |
+| protocol | none | CTAPHID framing (INIT, fragmentation, KEEPALIVE `UPNEEDED` while a prompt is up) + CTAP2 CBOR commands |
+| CTAP2 surface | — | `getInfo` (`rk=true`, `uv=true`), `getAssertion`/`getNextAssertion` (registry lookup → rosec-prompt UP/UV → `get_fido2_key` → sign → zeroize), `makeCredential` (stores into a writable `Fido2` provider — the local vault) |
+| lifetime | milliseconds | session; closing the fd destroys the device |
+
 Useful crates surveyed for phase 2:
 
 - **`passkey-rs`** (1Password: `passkey-authenticator`, `passkey-types`) —
