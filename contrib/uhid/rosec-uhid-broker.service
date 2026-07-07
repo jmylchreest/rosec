@@ -1,0 +1,43 @@
+# rosec virtual authenticator broker (privileged, disposable).
+#
+# Socket-activated system service. Opens /dev/uhid (root-only), creates a
+# device with a hard-coded FIDO usage-page descriptor, chowns the resulting
+# hidraw node to the requesting user (0600), passes the device fd over
+# SCM_RIGHTS, and exits. Speaks no CTAP and holds no state.
+
+[Unit]
+Description=rosec virtual authenticator broker
+Documentation=https://github.com/jmylchreest/rosec
+Requires=rosec-uhid-broker.socket
+After=rosec-uhid-broker.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rosec-uhid-broker
+
+# The broker's only job is creating a FIDO uhid device, so confine it to
+# exactly that. It needs CAP_CHOWN (chown the hidraw node) and write access
+# to /dev/uhid; nothing else.
+DeviceAllow=/dev/uhid rw
+DevicePolicy=closed
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# /dev/uhid, /run/rosec (socket), and /sys/class/hidraw (node discovery) must
+# remain reachable despite ProtectSystem=strict.
+ReadWritePaths=/dev/uhid /run/rosec
+ReadOnlyPaths=/sys/class/hidraw
+
+[Install]
+WantedBy=multi-user.target

@@ -17,13 +17,112 @@
 //! | `fido2_discoverable`       | `"false"` to mark non-resident            |
 //! | `fido2_require_uv`         | `"true"` to force user verification       |
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 
-use base64::prelude::{BASE64_STANDARD, Engine};
-use rosec_core::{Fido2CredentialMeta, Fido2KeyMaterial, ProviderError};
+use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD, Engine};
+use rosec_core::{
+    Fido2CredentialMeta, Fido2KeyMaterial, ItemType, NewItem, ProviderError, SecretBytes,
+};
 use zeroize::Zeroizing;
 
 use crate::types::VaultItemData;
+
+/// A newly-created passkey to be written into the local vault by a
+/// `makeCredential` ceremony. All the WebAuthn wire fields plus the freshly
+/// generated PEM PKCS#8 private key.
+#[derive(Clone)]
+pub struct NewFido2Credential {
+    /// Relying party identifier (e.g. `"github.com"`).
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    /// Raw credential ID bytes as they appear on the WebAuthn wire.
+    pub credential_id: Vec<u8>,
+    /// Raw user handle bytes.
+    pub user_handle: Vec<u8>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    /// COSE algorithm id (`-7` ES256, `-8` EdDSA, `-257` RS256).
+    pub algorithm: i64,
+    /// Whether the credential is discoverable (resident).
+    pub discoverable: bool,
+    /// Whether user verification is required before assertions.
+    pub require_uv: bool,
+    /// PEM-encoded PKCS#8 private key.
+    pub private_key_pem: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for NewFido2Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewFido2Credential")
+            .field("rp_id", &self.rp_id)
+            .field("user_name", &self.user_name)
+            .field("algorithm", &self.algorithm)
+            .field("discoverable", &self.discoverable)
+            .field("private_key_pem", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Human-readable vault label for a stored passkey, e.g.
+/// `"Passkey: alice@github.com"` (falls back to the rpId).
+fn passkey_label(cred: &NewFido2Credential) -> String {
+    match &cred.user_name {
+        Some(u) if !u.is_empty() => format!("Passkey: {u}@{}", cred.rp_id),
+        _ => format!("Passkey: {}", cred.rp_id),
+    }
+}
+
+/// Build the [`NewItem`] that stores `cred` as a local-vault passkey. The
+/// generic `create_item` path base64-encodes the secret; the read path
+/// ([`item_fido2_key`]) base64-decodes it back to the PEM, so we hand the
+/// PEM bytes through verbatim. Attribute names match those consumed by
+/// [`is_fido2_item`] / [`item_to_fido2_meta`].
+pub fn new_item_for_credential(cred: &NewFido2Credential) -> NewItem {
+    let mut attributes: HashMap<String, String> = HashMap::new();
+    attributes.insert("fido2_rp_id".to_string(), cred.rp_id.clone());
+    attributes.insert(
+        "fido2_credential_id".to_string(),
+        BASE64_URL_SAFE_NO_PAD.encode(&cred.credential_id),
+    );
+    if !cred.user_handle.is_empty() {
+        attributes.insert(
+            "fido2_user_handle".to_string(),
+            BASE64_URL_SAFE_NO_PAD.encode(&cred.user_handle),
+        );
+    }
+    if let Some(v) = &cred.rp_name {
+        attributes.insert("fido2_rp_name".to_string(), v.clone());
+    }
+    if let Some(v) = &cred.user_name {
+        attributes.insert("fido2_user_name".to_string(), v.clone());
+    }
+    if let Some(v) = &cred.user_display_name {
+        attributes.insert("fido2_user_display_name".to_string(), v.clone());
+    }
+    attributes.insert("fido2_algorithm".to_string(), cred.algorithm.to_string());
+    attributes.insert("fido2_counter".to_string(), "0".to_string());
+    attributes.insert(
+        "fido2_discoverable".to_string(),
+        cred.discoverable.to_string(),
+    );
+    if cred.require_uv {
+        attributes.insert("fido2_require_uv".to_string(), "true".to_string());
+    }
+
+    let mut secrets: HashMap<String, SecretBytes> = HashMap::new();
+    secrets.insert(
+        "fido2_private_key".to_string(),
+        SecretBytes::new(cred.private_key_pem.as_bytes().to_vec()),
+    );
+
+    NewItem {
+        label: passkey_label(cred),
+        item_type: Some(ItemType::Login),
+        attributes,
+        secrets,
+    }
+}
 
 pub(crate) fn is_fido2_item(item: &VaultItemData) -> bool {
     item.attributes.contains_key("fido2_rp_id") && item.secrets.contains_key("fido2_private_key")
