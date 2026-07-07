@@ -22,6 +22,17 @@ libc = { workspace = true }
 nix = { version = "0.31", features = ["socket", "uio", "user", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }
+# CTAP2 ceremony engine: CBOR wire + COSE keys + multi-algorithm signing.
+ciborium = "0.2"
+coset = "0.3"
+sha2 = { workspace = true }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+rsa = { version = "0.9", features = ["sha2"] }
+# rand_core 0.6 to match the RustCrypto signing crates (their RNG bound);
+# the workspace `rand` 0.10 pulls rand_core 0.9 and is incompatible here.
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
