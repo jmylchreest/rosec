@@ -363,32 +363,56 @@ impl ServiceState {
         self.registry.order_snapshot()
     }
 
-    /// Return the provider to use for write operations.
-    ///
-    /// Resolution order:
-    /// 1. If `service.write_provider` is configured, return that provider if it supports writes
-    /// 2. Otherwise, return the first provider that supports writes
-    /// 3. If no write-capable provider exists, return None
-    pub fn write_provider(&self) -> Option<Arc<dyn Provider>> {
-        let config = self.live_config();
-
-        if let Some(ref provider_id) = config.service.write_provider
-            && let Some(provider) = self.provider_by_id(provider_id)
-            && provider.capabilities().contains(&Capability::Write)
-        {
-            return Some(provider);
-        }
-
-        if let Some(ref provider_id) = config.service.write_provider {
-            warn!(
-                provider_id = %provider_id,
-                "configured write_provider does not support writes, falling back"
-            );
-        }
-
+    /// Providers that declare **every** capability in `caps`, in provider
+    /// (config) order. The generic basis for routing an operation to a
+    /// provider that can serve all its requirements — e.g. `[Write, Fido2]`
+    /// for storing a passkey, `[Write, Ssh]` for an SSH key.
+    pub fn providers_with(&self, caps: &[Capability]) -> Vec<Arc<dyn Provider>> {
         self.providers_ordered()
             .into_iter()
-            .find(|b| b.capabilities().contains(&Capability::Write))
+            .filter(|p| rosec_core::supports_all(p.as_ref(), caps))
+            .collect()
+    }
+
+    /// Select the provider for an operation requiring all of `caps`.
+    ///
+    /// `preferred_id` (e.g. `service.write_provider` for writes) wins when it
+    /// exists **and** satisfies the full capability set; otherwise the first
+    /// provider in config order that does. Returns `None` when none qualify.
+    /// A stale/insufficient preference is logged, then falls back.
+    pub fn select_provider(
+        &self,
+        caps: &[Capability],
+        preferred_id: Option<&str>,
+    ) -> Option<Arc<dyn Provider>> {
+        if let Some(id) = preferred_id {
+            match self.provider_by_id(id) {
+                Some(p) if rosec_core::supports_all(p.as_ref(), caps) => return Some(p),
+                Some(_) => warn!(
+                    provider_id = %id,
+                    ?caps,
+                    "preferred provider does not satisfy the required capabilities, falling back"
+                ),
+                None => warn!(
+                    provider_id = %id,
+                    "preferred provider not found, falling back"
+                ),
+            }
+        }
+        self.providers_with(caps).into_iter().next()
+    }
+
+    /// Return the provider to use for plain write operations.
+    ///
+    /// Thin wrapper over [`Self::select_provider`] with `[Capability::Write]`
+    /// and the `service.write_provider` preference. Passkey/SSH-key writes use
+    /// `select_provider(&[Write, Fido2], …)` / `&[Write, Ssh]` directly.
+    pub fn write_provider(&self) -> Option<Arc<dyn Provider>> {
+        let config = self.live_config();
+        self.select_provider(
+            &[Capability::Write],
+            config.service.write_provider.as_deref(),
+        )
     }
 
     /// Resolve which writable provider should receive a `CreateItem` whose

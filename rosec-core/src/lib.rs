@@ -132,6 +132,27 @@ pub fn require(provider: &dyn Provider, cap: Capability) -> Result<(), ProviderE
     }
 }
 
+/// Whether `provider` declares **every** capability in `caps`.
+///
+/// The building block for routing an operation to a provider that can serve
+/// all of its requirements at once — `[Write, Fido2]` for storing a passkey,
+/// `[Write, Ssh]` for writing an SSH key, `[Totp]` for reading a TOTP seed,
+/// and so on. An empty `caps` matches any provider.
+pub fn supports_all(provider: &dyn Provider, caps: &[Capability]) -> bool {
+    let declared = provider.capabilities();
+    caps.iter().all(|c| declared.contains(c))
+}
+
+/// Check that `provider` declares every capability in `caps`; return
+/// `ProviderError::NotSupported` otherwise. The set-valued form of [`require`].
+pub fn require_all(provider: &dyn Provider, caps: &[Capability]) -> Result<(), ProviderError> {
+    if supports_all(provider, caps) {
+        Ok(())
+    } else {
+        Err(ProviderError::NotSupported)
+    }
+}
+
 /// Item type for determining default secret attribute.
 ///
 /// Used by [`primary_secret`] to return the appropriate secret based on
@@ -1519,5 +1540,33 @@ mod tests {
         let p = TestProvider { caps: &[] };
         let err = require(&p, Capability::Sync).unwrap_err();
         assert!(matches!(err, ProviderError::NotSupported));
+    }
+
+    #[test]
+    fn supports_all_requires_every_capability() {
+        let p = TestProvider {
+            caps: &[Capability::Write, Capability::Totp],
+        };
+        // Superset and exact matches pass.
+        assert!(supports_all(&p, &[Capability::Write]));
+        assert!(supports_all(&p, &[Capability::Write, Capability::Totp]));
+        // Missing any one member fails.
+        assert!(!supports_all(&p, &[Capability::Write, Capability::Ssh]));
+        assert!(!supports_all(&p, &[Capability::Sync]));
+        // Empty set matches anything.
+        assert!(supports_all(&p, &[]));
+        assert!(supports_all(&TestProvider { caps: &[] }, &[]));
+    }
+
+    #[test]
+    fn require_all_is_the_result_form() {
+        let p = TestProvider {
+            caps: &[Capability::Write, Capability::Totp],
+        };
+        assert!(require_all(&p, &[Capability::Write, Capability::Totp]).is_ok());
+        assert!(matches!(
+            require_all(&p, &[Capability::Write, Capability::Ssh]),
+            Err(ProviderError::NotSupported)
+        ));
     }
 }
