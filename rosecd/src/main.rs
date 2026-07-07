@@ -220,7 +220,7 @@ async fn run() -> Result<()> {
     }
 
     wire_provider_callbacks(&state, &ssh_manager, &totp_manager, &fido2_registry);
-    wire_items_changed_callback(&state, &ssh_manager, &totp_manager);
+    wire_items_changed_callback(&state, &ssh_manager, &totp_manager, &fido2_registry);
 
     // Mount the FUSE filesystems and load any provider already unlocked at
     // startup (e.g. PAM auto-unlock that raced ahead of the callbacks above);
@@ -1174,10 +1174,12 @@ fn wire_items_changed_callback(
     state: &Arc<rosec_secret_service::ServiceState>,
     ssh_manager: &Option<Arc<ssh::SshManager>>,
     totp_manager: &Option<Arc<totp::TotpManager>>,
+    fido2_registry: &Option<Arc<fido2::Fido2Registry>>,
 ) {
     let ssh = ssh_manager.clone();
     let totp = totp_manager.clone();
-    if ssh.is_none() && totp.is_none() {
+    let fido2 = fido2_registry.clone();
+    if ssh.is_none() && totp.is_none() && fido2.is_none() {
         return;
     }
     let cb_state = Arc::clone(state);
@@ -1186,6 +1188,7 @@ fn wire_items_changed_callback(
     state.set_items_changed_callback(Arc::new(move || {
         let sm = ssh.clone();
         let tm = totp.clone();
+        let fr = fido2.clone();
         let s = Arc::clone(&cb_state);
         handle.spawn(async move {
             let providers = s.providers_ordered();
@@ -1194,6 +1197,11 @@ fn wire_items_changed_callback(
             }
             if let Some(ref tm) = tm {
                 tm.rebuild(&providers).await;
+            }
+            // A passkey written while already unlocked (e.g. makeCredential)
+            // must appear immediately, not wait for the next lock/unlock/sync.
+            if let Some(ref fr) = fr {
+                fr.rebuild(&s.fido2_providers()).await;
             }
         });
     }));
