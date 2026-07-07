@@ -6,4 +6,6 @@
 //! *provider* owns and hands over at ceremony time — neither of which that
 //! crate supports (ES256-only; generates its own keys at registration).
 
+pub mod authdata;
+pub mod cose;
 pub mod sign;
