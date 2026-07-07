@@ -45,9 +45,20 @@ The pieces:
   handle, algorithm, …) and `get_fido2_key(item_id, credential_id)` (PEM
   PKCS#8 private key, fetched only at ceremony time, zeroized after use).
 - **Fido2 registry** (future) — rosecd-side index of credentials across
-  unlocked providers, rebuilt on unlock/sync, mirroring how the SSH agent's
-  keystore works. Both frontends consume it; neither touches providers
-  directly.
+  unlocked providers. Both frontends consume it; neither touches providers
+  directly. **It must not cache a frozen snapshot** — it follows the exact
+  rebuild-on-event discipline the SSH keystore and TOTP manager already use
+  (the `098bc0a` "read live, not frozen snapshot" lesson):
+  - a `Fido2Registry` manager with `rebuild(&providers)` that iterates
+    `ServiceState::fido2_providers()` (a *live* read of the registry) and
+    calls `list_fido2_credentials()` on each unlocked provider, rebuilding
+    its index from scratch;
+  - wired into `wire_provider_callbacks` alongside ssh/totp:
+    `on_unlocked` → rebuild; `on_sync_succeeded(changed)` → rebuild **only
+    when `changed`**; `on_locked` → drop that provider's entries;
+  - every rebuild reads `providers_ordered()`/`fido2_providers()` fresh —
+    it never holds credentials captured at registration time, so an unlock
+    or sync is always reflected.
 - **Ceremony engine** (future) — one implementation of
   `authenticatorGetAssertion` / `authenticatorMakeCredential`:
   authenticatorData assembly, client-data hashing, ES256/EdDSA/RS256
