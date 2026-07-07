@@ -343,11 +343,8 @@ impl ServiceState {
         item_path: &str,
     ) -> Result<(Arc<dyn Provider>, String), FdoError> {
         let (provider, item_id) = self.provider_and_id_for_path(item_path)?;
-        if !provider.capabilities().contains(&Capability::Write) {
-            return Err(FdoError::NotSupported(
-                "provider does not support writes".into(),
-            ));
-        }
+        rosec_core::require(provider.as_ref(), Capability::Write)
+            .map_err(|_| FdoError::NotSupported("provider does not support writes".into()))?;
         Ok((provider, item_id))
     }
 

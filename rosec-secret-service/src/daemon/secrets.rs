@@ -102,11 +102,9 @@ impl RosecSecrets {
 
         let (provider, item_id) = self.state.provider_and_id_for_path(item_path.as_str())?;
 
-        if !provider.capabilities().contains(&Capability::Totp) {
-            return Err(FdoError::NotSupported(
-                "provider does not support TOTP code generation".to_string(),
-            ));
-        }
+        rosec_core::require(provider.as_ref(), Capability::Totp).map_err(|_| {
+            FdoError::NotSupported("provider does not support TOTP code generation".to_string())
+        })?;
 
         let attr_name = "totp".to_string();
         let secret = self

@@ -158,16 +158,11 @@ impl SecretItem {
     }
 
     async fn delete(&self) -> Result<OwnedObjectPath, SecretServiceError> {
-        if !self
-            .state
-            .provider
-            .capabilities()
-            .contains(&Capability::Write)
-        {
-            return Err(SecretServiceError::NotSupported(
+        rosec_core::require(self.state.provider.as_ref(), Capability::Write).map_err(|_| {
+            SecretServiceError::NotSupported(
                 "provider does not support write operations".to_string(),
-            ));
-        }
+            )
+        })?;
 
         // Check if the provider is locked — if so, return a prompt path so the
         // client can trigger unlock before retrying.
