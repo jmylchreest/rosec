@@ -4873,6 +4873,7 @@ name = "rosec-uhid"
 version = "0.0.32"
 dependencies = [
  "anyhow",
+ "async-trait",
  "ciborium",
  "coset",
  "ed25519-dalek 3.0.0",
@@ -4884,6 +4885,7 @@ dependencies = [
  "rsa",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "zeroize",

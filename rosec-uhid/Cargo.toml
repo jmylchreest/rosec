@@ -34,6 +34,8 @@ ed25519-dalek = { version = "3", features = ["pkcs8"] }
 # RNG), so its transitive rand_core 0.6 never reaches our code.
 rsa = { version = "0.9", features = ["sha2"] }
 rand = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }
