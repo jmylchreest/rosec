@@ -223,7 +223,7 @@ The caller's identity comes from `SO_PEERCRED` on the broker's Unix socket:
 the kernel stamps the connecting process's real uid, which cannot be
 spoofed and is never taken from the request body (the request carries no
 uid and no descriptor). Activation is systemd socket activation — the
-user's rosecd connects to `/run/rosec/uhid-broker.sock`, systemd spawns the
+user's rosecd connects to `/run/rosec/uhid.sock`, systemd spawns the
 broker, it serves one request and exits.
 
 Be clear about what this does **not** restrict: the broker authenticates by
@@ -281,7 +281,7 @@ ways to cross that boundary without running rosecd as root:
   ability to create arbitrary HID devices, widening the input-injection
   surface beyond rosec.
 - **Privileged broker (preferred)** — a tiny socket-activated system
-  service (`rosec-uhid-broker`) opens `/dev/uhid` as root, creates a
+  service (`rosec-uhid`) opens `/dev/uhid` as root, creates a
   device whose HID descriptor is hard-coded to the FIDO usage page
   (`0xF1D0`), passes the fd to the user's rosecd via `SCM_RIGHTS`, and
   exits. The broker physically cannot be asked to create a keyboard, and
@@ -295,7 +295,7 @@ attestation-enforcing RPs (e.g. Entra ID) reject software authenticators.
 Component split — the broker is privileged but trivial; all protocol
 logic is unprivileged:
 
-| | `rosec-uhid-broker` (system service) | fido2 frontend (in rosecd) |
+| | `rosec-uhid` (system service) | fido2 frontend (in rosecd) |
 |---|---|---|
 | privilege | root, socket-activated, exits after fd-passing | user |
 | does | `SO_PEERCRED` caller check → open `/dev/uhid` → `UHID_CREATE2` with a hard-coded FIDO-only descriptor → pass fd via `SCM_RIGHTS` | event loop on the fd: `UHID_OUTPUT` in, `UHID_INPUT2` out |

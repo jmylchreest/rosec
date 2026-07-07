@@ -8,12 +8,12 @@
 [Unit]
 Description=rosec virtual authenticator broker
 Documentation=https://github.com/jmylchreest/rosec
-Requires=rosec-uhid-broker.socket
-After=rosec-uhid-broker.socket
+Requires=rosec-uhid.socket
+After=rosec-uhid.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/rosec-uhid-broker
+ExecStart=/usr/bin/rosec-uhid
 
 # The broker's only job is creating a FIDO uhid device, so confine it to
 # exactly that. It needs CAP_CHOWN (chown the hidraw node) and write access

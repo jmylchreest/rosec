@@ -1,4 +1,4 @@
-//! `rosec-uhid-broker` — privileged, socket-activated helper that creates a
+//! `rosec-uhid` — privileged, socket-activated helper that creates a
 //! FIDO uhid device per requesting user and passes its fd back.
 //!
 //! It runs as root only long enough to open `/dev/uhid`, materialise a device
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         .init();
 
     let listener = take_listener().context("acquiring the broker socket")?;
-    info!("rosec-uhid-broker ready");
+    info!("rosec-uhid ready");
 
     let mut granted: Vec<Grant> = Vec::new();
     for conn in listener.incoming() {

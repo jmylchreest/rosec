@@ -1,6 +1,6 @@
 # rosec virtual authenticator (uhid) — deployment
 
-The `rosec-uhid-broker` is the **privileged, disposable** half of rosec's
+The `rosec-uhid` is the **privileged, disposable** half of rosec's
 virtual FIDO2 authenticator. It exists so the unprivileged rosec daemon can
 present a CTAP2 security key over `/dev/uhid` without ever running as root.
 See [`docs/developers/fido2-passkeys.md`](../../docs/docs/developers/fido2-passkeys.md)
@@ -26,10 +26,10 @@ The rosecd user unit is unsuitable: it runs as the user and cannot open
 ## Install
 
 ```sh
-install -Dm755 rosec-uhid-broker            /usr/bin/rosec-uhid-broker
-install -Dm644 rosec-uhid-broker.socket     /usr/lib/systemd/system/rosec-uhid-broker.socket
-install -Dm644 rosec-uhid-broker.service    /usr/lib/systemd/system/rosec-uhid-broker.service
-systemctl enable --now rosec-uhid-broker.socket
+install -Dm755 rosec-uhid            /usr/bin/rosec-uhid
+install -Dm644 rosec-uhid.socket     /usr/lib/systemd/system/rosec-uhid.socket
+install -Dm644 rosec-uhid.service    /usr/lib/systemd/system/rosec-uhid.service
+systemctl enable --now rosec-uhid.socket
 ```
 
 ## hidraw ownership
