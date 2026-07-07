@@ -16,9 +16,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rosec_uhid::broker::{self, Grant};
+use rosec_uhid::client::UHID_DEVICE as UHID_PATH;
 use tracing::{error, info, warn};
 
-const UHID_PATH: &str = "/dev/uhid";
 const SYSTEMD_LISTEN_FD: i32 = 3;
 
 fn main() -> Result<()> {
