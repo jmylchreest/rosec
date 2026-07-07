@@ -65,10 +65,14 @@ fn take_listener() -> Result<UnixListener> {
     UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
 }
 
-/// Serve one request: identify the caller, enforce one-device-per-uid,
+/// Serve one request: identify the caller, enforce one-live-device-per-uid,
 /// create the device, chown its hidraw node to the caller, pass the fd.
 fn handle(stream: &UnixStream, granted: &mut Vec<Grant>) -> Result<()> {
     let uid = broker::peer_uid(stream)?;
+
+    // Re-admit a uid whose device died (daemon restart); else it stays locked
+    // out until the broker itself restarts.
+    broker::evict_dead_grants(granted);
 
     let grant = match broker::admit(granted, uid) {
         Ok(g) => g,
@@ -78,22 +82,19 @@ fn handle(stream: &UnixStream, granted: &mut Vec<Grant>) -> Result<()> {
         }
     };
 
-    let device = broker::create_device(Path::new(UHID_PATH))
+    let device = broker::create_device(Path::new(UHID_PATH), &grant.uniq)
         .with_context(|| format!("creating uhid device for uid {uid}"))?;
 
-    // Give the kernel a moment to enumerate the hidraw node, then chown it to
-    // the caller so only they can open it (not the seat-active user).
-    match broker::chown_hidraw_for(uid) {
-        Ok(node) => info!(uid, node = %node.display(), "granted virtual authenticator"),
+    // Fail closed: if the node can't be secured, drop the device (fd closes on
+    // return, destroying it) rather than hand out an unprotected or wrong one.
+    let node = match broker::chown_hidraw_for(uid, &grant.uniq) {
+        Ok(node) => node,
         Err(e) => {
-            // The device still works via the fd; the node ownership is the
-            // multi-user hardening. Surface loudly but don't fail the grant.
-            warn!(
-                uid,
-                "could not chown hidraw node: {e:#} (multi-user isolation degraded)"
-            );
+            warn!(uid, "refusing grant, could not secure hidraw node: {e:#}");
+            return Ok(());
         }
-    }
+    };
+    info!(uid, node = %node.display(), "granted virtual authenticator");
 
     broker::send_fd(stream, device.as_raw_fd()).context("passing device fd")?;
     granted.push(grant);

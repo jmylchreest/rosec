@@ -16,55 +16,78 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 use crate::uhid;
 
-/// A request the broker will honour for exactly one caller uid: one device
-/// per user (enforced by [`Broker`]), so a caller cannot exhaust devices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Bound on waiting for the kernel to enumerate a just-created hidraw node.
+const ENUMERATE_DEADLINE: Duration = Duration::from_secs(2);
+const ENUMERATE_POLL: Duration = Duration::from_millis(20);
+
+/// A device the broker has granted to one caller uid. One device per user, so
+/// a caller cannot exhaust devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
-    /// uid the created hidraw node is chowned to (`0600`), from `SO_PEERCRED`.
+    /// uid the hidraw node is chowned to (`0600`), from `SO_PEERCRED`.
     pub uid: u32,
+    /// `HID_UNIQ` for this device: correlates it to its hidraw node, and marks
+    /// it gone when the node vanishes (peer closed the fd).
+    pub uniq: String,
 }
 
-/// Whether a new grant is permitted, given the callers already served. The
-/// policy is one live device per uid — a repeat request from a uid that
-/// already holds one is refused rather than stacking a second authenticator.
+/// `HID_UNIQ` for a caller's device. Per-uid; only the root broker creates
+/// uhid devices, so a caller can neither forge nor collide it.
+pub fn uniq_for(uid: u32) -> String {
+    format!("rosec-uhid-{uid}")
+}
+
+/// Drop grants whose hidraw node no longer exists, so a uid whose device died
+/// is re-admitted rather than refused until the broker restarts. Before
+/// [`admit`].
+pub fn evict_dead_grants(grants: &mut Vec<Grant>) {
+    grants.retain(|g| find_hidraw_by_uniq(&g.uniq).is_some());
+}
+
+/// One live device per uid: a uid that already holds one is refused. Run
+/// [`evict_dead_grants`] first so a uid whose device died is allowed.
 pub fn admit(existing: &[Grant], caller_uid: u32) -> Result<Grant, &'static str> {
     if existing.iter().any(|g| g.uid == caller_uid) {
-        return Err("uid already holds a virtual authenticator");
+        return Err("uid already holds a live virtual authenticator");
     }
-    Ok(Grant { uid: caller_uid })
+    Ok(Grant {
+        uid: caller_uid,
+        uniq: uniq_for(caller_uid),
+    })
 }
 
-/// Create the FIDO uhid device: open `/dev/uhid` and write the hard-coded
-/// `UHID_CREATE2`. Returns the device fd (an owned `File`); dropping it or
-/// exiting destroys the device.
+/// Create the FIDO uhid device with `uniq` as its `HID_UNIQ`: open `/dev/uhid`
+/// and write the hard-coded `UHID_CREATE2`. Returns the device fd (an owned
+/// `File`); dropping it or exiting destroys the device.
 ///
 /// Requires `CAP_SYS_ADMIN` / root — `/dev/uhid` is `0600 root:root` by
 /// design (arbitrary HID creation is an input-injection primitive).
-pub fn create_device(uhid_path: &Path) -> Result<std::fs::File> {
+pub fn create_device(uhid_path: &Path, uniq: &str) -> Result<std::fs::File> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(uhid_path)
         .with_context(|| format!("opening {}", uhid_path.display()))?;
-    file.write_all(&uhid::create2_event())
+    file.write_all(&uhid::create2_event(uniq))
         .context("writing UHID_CREATE2")?;
     Ok(file)
 }
 
-/// Chown the hidraw node backing our uhid device to `uid` at `0600`, so it
-/// is reachable only by the user who owns the credentials behind it — not
-/// left to the seat-scoped `uaccess` tag, which is wrong for a seatless
-/// virtual device on a multi-user host.
+/// Chown the device's hidraw node to `uid` at `0600` — a seatless virtual
+/// device must not rely on the seat-scoped `uaccess` tag.
 ///
-/// Best-effort node discovery walks sysfs for the hidraw whose parent uhid
-/// device advertises our vendor/product. Returns the chowned path.
-pub fn chown_hidraw_for(uid: u32) -> Result<PathBuf> {
-    let node = find_rosec_hidraw().context("locating the rosec hidraw node")?;
+/// The node is located by `HID_UNIQ`, so it is the *exact* device this call
+/// created, never a vendor:product scan that could hit another user's device
+/// on a multi-user host. Polls, since the node enumerates asynchronously after
+/// `UHID_CREATE2`.
+pub fn chown_hidraw_for(uid: u32, uniq: &str) -> Result<PathBuf> {
+    let node = wait_for_hidraw(uniq)?;
     nix::unistd::chown(
         &node,
         Some(nix::unistd::Uid::from_raw(uid)),
@@ -77,27 +100,36 @@ pub fn chown_hidraw_for(uid: u32) -> Result<PathBuf> {
     Ok(node)
 }
 
-/// Find the `/dev/hidrawN` whose backing HID device is a rosec virtual
-/// authenticator (matched by vendor:product in the sysfs `uevent`).
-fn find_rosec_hidraw() -> Result<PathBuf> {
-    let want = format!(
-        "HID_ID=0003:{:08X}:{:08X}",
-        uhid::ROSEC_VENDOR,
-        uhid::ROSEC_PRODUCT
-    );
-    for entry in std::fs::read_dir("/sys/class/hidraw")
-        .context("reading /sys/class/hidraw")?
-        .flatten()
-    {
+/// Poll `/sys/class/hidraw` for the node whose `HID_UNIQ` matches `uniq`, up to
+/// [`ENUMERATE_DEADLINE`] (the node appears asynchronously after
+/// `UHID_CREATE2`).
+fn wait_for_hidraw(uniq: &str) -> Result<PathBuf> {
+    let start = Instant::now();
+    loop {
+        if let Some(node) = find_hidraw_by_uniq(uniq) {
+            return Ok(node);
+        }
+        if start.elapsed() >= ENUMERATE_DEADLINE {
+            anyhow::bail!("hidraw node for {uniq} did not enumerate within {ENUMERATE_DEADLINE:?}");
+        }
+        std::thread::sleep(ENUMERATE_POLL);
+    }
+}
+
+/// Find the `/dev/hidrawN` whose backing HID device carries `HID_UNIQ=<uniq>`
+/// in its sysfs `uevent`. `None` if absent (not yet enumerated, or already
+/// destroyed).
+fn find_hidraw_by_uniq(uniq: &str) -> Option<PathBuf> {
+    let want = format!("HID_UNIQ={uniq}");
+    for entry in std::fs::read_dir("/sys/class/hidraw").ok()?.flatten() {
         let uevent = entry.path().join("device/uevent");
         if let Ok(contents) = std::fs::read_to_string(&uevent)
-            && contents.lines().any(|l| l.eq_ignore_ascii_case(&want))
+            && contents.lines().any(|l| l == want)
         {
-            let name = entry.file_name();
-            return Ok(PathBuf::from("/dev").join(name));
+            return Some(PathBuf::from("/dev").join(entry.file_name()));
         }
     }
-    anyhow::bail!("no hidraw node found for rosec vendor/product (device not yet enumerated?)")
+    None
 }
 
 /// Send `fd` to the peer of `stream` via `SCM_RIGHTS` with a one-byte
@@ -136,5 +168,26 @@ mod tests {
         assert!(admit(&granted, 1000).is_err());
         // A different uid is admitted.
         assert!(admit(&granted, 1001).is_ok());
+    }
+
+    #[test]
+    fn uniq_is_per_uid_and_carried_by_the_grant() {
+        assert_eq!(uniq_for(1000), "rosec-uhid-1000");
+        assert_ne!(uniq_for(1000), uniq_for(1001));
+        assert_eq!(admit(&[], 1000).unwrap().uniq, "rosec-uhid-1000");
+    }
+
+    #[test]
+    fn evict_drops_grants_whose_device_is_gone() {
+        // A grant whose uniq matches no live hidraw node (no such device on
+        // this machine) is treated as dead and released, so its uid can be
+        // re-admitted.
+        let mut granted = vec![Grant {
+            uid: 4242,
+            uniq: "rosec-uhid-test-nonexistent-4242".into(),
+        }];
+        evict_dead_grants(&mut granted);
+        assert!(granted.is_empty());
+        assert!(admit(&granted, 4242).is_ok());
     }
 }
