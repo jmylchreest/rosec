@@ -373,6 +373,16 @@ fn resolve_prompt_binary() -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Resolve the prompt binary for a config: the sibling `rosec-prompt` for the
+/// builtin backend, or the configured custom command. Shared with the FIDO2
+/// gesture path.
+pub fn resolve_prompt_binary_for(cfg: &PromptConfig) -> Option<String> {
+    match cfg.backend.as_str() {
+        "builtin" | "" => resolve_prompt_binary(),
+        custom => Some(custom.to_string()),
+    }
+}
+
 /// Build a [`ConfirmCallback`] that spawns `rosec-prompt` in confirmation mode.
 ///
 /// `get_config` is called at prompt time (not at construction) so it picks up

@@ -14,6 +14,11 @@ rosec-wasm = { path = "../rosec-wasm" }
 rosec-secret-service = { path = "../rosec-secret-service" }
 rosec-ssh-agent = { path = "../rosec-ssh-agent" }
 rosec-fuse = { path = "../rosec-fuse" }
+rosec-uhid = { path = "../rosec-uhid" }
+data-encoding = { workspace = true }
+rand = { workspace = true }
+async-trait = { workspace = true }
+zeroize = { workspace = true }
 serde_json = { workspace = true }
 ssh-key = { workspace = true }
 tokio = { workspace = true }
