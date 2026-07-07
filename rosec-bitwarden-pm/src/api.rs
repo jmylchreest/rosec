@@ -650,8 +650,10 @@ pub struct SyncLogin {
 pub struct SyncFido2Credential {
     #[serde(alias = "CredentialId", default)]
     pub credential_id: Option<String>,
-    #[serde(alias = "KeyType", default)]
-    pub key_type: Option<String>,
+    // KeyType (constant "public-key") is intentionally not modelled: it is the
+    // WebAuthn credential type, not a signing parameter. Algorithm dispatch
+    // uses key_algorithm + key_curve. The struct has no deny_unknown_fields,
+    // so the field is simply ignored on deserialize.
     #[serde(alias = "KeyAlgorithm", default)]
     pub key_algorithm: Option<String>,
     #[serde(alias = "KeyCurve", default)]
