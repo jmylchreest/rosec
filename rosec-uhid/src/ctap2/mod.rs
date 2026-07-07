@@ -9,5 +9,6 @@
 pub mod authdata;
 pub mod command;
 pub mod cose;
+pub mod engine;
 pub mod message;
 pub mod sign;
