@@ -4964,16 +4964,20 @@ name = "rosecd"
 version = "0.0.32"
 dependencies = [
  "anyhow",
+ "async-trait",
  "busd",
  "console-subscriber",
+ "data-encoding",
  "futures-util",
  "husky-rs",
  "libc",
  "notify",
+ "rand 0.10.1",
  "rosec-core",
  "rosec-fuse",
  "rosec-secret-service",
  "rosec-ssh-agent",
+ "rosec-uhid",
  "rosec-vault",
  "rosec-wasm",
  "serde_json",
@@ -4984,6 +4988,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]

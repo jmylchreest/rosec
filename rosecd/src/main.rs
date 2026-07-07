@@ -1,6 +1,7 @@
 #[cfg(feature = "private-socket")]
 mod bus;
 mod fido2;
+mod fido2_ceremony;
 mod ssh;
 mod totp;
 
@@ -236,6 +237,22 @@ async fn run() -> Result<()> {
         if let Some(ref fr) = fido2_registry {
             fr.rebuild(&state.fido2_providers()).await;
         }
+    }
+
+    // FIDO2 virtual authenticator: connect to the broker, take the device, and
+    // serve CTAP2 ceremonies. Retries the broker handshake so the daemon
+    // survives the broker being (re)started; each loop returns when the device
+    // closes.
+    if let Some(ref fr) = fido2_registry {
+        let loop_state = Arc::clone(&state);
+        let loop_registry = Arc::clone(fr);
+        tokio::spawn(async move {
+            loop {
+                fido2_ceremony::run_event_loop(Arc::clone(&loop_state), Arc::clone(&loop_registry))
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
     }
 
     // When running on a private bus, spawn a watcher that polls for the

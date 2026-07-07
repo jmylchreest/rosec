@@ -85,6 +85,29 @@ pub fn split_message(msg: &Message) -> Vec<[u8; REPORT_SIZE]> {
     reports
 }
 
+/// CTAPHID capability flags (INIT response).
+pub const CAPABILITY_CBOR: u8 = 0x04; // speaks CTAP2 CBOR
+pub const CAPABILITY_NMSG: u8 = 0x08; // does NOT speak CTAP1/U2F
+
+/// Build the `CTAPHID_INIT` response for a request that arrived on `req_cid`
+/// carrying `nonce`, allocating `new_cid` as the channel. Advertises CBOR
+/// (CTAP2) and NMSG (no U2F). Payload: nonce(8) ‖ newCID(4) ‖ version ‖
+/// device major/minor/build ‖ capability flags.
+pub fn init_response(req_cid: u32, nonce: &[u8], new_cid: u32) -> Message {
+    let mut data = Vec::with_capacity(17);
+    data.extend_from_slice(&nonce[..nonce.len().min(8)]);
+    data.resize(8, 0); // pad a short nonce
+    data.extend_from_slice(&new_cid.to_be_bytes());
+    data.push(2); // CTAPHID protocol version
+    data.extend_from_slice(&[0, 0, 0]); // device major/minor/build
+    data.push(CAPABILITY_CBOR | CAPABILITY_NMSG);
+    Message {
+        cid: req_cid,
+        cmd: CTAPHID_INIT,
+        data,
+    }
+}
+
 /// Build a single-report `CTAPHID_ERROR` frame.
 pub fn error_report(cid: u32, code: u8) -> [u8; REPORT_SIZE] {
     let msg = Message {
@@ -214,6 +237,20 @@ mod tests {
             last = a.push(r);
         }
         last
+    }
+
+    #[test]
+    fn init_response_allocates_channel_and_advertises_cbor() {
+        let nonce = [1, 2, 3, 4, 5, 6, 7, 8];
+        let resp = init_response(CID_BROADCAST, &nonce, 0xABCD);
+        assert_eq!(resp.cmd, CTAPHID_INIT);
+        assert_eq!(resp.cid, CID_BROADCAST);
+        // nonce(8) ‖ newCID(4) ‖ version ‖ maj/min/build(3) ‖ caps = 17 bytes.
+        assert_eq!(resp.data.len(), 17);
+        assert_eq!(&resp.data[0..8], &nonce);
+        assert_eq!(&resp.data[8..12], &0xABCDu32.to_be_bytes());
+        assert_eq!(resp.data[12], 2); // protocol version
+        assert_eq!(resp.data[16], CAPABILITY_CBOR | CAPABILITY_NMSG);
     }
 
     #[test]
