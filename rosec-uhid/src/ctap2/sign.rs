@@ -52,6 +52,35 @@ impl SigningKey {
         }
     }
 
+    /// Generate a fresh keypair for `algorithm`, returning the signing key and
+    /// its PEM PKCS#8 private-key form for the provider to persist. rosec only
+    /// *generates* ES256 and EdDSA at registration; RS256 is assertion-only.
+    pub fn generate(algorithm: i64) -> Result<(Self, Zeroizing<String>), String> {
+        match algorithm {
+            ALG_ES256 => {
+                use p256::elliptic_curve::Generate;
+                use p256::pkcs8::{EncodePrivateKey, LineEnding};
+                let sk = p256::SecretKey::generate(); // OS entropy
+                let pem = sk
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|e| format!("encode ES256 PEM: {e}"))?;
+                Ok((Self::Es256(Box::new(sk.into())), pem))
+            }
+            ALG_EDDSA => {
+                use ed25519_dalek::pkcs8::EncodePrivateKey;
+                use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+                let sk = ed25519_dalek::SigningKey::generate(&mut rand::rng());
+                let pem = sk
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|e| format!("encode Ed25519 PEM: {e}"))?;
+                Ok((Self::Ed25519(Box::new(sk)), pem))
+            }
+            other => Err(format!(
+                "rosec does not generate keys for COSE algorithm {other}"
+            )),
+        }
+    }
+
     /// This key's COSE algorithm id.
     pub fn algorithm(&self) -> i64 {
         match self {
@@ -182,6 +211,25 @@ iZjQhvXs1XDEnxX1YxWPZa/H
         let vk = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(sk.to_public_key());
         let sig = rsa::pkcs1v15::Signature::try_from(sig.as_slice()).unwrap();
         assert!(vk.verify(msg, &sig).is_ok());
+    }
+
+    #[test]
+    fn generate_produces_usable_es256_and_eddsa() {
+        for alg in [ALG_ES256, ALG_EDDSA] {
+            let (key, pem) = SigningKey::generate(alg).unwrap();
+            assert_eq!(key.algorithm(), alg);
+            // The returned PEM parses back to the same algorithm and signs.
+            let reparsed = SigningKey::from_pem(alg, &pem).unwrap();
+            assert_eq!(reparsed.algorithm(), alg);
+            assert!(!reparsed.sign(b"authdata||hash").is_empty());
+        }
+    }
+
+    #[test]
+    fn generate_refuses_rsa() {
+        // rosec never mints RSA credentials.
+        assert!(SigningKey::generate(ALG_RS256).is_err());
+        assert!(SigningKey::generate(-999).is_err());
     }
 
     #[test]
