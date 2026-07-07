@@ -176,6 +176,8 @@ pub enum ItemType {
     Login,
     /// SSH private key. Default attr: "private_key".
     SshKey,
+    /// FIDO2 / WebAuthn passkey. Default attr: "fido2_private_key".
+    Fido2,
     /// Secure note. Default attr: "secret" (the note body).
     Note,
     /// Payment card. Default attr: "number".
@@ -190,6 +192,7 @@ impl ItemType {
         match attrs.get(ATTR_TYPE).map(|s| s.as_str()) {
             Some("login") => Self::Login,
             Some("ssh-key" | "sshkey" | "ssh_key") => Self::SshKey,
+            Some("passkey" | "fido2") => Self::Fido2,
             Some("note") => Self::Note,
             Some("card") => Self::Card,
             Some("identity") => Self::Identity,
@@ -203,6 +206,7 @@ impl ItemType {
             Self::Generic => "generic",
             Self::Login => "login",
             Self::SshKey => "ssh-key",
+            Self::Fido2 => "passkey",
             Self::Note => "note",
             Self::Card => "card",
             Self::Identity => "identity",
@@ -215,6 +219,7 @@ impl ItemType {
             Self::Generic | Self::Note | Self::Identity => "secret",
             Self::Login => "password",
             Self::SshKey => "private_key",
+            Self::Fido2 => "fido2_private_key",
             Self::Card => "number",
         }
     }
@@ -234,6 +239,7 @@ impl std::str::FromStr for ItemType {
             "generic" => Ok(Self::Generic),
             "login" => Ok(Self::Login),
             "ssh-key" | "sshkey" | "ssh_key" => Ok(Self::SshKey),
+            "passkey" | "fido2" => Ok(Self::Fido2),
             "note" => Ok(Self::Note),
             "card" => Ok(Self::Card),
             "identity" => Ok(Self::Identity),
