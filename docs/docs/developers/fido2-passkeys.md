@@ -44,21 +44,13 @@ The pieces:
   `list_fido2_credentials()` (metadata for discovery/selection: rpId, user
   handle, algorithm, …) and `get_fido2_key(item_id, credential_id)` (PEM
   PKCS#8 private key, fetched only at ceremony time, zeroized after use).
-- **Fido2 registry** (future) — rosecd-side index of credentials across
-  unlocked providers. Both frontends consume it; neither touches providers
-  directly. **It must not cache a frozen snapshot** — it follows the exact
-  rebuild-on-event discipline the SSH keystore and TOTP manager already use
-  (the `098bc0a` "read live, not frozen snapshot" lesson):
-  - a `Fido2Registry` manager with `rebuild(&providers)` that iterates
-    `ServiceState::fido2_providers()` (a *live* read of the registry) and
-    calls `list_fido2_credentials()` on each unlocked provider, rebuilding
-    its index from scratch;
-  - wired into `wire_provider_callbacks` alongside ssh/totp:
-    `on_unlocked` → rebuild; `on_sync_succeeded(changed)` → rebuild **only
-    when `changed`**; `on_locked` → drop that provider's entries;
-  - every rebuild reads `providers_ordered()`/`fido2_providers()` fresh —
-    it never holds credentials captured at registration time, so an unlock
-    or sync is always reflected.
+- **Passkey registry** (future) — a rosecd-side index of the passkeys held
+  by unlocked providers, consumed by both frontends so neither talks to
+  providers directly. It is rebuilt whenever a provider unlocks or reports a
+  changed sync, and cleared on lock — the same discipline the SSH and TOTP
+  managers use. It never serves a stale snapshot: each rebuild re-reads the
+  current set of passkey-capable providers and re-queries their credentials,
+  so an unlock or sync is always reflected.
 - **Ceremony engine** (future) — one implementation of
   `authenticatorGetAssertion` / `authenticatorMakeCredential`:
   authenticatorData assembly, client-data hashing, ES256/EdDSA/RS256
@@ -106,21 +98,19 @@ something rosec pushes: the browser shows its own authenticator picker, and
 rosec is invoked only if the user selects it there. Having zero existing
 passkeys is the normal starting state and blocks nothing.
 
-A created credential needs a provider with **both `Write` and `Fido2`** — a
-writable passkey store. The write target is resolved by
-`ServiceState::fido2_write_provider()` =
-`select_provider(&[Write, Fido2], service.write_provider)`: the configured
-`write_provider` wins when it satisfies *both* capabilities, else the first
-provider in config order that does. Today that is the **local vault** only;
-bitwarden-pm and keepassxc-file expose `Fido2` for reading but lack `Write`,
-so they are never selected as registration targets. If the selector returns
-`None` (no writable passkey store), `makeCredential` fails cleanly rather
-than hanging the browser. Honour `excludeCredentials`: if rosec already
-holds a credential the RP lists there, return
-`CTAP2_ERR_CREDENTIAL_EXCLUDED`.
+A created credential needs a provider that can both **write** and **store
+passkeys**. The configured write provider is used when it qualifies,
+otherwise the first provider in config order that does. Today that is the
+**local vault** only; the Bitwarden and KeePassXC providers expose passkeys
+for reading but rosec does not write passkeys back to them, so they are
+never chosen as registration targets. When no writable passkey store is
+available, `makeCredential` fails cleanly rather than hanging the browser.
+rosec also honours `excludeCredentials`: if it already holds a credential
+the relying party lists there, registration is refused
+(`CTAP2_ERR_CREDENTIAL_EXCLUDED`).
 
-Symmetrically, the read side (`getAssertion`, registry building) draws only
-from `ServiceState::fido2_providers()` = `providers_with(&[Fido2])`, so a
+Symmetrically, the read side (`getAssertion` and registry building) draws
+only from passkey-capable providers, so a
 ceremony never queries a provider that can't hold passkeys. Both selectors
 build on the generic capability-set routing in `rosec_core`
 (`supports_all` / `require_all`).
