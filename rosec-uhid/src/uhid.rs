@@ -65,9 +65,12 @@ fn copy_fixed(dst: &mut [u8], src: &[u8]) {
     dst[..n].copy_from_slice(&src[..n]);
 }
 
-/// Encode a `UHID_CREATE2` event with the hard-coded FIDO descriptor. The
-/// resulting bytes are written to `/dev/uhid` to materialise the device.
-pub fn create2_event() -> Vec<u8> {
+/// Encode a `UHID_CREATE2` event with the hard-coded FIDO descriptor. `uniq`
+/// is written into the device's `uniq` field, surfacing as `HID_UNIQ` in
+/// sysfs so the broker can correlate the created device to its hidraw node
+/// (see [`crate::broker`]). The resulting bytes are written to `/dev/uhid` to
+/// materialise the device.
+pub fn create2_event(uniq: &str) -> Vec<u8> {
     // Layout of `struct uhid_create2_req` (packed), prefixed by the u32 type.
     let mut buf = Vec::with_capacity(4 + NAME_MAX + PHYS_MAX + UNIQ_MAX + 20 + RD_DATA_MAX);
     buf.extend_from_slice(&UHID_CREATE2.to_ne_bytes());
@@ -76,7 +79,9 @@ pub fn create2_event() -> Vec<u8> {
     copy_fixed(&mut name, ROSEC_DEVICE_NAME.as_bytes());
     buf.extend_from_slice(&name);
     buf.extend_from_slice(&[0u8; PHYS_MAX]);
-    buf.extend_from_slice(&[0u8; UNIQ_MAX]);
+    let mut uniq_buf = [0u8; UNIQ_MAX];
+    copy_fixed(&mut uniq_buf, uniq.as_bytes());
+    buf.extend_from_slice(&uniq_buf);
 
     buf.extend_from_slice(&(FIDO_REPORT_DESCRIPTOR.len() as u16).to_ne_bytes()); // rd_size
     buf.extend_from_slice(&BUS_USB.to_ne_bytes()); // bus
@@ -177,11 +182,14 @@ mod tests {
 
     #[test]
     fn create2_event_layout() {
-        let ev = create2_event();
+        let ev = create2_event("rosec-uhid-1000");
         // type tag
         assert_eq!(&ev[0..4], &UHID_CREATE2.to_ne_bytes());
         // name is at offset 4
         assert!(ev[4..].starts_with(ROSEC_DEVICE_NAME.as_bytes()));
+        // uniq is written into the uniq field (offset 4 + name + phys).
+        let uniq_at = 4 + NAME_MAX + PHYS_MAX;
+        assert!(ev[uniq_at..].starts_with(b"rosec-uhid-1000"));
         // rd_size field sits right after name+phys+uniq
         let rd_size_at = 4 + NAME_MAX + PHYS_MAX + UNIQ_MAX;
         let rd_size = u16::from_ne_bytes([ev[rd_size_at], ev[rd_size_at + 1]]);
