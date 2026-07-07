@@ -9,8 +9,11 @@ use async_trait::async_trait;
 use zeroize::Zeroizing;
 
 use super::authdata;
-use super::command::Ctap2Status;
-use super::message::{CredentialDescriptor, GetAssertionRequest, GetAssertionResponse};
+use super::command::{Ctap2Status, ROSEC_AAGUID};
+use super::message::{
+    CredentialDescriptor, GetAssertionRequest, GetAssertionResponse, MakeCredentialRequest,
+    MakeCredentialResponse,
+};
 use super::sign::SigningKey;
 
 /// Where the store fetches a credential's private key from.
@@ -52,6 +55,25 @@ pub trait PasskeyStore: Send + Sync {
     /// The credential's private key as PEM PKCS#8, fetched at ceremony time
     /// and zeroized after signing.
     async fn private_key(&self, cred: &StoredCredential) -> Result<Zeroizing<String>, Ctap2Status>;
+
+    /// Create a new credential for `req` using `algorithm`: the store
+    /// generates the keypair (provider key custody), persists the private key
+    /// and metadata, and returns the new credential id plus its COSE public
+    /// key for attestedCredentialData. `NotAllowed` if there is no writable
+    /// passkey store.
+    async fn create(
+        &self,
+        req: &MakeCredentialRequest,
+        algorithm: i64,
+    ) -> Result<CreatedCredential, Ctap2Status>;
+}
+
+/// What the store returns after minting a new credential.
+#[derive(Debug, Clone)]
+pub struct CreatedCredential {
+    pub credential_id: Vec<u8>,
+    /// COSE_Key CBOR of the new public key (see [`super::cose`]).
+    pub cose_public_key: Vec<u8>,
 }
 
 /// User presence/verification, via rosec-prompt.
@@ -120,6 +142,57 @@ pub async fn get_assertion(
     })
 }
 
+/// Run an `authenticatorMakeCredential` (registration) ceremony.
+///
+/// Refuses if the relying party's `excludeList` names a credential rosec
+/// already holds (`CredentialExcluded`), or if it accepts no algorithm rosec
+/// can generate (`UnsupportedAlgorithm`). Registration always prompts. The
+/// store mints and persists the key; the engine assembles authData with
+/// attestedCredentialData under `"none"` attestation.
+pub async fn make_credential(
+    req: &MakeCredentialRequest,
+    store: &dyn PasskeyStore,
+    gesture: &dyn UserGesture,
+) -> Result<MakeCredentialResponse, Ctap2Status> {
+    // excludeList: refuse if we already hold one of the listed credentials.
+    let exclude_ids: Vec<Vec<u8>> = req.exclude_list.iter().map(|d| d.id.clone()).collect();
+    if !exclude_ids.is_empty() && !store.find(&req.rp_id, &exclude_ids).await.is_empty() {
+        return Err(Ctap2Status::CredentialExcluded);
+    }
+
+    // Pick the RP's most-preferred algorithm we can generate.
+    let algorithm = req
+        .preferred_algorithm()
+        .ok_or(Ctap2Status::UnsupportedAlgorithm)?;
+
+    let label = format!(
+        "{} — {}",
+        req.user_name.as_deref().unwrap_or("new passkey"),
+        req.rp_id
+    );
+    if !gesture.confirm(&req.rp_id, &label).await {
+        return Err(Ctap2Status::OperationDenied);
+    }
+
+    let created = store.create(req, algorithm).await?;
+
+    let acd = authdata::AttestedCredentialData {
+        aaguid: ROSEC_AAGUID,
+        credential_id: created.credential_id,
+        cose_public_key: created.cose_public_key,
+    };
+    let rp_hash = authdata::rp_id_hash(&req.rp_id);
+    let auth_data = authdata::assemble(
+        &rp_hash,
+        authdata::flag::UP | authdata::flag::UV,
+        0, // new synced passkey starts at counter 0
+        Some(&acd),
+        None,
+    );
+
+    Ok(MakeCredentialResponse { auth_data })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +238,22 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
             _cred: &StoredCredential,
         ) -> Result<Zeroizing<String>, Ctap2Status> {
             Ok(Zeroizing::new(ES256_PEM.into()))
+        }
+        async fn create(
+            &self,
+            _req: &MakeCredentialRequest,
+            algorithm: i64,
+        ) -> Result<CreatedCredential, Ctap2Status> {
+            // Derive the COSE public key from the static test key, as a real
+            // store would from the key it generated.
+            let key = SigningKey::from_pem(algorithm, &Zeroizing::new(ES256_PEM.into()))
+                .map_err(|_| Ctap2Status::Other)?;
+            let cose_public_key =
+                super::super::cose::public_key_cbor(&key).map_err(|_| Ctap2Status::Other)?;
+            Ok(CreatedCredential {
+                credential_id: b"new-cred-id".to_vec(),
+                cose_public_key,
+            })
         }
     }
 
@@ -312,5 +401,119 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
             .await
             .unwrap();
         assert_eq!(resp.credential.id, b"cred-2");
+    }
+
+    fn mkreq(algs: &[i64], exclude: &[&[u8]]) -> MakeCredentialRequest {
+        use super::super::message::CredParam;
+        MakeCredentialRequest {
+            client_data_hash: vec![0xCD; 32],
+            rp_id: "example.com".into(),
+            rp_name: Some("Example".into()),
+            user_id: b"user-1".to_vec(),
+            user_name: Some("alice".into()),
+            user_display_name: Some("Alice".into()),
+            pub_key_cred_params: algs
+                .iter()
+                .map(|a| CredParam {
+                    alg: *a,
+                    cred_type: "public-key".into(),
+                })
+                .collect(),
+            exclude_list: exclude
+                .iter()
+                .map(|id| CredentialDescriptor {
+                    cred_type: "public-key".into(),
+                    id: id.to_vec(),
+                })
+                .collect(),
+            rk: true,
+            up: true,
+            uv: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn make_credential_confirmed_builds_attested_authdata() {
+        let store = MockStore { creds: vec![] };
+        let gesture = MockGesture {
+            confirm: true,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        let resp = make_credential(
+            &mkreq(&[super::super::sign::ALG_ES256], &[]),
+            &store,
+            &gesture,
+        )
+        .await
+        .unwrap();
+        // AT flag set, attestedCredentialData present.
+        assert_eq!(resp.auth_data[32] & authdata::flag::AT, authdata::flag::AT);
+        // aaguid (offset 37..53) is the rosec AAGUID.
+        assert_eq!(&resp.auth_data[37..53], &ROSEC_AAGUID);
+        // credentialIdLength then id.
+        let id_len = u16::from_be_bytes([resp.auth_data[53], resp.auth_data[54]]) as usize;
+        assert_eq!(&resp.auth_data[55..55 + id_len], b"new-cred-id");
+        // The trailing COSE key parses.
+        use coset::CborSerializable;
+        let cose = resp.auth_data[55 + id_len..].to_vec();
+        assert!(coset::CoseKey::from_slice(&cose).is_ok());
+    }
+
+    #[tokio::test]
+    async fn make_credential_excluded_is_refused() {
+        let store = MockStore {
+            creds: vec![cred(b"known", "alice")],
+        };
+        let gesture = MockGesture {
+            confirm: true,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        let err = make_credential(
+            &mkreq(&[super::super::sign::ALG_ES256], &[b"known"]),
+            &store,
+            &gesture,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, Ctap2Status::CredentialExcluded);
+    }
+
+    #[tokio::test]
+    async fn make_credential_no_acceptable_algorithm() {
+        let store = MockStore { creds: vec![] };
+        let gesture = MockGesture {
+            confirm: true,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        // RS256 only — rosec won't generate it.
+        let err = make_credential(
+            &mkreq(&[super::super::sign::ALG_RS256], &[]),
+            &store,
+            &gesture,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, Ctap2Status::UnsupportedAlgorithm);
+    }
+
+    #[tokio::test]
+    async fn make_credential_declined_is_denied() {
+        let store = MockStore { creds: vec![] };
+        let gesture = MockGesture {
+            confirm: false,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        let err = make_credential(
+            &mkreq(&[super::super::sign::ALG_ES256], &[]),
+            &store,
+            &gesture,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, Ctap2Status::OperationDenied);
     }
 }
