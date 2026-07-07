@@ -7,5 +7,6 @@
 //! crate supports (ES256-only; generates its own keys at registration).
 
 pub mod authdata;
+pub mod command;
 pub mod cose;
 pub mod sign;
