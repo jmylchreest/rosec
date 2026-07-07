@@ -37,10 +37,22 @@ pub struct Grant {
     pub uniq: String,
 }
 
-/// `HID_UNIQ` for a caller's device. Per-uid; only the root broker creates
-/// uhid devices, so a caller can neither forge nor collide it.
+/// `HID_UNIQ` for a new device: per-uid plus a monotonic time suffix so it is
+/// unique *per device*, not just per uid. Without the suffix, a restarting
+/// caller's old (dying) and new devices share a uniq and node lookup can match
+/// the wrong one (a chown/enumerate race). Only the root broker creates uhid
+/// devices, so a caller can neither forge nor collide it.
 pub fn uniq_for(uid: u32) -> String {
-    format!("rosec-uhid-{uid}")
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Time survives broker restarts; the per-process counter guarantees
+    // uniqueness even for calls within the same nanosecond.
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("rosec-uhid-{uid}-{ns}-{seq}")
 }
 
 /// Drop grants whose hidraw node no longer exists, so a uid whose device died
@@ -171,10 +183,17 @@ mod tests {
     }
 
     #[test]
-    fn uniq_is_per_uid_and_carried_by_the_grant() {
-        assert_eq!(uniq_for(1000), "rosec-uhid-1000");
-        assert_ne!(uniq_for(1000), uniq_for(1001));
-        assert_eq!(admit(&[], 1000).unwrap().uniq, "rosec-uhid-1000");
+    fn uniq_is_per_device_and_carried_by_the_grant() {
+        // Per-uid prefix, but unique per device (time-suffixed) so a
+        // restarting caller's old and new devices never share a uniq.
+        assert!(uniq_for(1000).starts_with("rosec-uhid-1000-"));
+        assert_ne!(uniq_for(1000), uniq_for(1000));
+        assert!(
+            admit(&[], 1000)
+                .unwrap()
+                .uniq
+                .starts_with("rosec-uhid-1000-")
+        );
     }
 
     #[test]
