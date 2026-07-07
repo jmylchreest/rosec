@@ -27,12 +27,13 @@ zeroize = { workspace = true }
 ciborium = "0.2"
 coset = "0.3"
 sha2 = { workspace = true }
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+ed25519-dalek = { version = "3", features = ["pkcs8"] }
+# rsa stays 0.9: it is the only signing crate not yet on rand_core 0.9, but
+# RS256 here is assertion-only (deterministic PKCS#1 v1.5 signing needs no
+# RNG), so its transitive rand_core 0.6 never reaches our code.
 rsa = { version = "0.9", features = ["sha2"] }
-# rand_core 0.6 to match the RustCrypto signing crates (their RNG bound);
-# the workspace `rand` 0.10 pulls rand_core 0.9 and is incompatible here.
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

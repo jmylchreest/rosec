@@ -87,22 +87,57 @@ impl SigningKey {
 mod tests {
     use super::*;
 
+    // Static throwaway PKCS#8 test keys (openssl-generated), one per
+    // algorithm. Fixed vectors test the real production path (from_pem +
+    // sign + verify) without depending on the signing crates' in-test
+    // key-generation APIs.
+    const ES256_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgzTa8ki9W2Fr5RXSQ
+Uibx++X3ObXxU7hHFQcc2EpjBfShRANCAATnIl1Wh70gWgvnhUdJaxdv59jY2ZSv
+Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
+-----END PRIVATE KEY-----";
+
+    const ED25519_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIHlVONoyA7tBX8V9tfyDccKrTIRpd51/IfB3SJCSrRPK
+-----END PRIVATE KEY-----";
+
+    const RS256_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDTSFFPHtuz6YHr
+EvYhBnJPVOVE5fL0IdjRKFLQfuQGtwDE76ZRPon5R1vN6D6u+b1jvYV00uxNhIL2
+Y/gjqZbU5J1EyDNKW0gcpt2EPgm6pTHM+fc3u7aZssdQAw0FWqePmSTqXWdyKNKQ
+pgd9s+z92LMDGsFxDvXBao64E57kNzc7Hj8qNENZ+H/YFPvlzSeUqJdErroFVMzR
+CZCv4vQe1QysdL4pvRG4wiwLX25im8gKvgGDRzZz9BW/BPTRVucwARjiCKS3IzMN
+cOmF0KO0XTJjBbMCut8ZRb0vDOVZGChg9Cpzn5zh5B4fFzSG79Wg4a7LMUA52iSG
+WVPp8YG5AgMBAAECggEADBDNyLJSPG4x8IyIdVuN4zPnVLQhCyOnr+h/ZwK031R+
+41nTakGJ1ZK0QaHPepfIFgF4gcxnZdUS0yLjkWQzUq/fjB8Dg6DxqrLPMai6G4H1
+jxqAE+gdxgQGPjtLK6qBD47gvQJdtvcLCoTaWdzD972MgFMV1IpuXf/jOJkX2NNB
+aJ43BYm4a+5tW2vfEuGmGpBMZYvSEWNb83RbgwASPWOfjovilb3CtZB1gcWD9e4M
+9tx/ZbWP/DXqvxn1cL0DUbSK9wBQYv4hPUqyg5piCSmusdX3+mAusX00l0ijmHT7
+pY8pH62zSn0dHUtaJIlT8qAY704tE6CxGlTzxoiWRQKBgQD0L2LPmPueA8B0QiqK
+jAsr9VT6CO7inIBnl/ejM1lGS5JCmDS4qq2vEPM6XEAHjbv2x8WvHP7dKYhB9lXf
+HJmBnwMcbJ9TJbTCiJbRaxdJ9fpSV8WKZkoEJ2+nEmV8Qew3EECQ+Ru6eG701rNF
+E9YVekUdvrtgCJK8II7yTb61ZwKBgQDdgWGiqqEuFPJdg4cI9ZF8tYeWpm1qn3eQ
+mjFlDjGFLUXtBU7sjic6CzK5OSfY2p6HSM6pSGhTsoIBixoAI6EBkZp/fh7Q/jkc
+hS9A+W7iyIPow4+1dDIuUkadg4OojAfOSKuzRulMfW49IeOuArK7YSyKheEk+hg6
+piOY2G973wKBgDhIm9wCBS1c7AVgIvIgaYrOV7HyUS3GqQo3ywrBETjUvne/IZfX
+L4WEwKuZC+Ex2Dt/vJ8qbcyIgDHEF/L/YpqwDkWE/AxsSof0d975cjrICdTlClFm
+VnUyqde2s9G6WDow8tD3ul522AxzWIr5kYUN09SRXBs8nqXiU1CifuzNAoGBAKHw
+WhoblvTiuYJmi02ggvnimTspd2rxJO+h2yTfaJLN04aCT/4fu0vzLeU+hQREaIvN
+TdFzL1qpceSA9sRNSAOmmIZHBW6Tvds8/5wH/+pq4A1HFAR768fzvM6hfJq3rWlB
+tc2+tQeH2BV3dkYckODvHSo00LJA6X/PQM0YxwCPAoGBAORwoV3E5gXS6aXMBQgW
+0bF2M4rl0zcc3E1yJ36EKHS/4fSJkWBm2Hy9j8ODFhoxWVzsOSEu1d9lrxDCDQ2i
+VQ4FO+CFpXPP1PZ+hJBJAEh6x0N3B/LDcclEuY9cYRrMNFql90Hnh6YnWUQGXyDc
+iZjQhvXs1XDEnxX1YxWPZa/H
+-----END PRIVATE KEY-----";
+
     fn es256_pem() -> Zeroizing<String> {
-        use p256::pkcs8::EncodePrivateKey;
-        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
-        Zeroizing::new(sk.to_pkcs8_pem(Default::default()).unwrap().to_string())
+        Zeroizing::new(ES256_PEM.to_string())
     }
-
     fn ed25519_pem() -> Zeroizing<String> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        Zeroizing::new(sk.to_pkcs8_pem(Default::default()).unwrap().to_string())
+        Zeroizing::new(ED25519_PEM.to_string())
     }
-
     fn rs256_pem() -> Zeroizing<String> {
-        use rsa::pkcs8::EncodePrivateKey;
-        let sk = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
-        Zeroizing::new(sk.to_pkcs8_pem(Default::default()).unwrap().to_string())
+        Zeroizing::new(RS256_PEM.to_string())
     }
 
     #[test]
