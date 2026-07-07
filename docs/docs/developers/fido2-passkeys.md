@@ -207,6 +207,35 @@ only concurrent *local* sessions are in scope. This frontend is a desktop
 feature and should be opt-in per user, not enabled system-wide on shared
 servers.
 
+### Broker trust model — uid, not binary identity
+
+The caller's identity comes from `SO_PEERCRED` on the broker's Unix socket:
+the kernel stamps the connecting process's real uid, which cannot be
+spoofed and is never taken from the request body (the request carries no
+uid and no descriptor). Activation is systemd socket activation — the
+user's rosecd connects to `/run/rosec/uhid-broker.sock`, systemd spawns the
+broker, it serves one request and exits.
+
+Be clear about what this does **not** restrict: the broker authenticates by
+**uid, not by binary**. Any process running as user X can connect and
+receive a FIDO device chowned to X. Binary-level restriction is not
+robustly achievable over Unix sockets — `SO_PEERCRED` yields uid/pid/gid but
+not a trustworthy executable identity, and `/proc/PID/exe` is raceable — and
+it is not a hard boundary anyway, because same-uid processes already share a
+trust domain. The device is hard-coded FIDO-only, is chowned to X, and all
+CTAP logic runs in X's own daemon, so a process as X obtaining a FIDO device
+for X is not a privilege escalation (X could not otherwise get one, since
+`/dev/uhid` is root-only, but the capability it gains is confined to X's own
+session).
+
+The residual concern is a rogue same-uid process claiming X's device slot
+and presenting a *rogue* authenticator to X's browsers. Mitigations, in
+order: one-device-per-uid (implemented); **rosecd claims the device at
+startup** so it wins the slot first-come; optionally an `SO_PEERSEC`
+SELinux-label check where MAC is deployed. Socket permissions can restrict
+*which uids may connect at all* but cannot distinguish binaries within a
+uid.
+
 ### Device lifecycle — idempotency and cleanup
 
 The passed fd is the ownership token, which makes the lifecycle
