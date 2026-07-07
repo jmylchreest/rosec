@@ -103,6 +103,15 @@ pub struct ServiceConfig {
     /// disable the mount entirely.
     #[serde(default = "default_true")]
     pub totp_fuse: bool,
+
+    /// Enable the FIDO2 virtual authenticator frontend.
+    ///
+    /// When `true`, rosecd indexes stored passkeys and (with the privileged
+    /// `rosec-uhid` broker running) presents a virtual security key that
+    /// unmodified browsers can use for WebAuthn. Off by default: it requires
+    /// the system broker and is opt-in.
+    #[serde(default)]
+    pub fido2: bool,
 }
 
 impl Default for ServiceConfig {
@@ -118,6 +127,7 @@ impl Default for ServiceConfig {
             wasm_trusted_key: Vec::new(),
             ssh_fuse: true,
             totp_fuse: true,
+            fido2: false,
         }
     }
 }

@@ -1,5 +1,6 @@
 #[cfg(feature = "private-socket")]
 mod bus;
+mod fido2;
 mod ssh;
 mod totp;
 
@@ -193,6 +194,16 @@ async fn run() -> Result<()> {
         None
     };
 
+    // FIDO2 passkey registry — index of stored passkeys, rebuilt on
+    // unlock/sync like the SSH/TOTP managers. Opt-in (needs the privileged
+    // rosec-uhid broker); the CTAP2 ceremony frontend consumes this index.
+    let fido2_registry: Option<Arc<fido2::Fido2Registry>> = if config.service.fido2 {
+        Some(Arc::new(fido2::Fido2Registry::new()))
+    } else {
+        tracing::info!("FIDO2 frontend disabled by config (fido2 = false)");
+        None
+    };
+
     // Start logind watcher unconditionally — it always subscribes to all
     // signals and checks the live config flags on each arrival.  This means
     // enabling on_session_lock or on_logout in the config takes effect
@@ -208,7 +219,7 @@ async fn run() -> Result<()> {
         });
     }
 
-    wire_provider_callbacks(&state, &ssh_manager, &totp_manager);
+    wire_provider_callbacks(&state, &ssh_manager, &totp_manager, &fido2_registry);
     wire_items_changed_callback(&state, &ssh_manager, &totp_manager);
 
     // Mount the FUSE filesystems and load any provider already unlocked at
@@ -221,6 +232,9 @@ async fn run() -> Result<()> {
         }
         if let Some(ref tm) = totp_manager {
             tm.rebuild(&providers).await;
+        }
+        if let Some(ref fr) = fido2_registry {
+            fr.rebuild(&state.fido2_providers()).await;
         }
     }
 
@@ -259,6 +273,7 @@ async fn run() -> Result<()> {
         let initial_config = config.clone();
         let watch_ssh = ssh_manager.clone();
         let watch_totp = totp_manager.clone();
+        let watch_fido2 = fido2_registry.clone();
         let watch_registry = plugin_registry;
         tokio::spawn(async move {
             if let Err(e) = config_watcher(
@@ -267,6 +282,7 @@ async fn run() -> Result<()> {
                 initial_config,
                 watch_ssh,
                 watch_totp,
+                watch_fido2,
                 watch_registry,
             )
             .await
@@ -1196,6 +1212,7 @@ fn wire_provider_callbacks(
     state: &Arc<rosec_secret_service::ServiceState>,
     ssh_manager: &Option<Arc<ssh::SshManager>>,
     totp_manager: &Option<Arc<totp::TotpManager>>,
+    fido2_registry: &Option<Arc<fido2::Fido2Registry>>,
 ) {
     use rosec_core::ProviderCallbacks;
 
@@ -1208,11 +1225,17 @@ fn wire_provider_callbacks(
         let totp_unlocked = totp_manager.clone();
         let totp_synced = totp_manager.clone();
         let totp_locked = totp_manager.clone();
+        let fido2_unlocked = fido2_registry.clone();
+        let fido2_synced = fido2_registry.clone();
+        let fido2_locked = fido2_registry.clone();
         let providers_for_unlock = Arc::clone(state);
         let providers_for_sync = Arc::clone(state);
         let totp_providers_for_unlock = Arc::clone(state);
         let totp_providers_for_lock = Arc::clone(state);
         let totp_providers_for_sync = Arc::clone(state);
+        let fido2_providers_for_unlock = Arc::clone(state);
+        let fido2_providers_for_lock = Arc::clone(state);
+        let fido2_providers_for_sync = Arc::clone(state);
         let locked_id = provider_id.clone();
         let synced_id = provider_id.clone();
         let failed_id = provider_id.clone();
@@ -1228,6 +1251,8 @@ fn wire_provider_callbacks(
                 let s = Arc::clone(&providers_for_unlock);
                 let tm = totp_unlocked.clone();
                 let ts = Arc::clone(&totp_providers_for_unlock);
+                let fr = fido2_unlocked.clone();
+                let fs = Arc::clone(&fido2_providers_for_unlock);
                 tokio::spawn(async move {
                     if let Some(ref sm) = sm {
                         let providers = s.providers_ordered();
@@ -1236,6 +1261,11 @@ fn wire_provider_callbacks(
                     if let Some(ref tm) = tm {
                         let providers = ts.providers_ordered();
                         tm.rebuild(&providers).await;
+                    }
+                    if let Some(ref fr) = fr {
+                        // Live read of the fido2-capable providers — never a
+                        // snapshot captured at an earlier point.
+                        fr.rebuild(&fs.fido2_providers()).await;
                     }
                 });
             })),
@@ -1250,6 +1280,16 @@ fn wire_provider_callbacks(
                         tm.rebuild(&providers).await;
                     });
                 }
+                if let Some(ref fr) = fido2_locked {
+                    // Rebuild from live providers; the now-locked one is
+                    // skipped (locked providers contribute nothing), so its
+                    // credentials drop out of the index.
+                    let fr = fr.clone();
+                    let providers = fido2_providers_for_lock.fido2_providers();
+                    tokio::spawn(async move {
+                        fr.rebuild(&providers).await;
+                    });
+                }
             })),
             on_sync_succeeded: Some(Arc::new(move |changed| {
                 if !changed {
@@ -1259,6 +1299,8 @@ fn wire_provider_callbacks(
                 let s = Arc::clone(&providers_for_sync);
                 let tm = totp_synced.clone();
                 let ts = Arc::clone(&totp_providers_for_sync);
+                let fr = fido2_synced.clone();
+                let fs = Arc::clone(&fido2_providers_for_sync);
                 let id = synced_id.clone();
                 tokio::spawn(async move {
                     if let Some(ref sm) = sm {
@@ -1269,6 +1311,9 @@ fn wire_provider_callbacks(
                     if let Some(ref tm) = tm {
                         let providers = ts.providers_ordered();
                         tm.rebuild(&providers).await;
+                    }
+                    if let Some(ref fr) = fr {
+                        fr.rebuild(&fs.fido2_providers()).await;
                     }
                 });
             })),
@@ -1470,6 +1515,7 @@ async fn config_watcher(
     initial_config: Config,
     ssh_manager: Option<Arc<ssh::SshManager>>,
     totp_manager: Option<Arc<totp::TotpManager>>,
+    fido2_registry: Option<Arc<fido2::Fido2Registry>>,
     mut plugin_registry: rosec_wasm::PluginRegistry,
 ) -> anyhow::Result<()> {
     use tokio::sync::mpsc;
@@ -1562,6 +1608,7 @@ async fn config_watcher(
             &new_config,
             &ssh_manager,
             &totp_manager,
+            &fido2_registry,
             &mut plugin_registry,
         )
         .await;
@@ -1591,6 +1638,7 @@ async fn reconcile_providers(
     new_config: &Config,
     ssh_manager: &Option<Arc<ssh::SshManager>>,
     totp_manager: &Option<Arc<totp::TotpManager>>,
+    fido2_registry: &Option<Arc<fido2::Fido2Registry>>,
     plugin_registry: &mut rosec_wasm::PluginRegistry,
 ) {
     let known_ids: HashSet<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
@@ -1669,7 +1717,7 @@ async fn reconcile_providers(
     }
 
     if added_any {
-        wire_provider_callbacks(state, ssh_manager, totp_manager);
+        wire_provider_callbacks(state, ssh_manager, totp_manager, fido2_registry);
     }
 }
 
