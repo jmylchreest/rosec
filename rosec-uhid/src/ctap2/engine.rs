@@ -16,6 +16,16 @@ use super::message::{
 };
 use super::sign::SigningKey;
 
+/// authenticatorData flags for every rosec ceremony: user present + verified
+/// (the rosec-prompt gesture is our UP+UV), plus backup-eligible (BE) and
+/// backed-up (BS). rosec serves *software / synced* passkeys — the same class
+/// as Bitwarden/KeePassXC/1Password, never hardware-bound ones — so BE and BS
+/// are always set. They must be identical across a credential's makeCredential
+/// and every getAssertion (WebAuthn L3 §6.1.3), which sharing one constant
+/// guarantees. AT/ED are added by `assemble()` when attested data is present.
+const CEREMONY_FLAGS: u8 =
+    authdata::flag::UP | authdata::flag::UV | authdata::flag::BE | authdata::flag::BS;
+
 /// Where the store fetches a credential's private key from.
 #[derive(Debug, Clone)]
 pub struct KeyRef {
@@ -124,9 +134,9 @@ pub async fn get_assertion(
     let key = SigningKey::from_pem(chosen.algorithm, &pem).map_err(|_| Ctap2Status::Other)?;
 
     let rp_hash = authdata::rp_id_hash(&req.rp_id);
-    // The account confirmation/choice is the user presence + verification.
-    let flags = authdata::flag::UP | authdata::flag::UV;
-    let auth_data = authdata::assemble(&rp_hash, flags, chosen.counter, None, None);
+    // The account confirmation/choice is the user presence + verification;
+    // BE/BS mark it as a synced passkey (see CEREMONY_FLAGS).
+    let auth_data = authdata::assemble(&rp_hash, CEREMONY_FLAGS, chosen.counter, None, None);
     let message = authdata::signed_message(&auth_data, &req.client_data_hash);
     let signature = key.sign(&message);
 
@@ -184,7 +194,7 @@ pub async fn make_credential(
     let rp_hash = authdata::rp_id_hash(&req.rp_id);
     let auth_data = authdata::assemble(
         &rp_hash,
-        authdata::flag::UP | authdata::flag::UV,
+        CEREMONY_FLAGS,
         0, // new synced passkey starts at counter 0
         Some(&acd),
         None,
@@ -323,10 +333,12 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
         assert_eq!(resp.number_of_credentials, Some(1));
         assert_eq!(resp.auth_data.len(), 37); // rpIdHash+flags+counter, no ACD
 
-        // UP and UV flags set.
+        // UP, UV, and the synced-passkey backup flags (BE, BS) set.
         let flags = resp.auth_data[32];
         assert_eq!(flags & authdata::flag::UP, authdata::flag::UP);
         assert_eq!(flags & authdata::flag::UV, authdata::flag::UV);
+        assert_eq!(flags & authdata::flag::BE, authdata::flag::BE);
+        assert_eq!(flags & authdata::flag::BS, authdata::flag::BS);
 
         // Signature verifies over authData || clientDataHash with the pubkey.
         use p256::ecdsa::signature::Verifier;

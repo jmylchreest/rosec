@@ -23,8 +23,8 @@ nix = { version = "0.31", features = ["socket", "uio", "user", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
-# CTAP2 ceremony engine: CBOR wire + COSE keys + multi-algorithm signing.
-ciborium = "0.2"
+# CTAP2 ceremony engine: COSE keys (coset, which re-exports the ciborium CBOR
+# codec we use) + multi-algorithm signing.
 coset = "0.3"
 sha2 = { workspace = true }
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
@@ -33,7 +33,6 @@ ed25519-dalek = { version = "3", features = ["pkcs8"] }
 # RS256 here is assertion-only (deterministic PKCS#1 v1.5 signing needs no
 # RNG), so its transitive rand_core 0.6 never reaches our code.
 rsa = { version = "0.9", features = ["sha2"] }
-rand = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

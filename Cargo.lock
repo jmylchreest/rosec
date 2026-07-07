@@ -4874,13 +4874,11 @@ version = "0.0.32"
 dependencies = [
  "anyhow",
  "async-trait",
- "ciborium",
  "coset",
  "ed25519-dalek 3.0.0",
  "libc",
  "nix 0.31.3",
  "p256 0.14.0",
- "rand 0.10.1",
  "rosec-core",
  "rsa",
  "sha2 0.10.9",

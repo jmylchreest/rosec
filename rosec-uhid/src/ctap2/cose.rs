@@ -49,7 +49,7 @@ pub fn public_key_cbor(key: &SigningKey) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctap2::sign::{ALG_EDDSA, ALG_ES256, SigningKey};
+    use crate::ctap2::sign::{ALG_EDDSA, ALG_ES256, ALG_RS256, SigningKey};
     use coset::CoseKey;
     use zeroize::Zeroizing;
 
@@ -61,6 +61,23 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
 
     const ED25519_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIHlVONoyA7tBX8V9tfyDccKrTIRpd51/IfB3SJCSrRPK
+-----END PRIVATE KEY-----";
+
+    const RS256_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIICdQIBADANBgkqhkiG9w0BAQEFAASCAl8wggJbAgEAAoGBALC8RFzG7F/+L62p
+9XCUbnRhDhnDjMMCA2ObMAhH2DHF4jTTfkaF1tkrHVy/VJfUWXnO+VkQ0Bx4rJVY
+D9beZXBscjKtpVG9dw1kokkvdTso0B38JlAiEqWZ6rMYB1nN9S+3vEKuKRnwZ2+r
+eZ2LUK5WYgVC2TCtgsl8cMIyzfbzAgMBAAECgYBw3QnbJb2136GbCbqP1npjH8fd
+dB/kONjpNyWJZDgQMQqwKY+ugbIepYXuwNDI1Pb+7soVssL0K6wrAz26PfQQs6f1
+89rqvmKwviWLnozptE/gF8mcwLKE7HQaLpfhkcLEwmqNHDah5j7eU7ynkUlveIW/
+SlD4fM3awSUCYyNEIQJBANrVRBN5wu+COYF4LVAaBFvG/MEipI+YAj+bX08ZVlJy
+JbQB09YKVfNtHR9NLit0HYywqf/wxt+EyzTofFwE5xUCQQDOwJ6rSraOQnFgnj5l
+I7iROm29zi6BoCkrhbnk9N0I1Qmj60W481kPsMVIW1fGtyaQW9hJyBM0WTWnnchF
+yGfnAkBya45jzIejqeidjJPMzT24KyxfY9i9iBKs5XWJK0taYnraSxZTVSYp2MSg
+aD+a0uTcekb5HxEtMAb8TA8yIhIdAkBPG7yaZff77sha47GUGVrhlq2u1llNF+8o
+y/4Y8OgyHPGXWspOvi3xpv2Vdf3b9vA2hC357SgL+6ZgACtFKC05AkBKGZd13nYm
+Hlxkb0I35rQV/GWufgyLhQB/ZIT5JhUBwrSzPFRNNlXc8cwFDT8qZWlOI+Ogy5dA
+XJ2ZRODD7jGn
 -----END PRIVATE KEY-----";
 
     #[test]
@@ -95,11 +112,11 @@ MC4CAQAwBQYDK2VwBCIEIHlVONoyA7tBX8V9tfyDccKrTIRpd51/IfB3SJCSrRPK
 
     #[test]
     fn rsa_public_key_rejected() {
-        // We never generate RSA credentials, so encoding is intentionally
-        // unsupported; assertion of an existing RS256 passkey needs no COSE
-        // public key from us.
-        let es = SigningKey::from_pem(ALG_ES256, &Zeroizing::new(ES256_PEM.into())).unwrap();
-        // sanity: the ES256 path works, proving the reject is RSA-specific.
-        assert!(public_key_cbor(&es).is_ok());
+        // rosec never generates RSA credentials, so COSE public-key encoding
+        // for an RS256 key is intentionally unsupported (assertion of an
+        // existing RS256 passkey needs no COSE key from us). Exercise the
+        // actual reject branch.
+        let rs = SigningKey::from_pem(ALG_RS256, &Zeroizing::new(RS256_PEM.into())).unwrap();
+        assert!(public_key_cbor(&rs).is_err());
     }
 }

@@ -80,14 +80,6 @@ pub struct Fido2Registry {
     index: RwLock<Fido2Index>,
 }
 
-impl std::fmt::Debug for Fido2Registry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Fido2Registry")
-            .field("credentials", &self.credential_count())
-            .finish()
-    }
-}
-
 impl Fido2Registry {
     pub fn new() -> Self {
         Self::default()
@@ -138,11 +130,6 @@ impl Fido2Registry {
     #[allow(dead_code)]
     pub fn find(&self, rp_id: &str, allow_ids: &[String]) -> Vec<Fido2CredentialMeta> {
         self.index.read().unwrap().find(rp_id, allow_ids)
-    }
-
-    /// Number of credentials currently indexed.
-    pub fn credential_count(&self) -> usize {
-        self.index.read().unwrap().len()
     }
 }
 
