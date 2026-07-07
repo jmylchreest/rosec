@@ -12,7 +12,7 @@ name = "rosec_uhid"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rosec-uhid-broker"
+name = "rosec-uhid"
 path = "src/bin/broker.rs"
 
 [dependencies]

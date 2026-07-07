@@ -22,4 +22,4 @@ pub mod uhid;
 /// Default path of the broker's fd-passing socket. A per-user socket under
 /// the runtime dir would also work; a single system socket with per-caller
 /// `SO_PEERCRED` keeps the privileged surface to one place.
-pub const BROKER_SOCKET_PATH: &str = "/run/rosec/uhid-broker.sock";
+pub const BROKER_SOCKET_PATH: &str = "/run/rosec/uhid.sock";

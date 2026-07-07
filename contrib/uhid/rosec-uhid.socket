@@ -10,7 +10,7 @@ Description=rosec virtual authenticator broker socket
 Documentation=https://github.com/jmylchreest/rosec
 
 [Socket]
-ListenStream=/run/rosec/uhid-broker.sock
+ListenStream=/run/rosec/uhid.sock
 SocketMode=0666
 # Per-caller SO_PEERCRED (not socket perms) decides who is served and which
 # uid the device node is chowned to, so the socket itself may be world-
