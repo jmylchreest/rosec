@@ -412,6 +412,28 @@ impl ServiceState {
         )
     }
 
+    /// Providers that expose FIDO2 credentials (passkeys) for reading — the
+    /// sources a WebAuthn frontend builds its credential registry from. Only
+    /// providers declaring [`Capability::Fido2`] are returned, so a
+    /// `getAssertion` never queries a provider that can't hold passkeys.
+    pub fn fido2_providers(&self) -> Vec<Arc<dyn Provider>> {
+        self.providers_with(&[Capability::Fido2])
+    }
+
+    /// The provider a `makeCredential` (passkey registration) writes into:
+    /// one that is **both** writable and passkey-capable
+    /// (`[Capability::Write, Capability::Fido2]`), honouring the
+    /// `service.write_provider` preference when it qualifies. `None` when no
+    /// provider can store passkeys — the ceremony must then fail cleanly
+    /// rather than write a passkey somewhere that can't serve it back.
+    pub fn fido2_write_provider(&self) -> Option<Arc<dyn Provider>> {
+        let config = self.live_config();
+        self.select_provider(
+            &[Capability::Write, Capability::Fido2],
+            config.service.write_provider.as_deref(),
+        )
+    }
+
     /// Resolve which writable provider should receive a `CreateItem` whose
     /// client attributes match `attrs`.
     ///
@@ -2400,18 +2422,38 @@ mod tests {
     #[derive(Debug)]
     struct MockProvider {
         items: Vec<ItemMeta>,
+        id: String,
+        caps: &'static [Capability],
     }
 
     impl MockProvider {
         fn new(items: Vec<ItemMeta>) -> Self {
-            Self { items }
+            Self {
+                items,
+                id: "mock".to_string(),
+                caps: &[],
+            }
+        }
+
+        /// A mock with a specific id and capability set, for provider
+        /// selection tests.
+        fn configured(id: &str, caps: &'static [Capability]) -> Self {
+            Self {
+                items: Vec::new(),
+                id: id.to_string(),
+                caps,
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl Provider for MockProvider {
         fn id(&self) -> &str {
-            "mock"
+            &self.id
+        }
+
+        fn capabilities(&self) -> &'static [Capability] {
+            self.caps
         }
 
         fn name(&self) -> &str {
@@ -2511,6 +2553,58 @@ mod tests {
             conn,
             tokio::runtime::Handle::current(),
         ))
+    }
+
+    async fn state_with(providers: Vec<Arc<dyn Provider>>) -> Arc<ServiceState> {
+        let router = Arc::new(Router::new(RouterConfig {
+            dedup_strategy: rosec_core::DedupStrategy::Newest,
+            dedup_time_fallback: rosec_core::DedupTimeFallback::Created,
+        }));
+        let sessions = Arc::new(SessionManager::new());
+        let conn = Connection::session()
+            .await
+            .unwrap_or_else(|e| panic!("session bus failed: {e}"));
+        Arc::new(ServiceState::new(
+            providers,
+            router,
+            sessions,
+            conn,
+            tokio::runtime::Handle::current(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn capability_set_selection_routes_by_full_set() {
+        use rosec_core::Capability::{Fido2, Ssh, Write};
+        // Three providers: write-only, write+fido2, fido2-only (read).
+        let write_only: Arc<dyn Provider> = Arc::new(MockProvider::configured("wonly", &[Write]));
+        let write_fido2: Arc<dyn Provider> =
+            Arc::new(MockProvider::configured("wfido", &[Write, Fido2]));
+        let fido2_read: Arc<dyn Provider> = Arc::new(MockProvider::configured("rfido", &[Fido2]));
+        let state = state_with(vec![
+            write_only.clone(),
+            write_fido2.clone(),
+            fido2_read.clone(),
+        ])
+        .await;
+
+        // makeCredential target: must have BOTH Write and Fido2 — the
+        // write-only provider (first in order) is skipped.
+        assert_eq!(state.fido2_write_provider().unwrap().id(), "wfido");
+
+        // Read/registry side: every Fido2 provider, regardless of Write.
+        let read_ids: Vec<_> = state
+            .fido2_providers()
+            .iter()
+            .map(|p| p.id().to_string())
+            .collect();
+        assert_eq!(read_ids, vec!["wfido", "rfido"]);
+
+        // Plain writes still pick the first Write provider (unchanged).
+        assert_eq!(state.write_provider().unwrap().id(), "wonly");
+
+        // A set nobody satisfies resolves to None.
+        assert!(state.select_provider(&[Write, Ssh], None).is_none());
     }
 
     fn meta(id: &str, label: &str, locked: bool) -> ItemMeta {
