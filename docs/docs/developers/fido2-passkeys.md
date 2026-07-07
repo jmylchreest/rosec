@@ -96,14 +96,23 @@ rosec is invoked only if the user selects it there. Having zero existing
 passkeys is the normal starting state and blocks nothing.
 
 A created credential needs a provider with **both `Write` and `Fido2`** — a
-writable passkey store. Today that is the **local vault** only;
-bitwarden-pm and keepassxc-file expose `Fido2` for reading but rosec does
-not write passkeys back to them, so they cannot be registration targets.
-The write target follows the existing `write_provider` config. If no
-writable `Fido2` provider is configured, `makeCredential` fails cleanly
-(rather than hanging the browser). Honour `excludeCredentials`: if rosec
-already holds a credential the RP lists there, return
+writable passkey store. The write target is resolved by
+`ServiceState::fido2_write_provider()` =
+`select_provider(&[Write, Fido2], service.write_provider)`: the configured
+`write_provider` wins when it satisfies *both* capabilities, else the first
+provider in config order that does. Today that is the **local vault** only;
+bitwarden-pm and keepassxc-file expose `Fido2` for reading but lack `Write`,
+so they are never selected as registration targets. If the selector returns
+`None` (no writable passkey store), `makeCredential` fails cleanly rather
+than hanging the browser. Honour `excludeCredentials`: if rosec already
+holds a credential the RP lists there, return
 `CTAP2_ERR_CREDENTIAL_EXCLUDED`.
+
+Symmetrically, the read side (`getAssertion`, registry building) draws only
+from `ServiceState::fido2_providers()` = `providers_with(&[Fido2])`, so a
+ceremony never queries a provider that can't hold passkeys. Both selectors
+build on the generic capability-set routing in `rosec_core`
+(`supports_all` / `require_all`).
 
 ### Normalisation at the rosec boundary
 
