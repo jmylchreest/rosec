@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use rosec_core::Provider;
 use rosec_core::config::PromptConfig;
+use rosec_core::{Capability, Provider};
 use rosec_fuse::MountHandle;
 use rosec_ssh_agent::ConfirmCallback;
 use rosec_ssh_agent::keystore::{KeyStore, build_entry};
@@ -175,6 +175,14 @@ impl SshManager {
         let mut new_entries = Vec::new();
 
         for provider in providers {
+            // Only providers declaring Ssh contribute keys — matches the
+            // TOTP/Sync rebuild loops and makes the declared capability
+            // authoritative. Result-equivalent today: every provider that
+            // exports `list_ssh_keys` also declares Ssh, and vice versa.
+            if !provider.capabilities().contains(&Capability::Ssh) {
+                continue;
+            }
+
             let provider_id = provider.id().to_string();
 
             // Skip locked providers — no keys are available while locked.
