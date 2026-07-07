@@ -52,6 +52,56 @@ async fn list_items_returns_empty_when_no_items() {
 }
 
 #[tokio::test]
+async fn fido2_write_path_roundtrip() {
+    // makeCredential path: build a passkey with the write-path builder, store
+    // it via create_item, then read it back through the list/get surface.
+    let (provider, _temp) = create_test_provider();
+    provider
+        .unlock(UnlockInput::Password(Zeroizing::new(
+            "password".to_string(),
+        )))
+        .await
+        .unwrap();
+
+    let cred = crate::fido2::NewFido2Credential {
+        rp_id: "github.com".to_string(),
+        rp_name: Some("GitHub".to_string()),
+        credential_id: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        user_handle: b"user-handle-bytes".to_vec(),
+        user_name: Some("alice".to_string()),
+        user_display_name: Some("Alice A".to_string()),
+        algorithm: -7,
+        discoverable: true,
+        require_uv: false,
+        private_key_pem: Zeroizing::new(
+            "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----\n".to_string(),
+        ),
+    };
+    let item = crate::fido2::new_item_for_credential(&cred);
+    let id = provider.create_item(item, false).await.unwrap();
+
+    let creds = provider.list_fido2_credentials().await.unwrap();
+    let stored = creds
+        .iter()
+        .find(|c| c.item_id == id)
+        .expect("written passkey listed");
+    assert_eq!(stored.rp_id, "github.com");
+    assert_eq!(stored.rp_name.as_deref(), Some("GitHub"));
+    assert_eq!(stored.user_name.as_deref(), Some("alice"));
+    assert_eq!(stored.algorithm, -7);
+    assert!(stored.discoverable);
+    // credential_id round-trips through base64url on both write and read.
+    assert_eq!(stored.credential_id, "AAECAwQFBgc");
+
+    let key = provider
+        .get_fido2_key(&id, &stored.credential_id)
+        .await
+        .unwrap();
+    assert!(key.pem.contains("BEGIN PRIVATE KEY"));
+    assert!(key.pem.contains("ZmFrZQ"));
+}
+
+#[tokio::test]
 async fn fido2_credentials_roundtrip() {
     let (provider, _temp) = create_test_provider();
     provider

@@ -1,0 +1,27 @@
+[package]
+name = "rosec-uhid"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Virtual FIDO2 (CTAP2) authenticator frontend for rosec: a /dev/uhid HID device browsers use as a security key"
+
+[lib]
+name = "rosec_uhid"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rosec-uhid-broker"
+path = "src/bin/broker.rs"
+
+[dependencies]
+rosec-core = { path = "../rosec-core" }
+anyhow = { workspace = true }
+libc = { workspace = true }
+nix = { version = "0.31", features = ["socket", "uio", "user", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

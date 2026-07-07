@@ -1,0 +1,20 @@
+# Socket-activation for the rosec uhid broker.
+#
+# The broker is a SYSTEM service (not a user unit like rosecd): it needs root
+# to open /dev/uhid, which is 0600 root:root by design. It runs only long
+# enough to create one FIDO device per requesting user and pass back the fd,
+# then exits — socket activation restarts it on the next request.
+
+[Unit]
+Description=rosec virtual authenticator broker socket
+Documentation=https://github.com/jmylchreest/rosec
+
+[Socket]
+ListenStream=/run/rosec/uhid-broker.sock
+SocketMode=0666
+# Per-caller SO_PEERCRED (not socket perms) decides who is served and which
+# uid the device node is chowned to, so the socket itself may be world-
+# connectable; the broker authenticates each connection.
+
+[Install]
+WantedBy=sockets.target

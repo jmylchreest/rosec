@@ -5,10 +5,20 @@ title: FIDO2 passkeys
 
 # FIDO2 passkeys
 
-Status: **phase 1 implemented** — the credential model, provider capability,
-and backend mappings. WebAuthn *serving* (frontends that browsers and apps
-talk to) is designed here but not yet built. Tracked in
-[#13](https://github.com/jmylchreest/rosec/issues/13).
+Status, tracked in [#13](https://github.com/jmylchreest/rosec/issues/13):
+
+- **Phase 1 (done)** — credential model, `Capability::Fido2`, the three
+  storage mappings, the local-vault write path (`makeCredential` storage),
+  and `rosec-prompt`'s selection UI.
+- **Phase 2 (in progress)** — the `rosec-uhid` frontend. Landed so far: the
+  privileged broker (device creation, per-uid hidraw chown, `SCM_RIGHTS`
+  fd-passing), the `/dev/uhid` codec with the hard-coded FIDO descriptor,
+  CTAPHID transport framing, and the system unit. **Remaining**: the CTAP2
+  command/ceremony engine (`getInfo`/`getAssertion`/`makeCredential`
+  signing wired to the registry), which needs root + a real browser to
+  verify end to end.
+- **Phase 3 (future)** — the credentialsd provider bridge, once their
+  upstream provider API exists.
 
 ## Architecture: storage is a provider concern, serving is a frontend
 
