@@ -15,6 +15,7 @@
 //! the fd the broker hands over.
 
 pub mod broker;
+pub mod ctap2;
 pub mod ctaphid;
 pub mod uhid;
 
