@@ -24,7 +24,19 @@ pub async fn run(args: SearchArgs) -> Result<()> {
 
     for filter in &args.filters {
         if let Some((key, value)) = filter.split_once('=') {
-            all_attrs.insert(key.to_string(), value.to_string());
+            if key == "type" {
+                // Map the documented `type=` shorthand to the stamped
+                // `rosec:type` attribute, canonicalising aliases (e.g.
+                // `sshkey` → `ssh-key`) so the filter matches how the type is
+                // actually stored.
+                let canonical = value
+                    .parse::<rosec_core::ItemType>()
+                    .map(|t| t.as_str().to_string())
+                    .unwrap_or_else(|_| value.to_string());
+                all_attrs.insert(rosec_core::ATTR_TYPE.to_string(), canonical);
+            } else {
+                all_attrs.insert(key.to_string(), value.to_string());
+            }
         } else {
             bail!("invalid filter: {filter} (expected key=value)");
         }
