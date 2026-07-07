@@ -282,7 +282,9 @@ pub async fn run_event_loop(state: Arc<ServiceState>, registry: Arc<Fido2Registr
         match rosec_uhid::client::connect_and_receive(Path::new(rosec_uhid::BROKER_SOCKET_PATH)) {
             Ok(d) => d,
             Err(e) => {
-                warn!(error = %e, "fido2: broker handshake failed; frontend disabled");
+                // Expected and retried (the broker may not be up yet); debug so
+                // an idle retry loop doesn't spam warnings every few seconds.
+                tracing::debug!(error = %e, "fido2: broker handshake failed, will retry");
                 return;
             }
         };
@@ -330,17 +332,23 @@ pub async fn run_event_loop(state: Arc<ServiceState>, registry: Arc<Fido2Registr
 
         let report = match uhid::parse_event(&buf[..n]) {
             Some(Event::Output(r)) => r,
-            Some(Event::Close) => {
-                info!("fido2: host closed the device; stopping");
-                return;
-            }
-            _ => continue, // Open / lifecycle / undersized
+            // OPEN/CLOSE are client connect/disconnect notifications — the
+            // device persists across them (a browser opens and closes it
+            // repeatedly). Keep serving; only a read error/EOF ends the loop.
+            _ => continue,
         };
 
-        match assembler.push(&report) {
+        // uhid prefixes the report with its report-id byte (0 — our FIDO
+        // device is unnumbered); strip it to get the raw CTAPHID frame.
+        let frame: &[u8] = if report.len() > 64 {
+            &report[1..]
+        } else {
+            &report
+        };
+        match assembler.push(frame) {
             Feed::Incomplete => {}
             Feed::Error { cid, code } => {
-                write_event(&async_fd, &uhid::input2_event(&error_report(cid, code))).await;
+                send_report(&async_fd, &error_report(cid, code)).await;
             }
             Feed::Complete(msg) => {
                 dispatch(&async_fd, &state, &store, msg, &mut next_cid).await;
@@ -380,11 +388,7 @@ async fn dispatch(
             .await;
         }
         _ => {
-            write_event(
-                async_fd,
-                &uhid::input2_event(&error_report(msg.cid, ctaphid::ERR_INVALID_CMD)),
-            )
-            .await;
+            send_report(async_fd, &error_report(msg.cid, ctaphid::ERR_INVALID_CMD)).await;
         }
     }
 }
@@ -467,7 +471,7 @@ async fn with_keepalive<F: std::future::Future>(
         tokio::select! {
             out = &mut fut => return out,
             _ = tick.tick() => {
-                write_event(async_fd, &uhid::input2_event(&keepalive_report(cid, KEEPALIVE_UPNEEDED))).await;
+                send_report(async_fd, &keepalive_report(cid, KEEPALIVE_UPNEEDED)).await;
             }
         }
     }
@@ -476,8 +480,16 @@ async fn with_keepalive<F: std::future::Future>(
 /// Write a CTAPHID message as one or more `UHID_INPUT2` reports.
 async fn write_message(async_fd: &AsyncFd<File>, msg: &Message) {
     for report in split_message(msg) {
-        write_event(async_fd, &uhid::input2_event(&report)).await;
+        send_report(async_fd, &report).await;
     }
+}
+
+/// Send one 64-byte CTAPHID report as a `UHID_INPUT2` event. The report-id is
+/// asymmetric for our unnumbered FIDO device: the host prefixes its writes with
+/// a report-id byte (stripped on OUTPUT), but reads raw reports, so INPUT2
+/// carries the payload with no prefix.
+async fn send_report(async_fd: &AsyncFd<File>, report: &[u8]) {
+    write_event(async_fd, &uhid::input2_event(report)).await;
 }
 
 /// Write one uhid event to the device fd, awaiting writability.

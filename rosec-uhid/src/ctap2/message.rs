@@ -29,12 +29,15 @@ impl CredentialDescriptor {
     }
 
     fn to_value(&self) -> Value {
+        // CTAP2 canonical CBOR: map keys are ordered by encoded bytes, so the
+        // shorter "id" (0x62…) must precede "type" (0x64…). libfido2's
+        // ctap_check_cbor rejects the whole response otherwise.
         Value::Map(vec![
+            (Value::Text("id".into()), Value::Bytes(self.id.clone())),
             (
                 Value::Text("type".into()),
                 Value::Text(self.cred_type.clone()),
             ),
-            (Value::Text("id".into()), Value::Bytes(self.id.clone())),
         ])
     }
 }

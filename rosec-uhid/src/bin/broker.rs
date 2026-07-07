@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rosec_uhid::broker::{self, Grant};
 use rosec_uhid::client::UHID_DEVICE as UHID_PATH;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const SYSTEMD_LISTEN_FD: i32 = 3;
 
@@ -94,7 +94,7 @@ fn handle(stream: &UnixStream, granted: &mut Vec<Grant>) -> Result<()> {
             return Ok(());
         }
     };
-    info!(uid, node = %node.display(), "granted virtual authenticator");
+    debug!(uid, node = %node.display(), "granted virtual authenticator");
 
     broker::send_fd(stream, device.as_raw_fd()).context("passing device fd")?;
     granted.push(grant);
