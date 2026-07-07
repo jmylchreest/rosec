@@ -20,4 +20,23 @@ ignore = [
     # dependents cap quick-xml at 0.39.x, so we cannot advance it yet. DoS only.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+
+    # memmap2 0.9.10 unsound (unchecked pointer offset). Pulled transitively
+    # via iced's font stack (fontdb -> cosmic-text) in rosec-prompt; iced
+    # 0.14 caps it, so we cannot advance it independently. Unsoundness, not a
+    # remotely-triggerable vuln. Remove when iced bumps memmap2.
+    "RUSTSEC-2026-0186",
+
+    # rand 0.8.5 unsound (only with a custom RNG-backed logger calling
+    # rand::rng(), which rosec does not do). Pulled transitively via
+    # num-bigint-dig; no rand-0.9 release of that crate exists. Not reachable
+    # in our usage. Remove when num-bigint-dig advances to rand 0.9.
+    "RUSTSEC-2026-0097",
+
+    # --- Unmaintained, transitive -------------------------------------------
+    # ttf-parser 0.25.x unmaintained. Pulled via iced's font stack
+    # (cosmic-text) in rosec-prompt; no action available to us and no
+    # security impact (informational "unmaintained" advisory). Remove if the
+    # font stack moves off ttf-parser or it gains a maintainer.
+    "RUSTSEC-2026-0192",
 ]

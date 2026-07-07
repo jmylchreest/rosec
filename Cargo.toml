@@ -28,7 +28,7 @@ license = "MIT"
 repository = "https://github.com/jmylchreest/rosec"
 
 [workspace.dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
