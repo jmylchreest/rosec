@@ -7,7 +7,71 @@ use anyhow::Result;
 use zeroize::Zeroizing;
 
 use crate::output::{emit_empty_and_exit, emit_secret_json};
-use crate::request::{FieldKind, PromptRequest};
+use crate::request::{FieldKind, PromptRequest, SelectRequest};
+
+/// Numbered-menu fallback for selection prompts when no display server is
+/// reachable. Prints the options, reads a 1-based index, and emits
+/// `{"selected": "<id>"}`. Empty input or `q` cancels (exit 1).
+fn run_select(request: &PromptRequest, select: &SelectRequest) -> Result<()> {
+    use std::collections::HashMap;
+
+    if select.options.is_empty() {
+        return Err(anyhow::anyhow!("select request has no options"));
+    }
+
+    if !request.title.is_empty() {
+        eprintln!("{}", request.title);
+    }
+    if !request.message.is_empty() {
+        eprintln!("{}", request.message);
+    }
+    eprintln!();
+    for (i, opt) in select.options.iter().enumerate() {
+        if opt.secondary.is_empty() {
+            eprintln!("  {}) {}", i + 1, opt.primary);
+        } else {
+            eprintln!("  {}) {}  ({})", i + 1, opt.primary, opt.secondary);
+        }
+    }
+    eprintln!();
+
+    // The request occupies stdin (main reads it to EOF), so read the choice
+    // from the controlling terminal directly — the same reason password
+    // fields go through rpassword rather than stdin.
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|e| anyhow::anyhow!("selection prompt needs a terminal: {e}"))?;
+
+    loop {
+        {
+            use std::io::Write as _;
+            write!(tty, "Select [1-{}, q to cancel]: ", select.options.len())?;
+            tty.flush()?;
+        }
+        let mut buf = String::new();
+        {
+            use std::io::{BufRead as _, BufReader};
+            BufReader::new(&tty)
+                .read_line(&mut buf)
+                .map_err(|e| anyhow::anyhow!("failed to read selection: {e}"))?;
+        }
+        let trimmed = buf.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+            std::process::exit(1);
+        }
+        match trimmed.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= select.options.len() => {
+                let id = select.options[n - 1].id.as_str();
+                let out: HashMap<&str, &str> = HashMap::from([("selected", id)]);
+                emit_secret_json(&out)?;
+                return Ok(());
+            }
+            _ => eprintln!("Invalid selection."),
+        }
+    }
+}
 
 /// Collect credentials from a TTY using rpassword (hidden) or plain readline (text).
 ///
@@ -29,6 +93,10 @@ pub(crate) fn run(request: PromptRequest) -> Result<()> {
         eprintln!("{}", totp.code);
         eprintln!("Expires in {}s", totp.remaining);
         emit_empty_and_exit();
+    }
+
+    if let Some(select) = &request.select {
+        return run_select(&request, select);
     }
 
     let fields = request.effective_fields();
