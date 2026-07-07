@@ -246,6 +246,29 @@ SELinux-label check where MAC is deployed. Socket permissions can restrict
 *which uids may connect at all* but cannot distinguish binaries within a
 uid.
 
+### The check in the other direction — rosecd verifies the broker
+
+The broker authenticating the client is only half of it. Because the
+rendezvous socket is a shared, world-connectable system path, rosecd must
+also verify **the thing it connected to is the real broker** before trusting
+what it receives — otherwise a process that squatted the socket path could
+hand rosecd a descriptor to a device *it* controls and drive rosecd as a
+signing oracle (feeding it assertions for a target relying party and
+capturing the signatures). Two checks close this, both required in the
+client (`rosec-uhid`'s `client` module) that rosecd uses:
+
+- **The broker peer must be uid 0.** `SO_PEERCRED` on rosecd's side yields
+  the *server's* uid; the real broker is a root system service, so a non-root
+  peer at that path is an imposter and rosecd refuses.
+- **The received fd must be the uhid device.** rosecd `fstat`s the passed
+  descriptor and confirms it is a character device whose device number
+  matches `/dev/uhid`, rejecting any other fd a squatter might send.
+
+The path itself is kept squat-proof by owning `/run/rosec` as `root:root`
+`0755` (declared `RuntimeDirectory=rosec` on the socket unit), so an
+unprivileged process cannot unlink and re-bind the socket in the first place;
+the two client-side checks are defence-in-depth on top of that.
+
 ### Device lifecycle — idempotency and cleanup
 
 The passed fd is the ownership token, which makes the lifecycle

@@ -12,6 +12,13 @@ Documentation=https://github.com/jmylchreest/rosec
 [Socket]
 ListenStream=/run/rosec/uhid.sock
 SocketMode=0666
+# Own the parent directory explicitly (root:root 0755) rather than relying on
+# implicit creation: /run/rosec must not be writable by any non-root user, or
+# the socket path could be unlinked and re-bound by an imposter that then
+# hands rosecd a forged device fd. Declared on the (long-lived) socket unit so
+# the directory persists across the broker's transient restarts.
+RuntimeDirectory=rosec
+RuntimeDirectoryMode=0755
 # Per-caller SO_PEERCRED (not socket perms) decides who is served and which
 # uid the device node is chowned to, so the socket itself may be world-
 # connectable; the broker authenticates each connection.
