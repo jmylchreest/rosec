@@ -1949,7 +1949,10 @@ impl ServiceState {
                 continue;
             }
             let result = self
-                .run_on_tokio(async move { provider.list_items().await })
+                .run_on_tokio({
+                    let p = Arc::clone(&provider);
+                    async move { p.list_items().await }
+                })
                 .await?;
             let fetched = match result {
                 Ok(items) => {
@@ -1980,6 +1983,26 @@ impl ServiceState {
             };
             // Tag each item with its provider_id and optional collection label.
             let collection_label = self.registry.collection_label(&bid);
+            // Passkey-backed items get a derived `rosec:passkey=true` marker, so
+            // `search rosec:passkey=true` surfaces passkeys uniformly across
+            // providers — including login-typed items (e.g. a Bitwarden cipher
+            // that embeds one). The authoritative set comes from the provider's
+            // list_fido2_credentials, keyed by the owning item id.
+            let passkey_item_ids: std::collections::HashSet<String> =
+                if provider.capabilities().contains(&Capability::Fido2) {
+                    match self
+                        .run_on_tokio({
+                            let p = Arc::clone(&provider);
+                            async move { p.list_fido2_credentials().await }
+                        })
+                        .await
+                    {
+                        Ok(Ok(creds)) => creds.into_iter().map(|c| c.item_id).collect(),
+                        _ => std::collections::HashSet::new(),
+                    }
+                } else {
+                    std::collections::HashSet::new()
+                };
             let tagged: Vec<ItemMeta> = fetched
                 .into_iter()
                 .map(|mut item| {
@@ -1997,6 +2020,10 @@ impl ServiceState {
                         item.attributes
                             .entry("collection".to_string())
                             .or_insert_with(|| col.clone());
+                    }
+                    if passkey_item_ids.contains(&item.id) {
+                        item.attributes
+                            .insert("rosec:passkey".to_string(), "true".to_string());
                     }
                     item
                 })

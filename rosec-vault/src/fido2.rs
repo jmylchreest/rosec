@@ -118,7 +118,7 @@ pub fn new_item_for_credential(cred: &NewFido2Credential) -> NewItem {
 
     NewItem {
         label: passkey_label(cred),
-        item_type: Some(ItemType::Login),
+        item_type: Some(ItemType::Fido2),
         attributes,
         secrets,
     }
