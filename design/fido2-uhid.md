@@ -212,9 +212,11 @@ The device node must therefore be owned by the **requesting uid at mode
 keyed on rosec's vendor/product string chowns it, or the broker chowns it
 after `UHID_CREATE2` (it knows the caller's uid from `SO_PEERCRED`).
 Remote/SSH users have no active seat and cannot open the node regardless;
-only concurrent *local* sessions are in scope. This frontend is a desktop
-feature and should be opt-in per user, not enabled system-wide on shared
-servers.
+only concurrent *local* sessions are in scope. This frontend is opt-in per
+user, and with the per-uid `0600` ownership above, concurrent local users are
+isolated from one another — so the only real caution is not installing the
+broker where the feature is unused (e.g. headless servers), not a multi-user
+isolation weakness.
 
 ### Broker trust model — uid, not binary identity
 
