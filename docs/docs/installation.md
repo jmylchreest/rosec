@@ -100,9 +100,10 @@ Or install it by hand from `contrib/uhid/` in the source tree:
 
 ```bash
 sudo install -Dm755 rosec-uhid         /usr/bin/rosec-uhid
-sudo install -Dm644 rosec-uhid.socket  /usr/lib/systemd/system/rosec-uhid.socket
-sudo install -Dm644 rosec-uhid.service /usr/lib/systemd/system/rosec-uhid.service
-sudo install -Dm644 modules-load.conf  /usr/lib/modules-load.d/rosec-uhid.conf
+sudo install -Dm644 rosec-uhid.socket   /usr/lib/systemd/system/rosec-uhid.socket
+sudo install -Dm644 rosec-uhid.service  /usr/lib/systemd/system/rosec-uhid.service
+sudo install -Dm644 modules-load.conf   /usr/lib/modules-load.d/rosec-uhid.conf
+sudo install -Dm644 69-rosec-uhid.rules /usr/lib/udev/rules.d/69-rosec-uhid.rules
 sudo systemctl enable --now rosec-uhid.socket
 ```
 

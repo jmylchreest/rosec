@@ -74,11 +74,16 @@ fn recv_fd(stream: &UnixStream) -> Result<RawFd> {
     let mut buf = [0u8; 1];
     let mut iov = [IoSliceMut::new(&mut buf)];
     let mut cmsg_space = nix::cmsg_space!(RawFd);
+    // MSG_CMSG_CLOEXEC: the received fd must be close-on-exec so it does not
+    // leak into rosec-prompt (or any other) child processes the daemon spawns
+    // during a ceremony. Set atomically at receive time — a post-hoc
+    // fcntl(F_SETFD) would race a concurrent fork() on the multi-threaded
+    // runtime.
     let msg = recvmsg::<()>(
         stream.as_raw_fd(),
         &mut iov,
         Some(&mut cmsg_space),
-        MsgFlags::empty(),
+        MsgFlags::MSG_CMSG_CLOEXEC,
     )
     .context("recvmsg SCM_RIGHTS")?;
 
