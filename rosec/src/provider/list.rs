@@ -220,7 +220,7 @@ pub async fn run() -> Result<()> {
             }
         }
         println!(
-            "\nCAPS: S=Sync W=Write s=Ssh K=KeyWrapping P=PasswordChange C=Cache N=Notifications"
+            "\nCAPS: S=Sync W=Write s=Ssh K=KeyWrapping P=PasswordChange C=Cache N=Notifications F=Fido2"
         );
         if any_experimental {
             println!("*: experimental provider — interfaces and behaviour may change");
