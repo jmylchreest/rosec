@@ -20,10 +20,11 @@ The feature is **off by default** and aimed at desktop use. Three pieces
 enable it:
 
 1. **The `rosec-uhid` broker** — a small system service (root,
-   socket-activated) that creates the virtual device. See
+   socket-activated) that creates the virtual device. Install the separate
+   `rosec-uhid-bin` package (or build from `contrib/uhid/`); see
    [Installation](installation#fido2).
-2. **The `uhid` kernel module** — loaded automatically once the broker's
-   module-load file is in place.
+2. **The `uhid` kernel module** — loaded at boot by the `modules-load.d` file
+   the broker package ships (or `sudo modprobe uhid` to load it now).
 3. **`fido2 = true`** under `[service]` in your [configuration](configuration),
    after which you restart rosecd.
 
