@@ -22,7 +22,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Integrations',
-      items: ['ssh-agent', 'totp', 'pam'],
+      items: ['ssh-agent', 'totp', 'fido2-passkeys', 'pam'],
     },
     'troubleshooting',
     'faq',
