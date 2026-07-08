@@ -715,3 +715,36 @@ jobs:
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
           commit_message: "Update to ${{ needs.prepare.outputs.version }}"
           force_push: true
+
+  # ---------------------------------------------------------------------------
+  # AUR rosec-uhid-git (VCS source package for the FIDO2 broker)
+  #
+  # The -git counterpart to rosec-uhid-bin: builds the broker from source HEAD.
+  # ---------------------------------------------------------------------------
+  aur-publish-uhid-git:
+    name: Publish rosec-uhid-git to AUR
+    runs-on: ubuntu-latest
+    needs: [prepare, release]
+    if: needs.prepare.outputs.is_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Render PKGBUILD from template
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            contrib/aur/PKGBUILD-uhid-git > "$GITHUB_WORKSPACE/PKGBUILD-uhid-git-rendered"
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: rosec-uhid-git
+          pkgbuild: ${{ github.workspace }}/PKGBUILD-uhid-git-rendered
+          assets: contrib/aur/rosec-uhid.install
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: "Update to ${{ needs.prepare.outputs.version }}"
+          force_push: true

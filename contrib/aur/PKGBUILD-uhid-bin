@@ -33,7 +33,7 @@ optdepends=(
     'rosec: the Secret Service daemon that drives the virtual authenticator'
 )
 provides=('rosec-uhid')
-conflicts=('rosec-uhid')
+conflicts=('rosec-uhid' 'rosec-uhid-git')
 install=rosec-uhid.install
 
 source_x86_64=(
