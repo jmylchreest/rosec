@@ -25,12 +25,20 @@ The rosecd user unit is unsuitable: it runs as the user and cannot open
 
 ## Install
 
+On Arch, prefer the `rosec-uhid-bin` AUR package, which installs all of this.
+By hand:
+
 ```sh
 install -Dm755 rosec-uhid            /usr/bin/rosec-uhid
 install -Dm644 rosec-uhid.socket     /usr/lib/systemd/system/rosec-uhid.socket
 install -Dm644 rosec-uhid.service    /usr/lib/systemd/system/rosec-uhid.service
+install -Dm644 modules-load.conf     /usr/lib/modules-load.d/rosec-uhid.conf
 systemctl enable --now rosec-uhid.socket
 ```
+
+`/dev/uhid` only exists once the `uhid` module is loaded. The `modules-load.d`
+file loads it at boot; the broker cannot load it itself (its unit sets
+`ProtectKernelModules=yes`). To use it immediately: `modprobe uhid`.
 
 ## hidraw ownership
 

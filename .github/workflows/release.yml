@@ -203,6 +203,7 @@ jobs:
         run: |
           cargo build --release --locked \
             --bin rosecd --bin rosec --bin rosec-prompt --bin rosec-pam-unlock \
+            --bin rosec-uhid \
             --target ${{ matrix.target }}
 
       - name: Build PAM module (native only)
@@ -214,6 +215,7 @@ jobs:
         run: |
           cross build --release --locked \
             --bin rosecd --bin rosec --bin rosec-prompt --bin rosec-pam-unlock \
+            --bin rosec-uhid \
             --target ${{ matrix.target }}
 
       - name: Package artifacts
@@ -227,6 +229,7 @@ jobs:
           cp "target/${TARGET}/release/rosec"  "${STAGE}/"
           cp "target/${TARGET}/release/rosec-prompt" "${STAGE}/"
           cp "target/${TARGET}/release/rosec-pam-unlock" "${STAGE}/"
+          cp "target/${TARGET}/release/rosec-uhid" "${STAGE}/"
           cp -r contrib "${STAGE}/"
           cp README.md  "${STAGE}/" 2>/dev/null || true
           cp LICENSE     "${STAGE}/" 2>/dev/null || true
@@ -559,6 +562,54 @@ jobs:
           pkgname: rosec-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
           assets: contrib/aur/rosec.install
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: "Update to ${{ needs.prepare.outputs.version }}"
+          force_push: true
+
+  # ---------------------------------------------------------------------------
+  # AUR rosec-uhid-bin package (optional FIDO2 broker)
+  #
+  # Separate package: only users who want the WebAuthn/passkey virtual
+  # authenticator install it. It reuses the main release tarball (which carries
+  # the rosec-uhid binary and the contrib/uhid units + modules-load file).
+  # ---------------------------------------------------------------------------
+  aur-publish-uhid:
+    name: Publish rosec-uhid-bin to AUR
+    runs-on: ubuntu-latest
+    needs: [prepare, release]
+    if: needs.prepare.outputs.is_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download x86_64 artifact (for PKGBUILD checksum)
+        uses: actions/download-artifact@v8
+        with:
+          name: rosec-x86_64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Compute checksums for PKGBUILD
+        id: checksums
+        run: |
+          X86_64_SHA=$(awk '{print $1}' artifacts/rosec-*-x86_64-unknown-linux-gnu.tar.gz.sha256)
+          echo "x86_64_sha=${X86_64_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Render PKGBUILD from template
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@X86_64_SHA256@|${{ steps.checksums.outputs.x86_64_sha }}|g" \
+            contrib/aur/PKGBUILD-uhid-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: rosec-uhid-bin
+          pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
+          assets: contrib/aur/rosec-uhid.install
           commit_username: ${{ secrets.AUR_USERNAME }}
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}

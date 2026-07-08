@@ -34,6 +34,7 @@ optdepends=(
     'fuse3: SSH key FUSE filesystem at $XDG_RUNTIME_DIR/rosec/ssh'
     'openssh: SSH agent support'
     'libnotify: desktop notifications on lock/unlock'
+    'rosec-uhid-bin: FIDO2/WebAuthn virtual authenticator (serve passkeys to browsers)'
 )
 provides=(
     'org.freedesktop.secrets'

@@ -87,15 +87,29 @@ what it does and how to use it.
 It needs one extra system service, the **`rosec-uhid` broker**. `/dev/uhid`
 (the kernel's virtual-HID facility) is root-only, so a tiny privileged broker
 creates the device and hands it to your unprivileged daemon — rosecd itself
-never runs as root. The broker ships with the release under `contrib/uhid/`:
+never runs as root.
+
+On Arch, install the separate package:
 
 ```bash
-# From the contrib/uhid/ directory (packages install these for you)
-sudo install -Dm755 rosec-uhid        /usr/bin/rosec-uhid
-sudo install -Dm644 rosec-uhid.socket /usr/lib/systemd/system/rosec-uhid.socket
-sudo install -Dm644 rosec-uhid.service /usr/lib/systemd/system/rosec-uhid.service
+paru -S rosec-uhid-bin      # or your AUR helper of choice
 sudo systemctl enable --now rosec-uhid.socket
 ```
+
+Or install it by hand from `contrib/uhid/` in the source tree:
+
+```bash
+sudo install -Dm755 rosec-uhid         /usr/bin/rosec-uhid
+sudo install -Dm644 rosec-uhid.socket  /usr/lib/systemd/system/rosec-uhid.socket
+sudo install -Dm644 rosec-uhid.service /usr/lib/systemd/system/rosec-uhid.service
+sudo install -Dm644 modules-load.conf  /usr/lib/modules-load.d/rosec-uhid.conf
+sudo systemctl enable --now rosec-uhid.socket
+```
+
+The `uhid` module must be loaded for `/dev/uhid` to exist — the
+`modules-load.d` file loads it at the next boot; to use it now without
+rebooting, `sudo modprobe uhid`. (The broker's unit is hardened with
+`ProtectKernelModules=yes`, so it cannot load the module itself.)
 
 Then enable the frontend for your session — set `fido2 = true` under
 `[service]` in your [configuration](configuration) and restart the daemon:
@@ -104,10 +118,9 @@ Then enable the frontend for your session — set `fido2 = true` under
 systemctl --user restart rosecd
 ```
 
-The `uhid` kernel module is loaded on demand. This is a per-user, opt-in
-desktop feature: each user's device is isolated (owned by that user at `0600`),
-so it is safe alongside other local users — there is just no reason to install
-the broker on a headless server.
+This is a per-user, opt-in desktop feature: each user's device is isolated
+(owned by that user at `0600`), so it is safe alongside other local users —
+there is just no reason to install the broker on a headless server.
 
 ## What runs where
 
