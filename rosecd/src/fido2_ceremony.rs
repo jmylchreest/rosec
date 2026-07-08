@@ -11,7 +11,7 @@ use rosec_secret_service::ServiceState;
 use rosec_uhid::ctap2::command::Ctap2Status;
 use rosec_uhid::ctap2::cose;
 use rosec_uhid::ctap2::engine::{
-    CreatedCredential, KeyRef, PasskeyStore, StoredCredential, UserGesture,
+    ConfirmAction, CreatedCredential, KeyRef, PasskeyStore, StoredCredential, UserGesture,
 };
 use rosec_uhid::ctap2::message::MakeCredentialRequest;
 use rosec_uhid::ctap2::sign::SigningKey;
@@ -222,10 +222,15 @@ impl PromptGesture {
 
 #[async_trait]
 impl UserGesture for PromptGesture {
-    async fn confirm(&self, rp_id: &str, account: &str) -> bool {
+    async fn confirm(&self, action: ConfirmAction, rp_id: &str, account: &str) -> bool {
+        let message = match action {
+            ConfirmAction::Register => format!("Create a passkey for {account} on {rp_id}?"),
+            ConfirmAction::Authenticate => format!("Allow {account} to sign in to {rp_id}?"),
+            ConfirmAction::Select => "Allow a website to use this authenticator?".to_string(),
+        };
         let request = serde_json::json!({
             "title": "Passkey request",
-            "message": format!("Allow {account} to sign in to {rp_id}?"),
+            "message": message,
             "confirm_label": "Allow",
             "cancel_label": "Deny",
             "fields": [],

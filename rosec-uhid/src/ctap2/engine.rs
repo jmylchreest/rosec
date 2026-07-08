@@ -10,11 +10,21 @@ use zeroize::Zeroizing;
 
 use super::authdata;
 use super::command::{Ctap2Status, ROSEC_AAGUID};
+use super::cose;
 use super::message::{
     CredentialDescriptor, GetAssertionRequest, GetAssertionResponse, MakeCredentialRequest,
     MakeCredentialResponse,
 };
 use super::sign::SigningKey;
+
+/// Reserved relying-party id that Chromium — and libfido2/U2F — use for a
+/// throwaway `makeCredential` sent only to make an authenticator prompt for a
+/// touch during authenticator *selection* (when more than one is available,
+/// e.g. rosec alongside a browser passkey provider). The client discards the
+/// response, so we honour the touch but must never persist anything for it;
+/// otherwise every selection would litter the vault with a bogus ".dummy"
+/// passkey. No real relying party uses ".dummy" (it is not a valid domain).
+const TOUCH_SELECTION_RP_ID: &str = ".dummy";
 
 /// authenticatorData flags for every rosec ceremony: user present + verified
 /// (the rosec-prompt gesture is our UP+UV), plus backup-eligible (BE) and
@@ -86,11 +96,24 @@ pub struct CreatedCredential {
     pub cose_public_key: Vec<u8>,
 }
 
+/// What the user is being asked to confirm, so the prompt can word itself
+/// correctly rather than always saying "sign in".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Creating a new passkey (`makeCredential`).
+    Register,
+    /// Signing in with an existing passkey (`getAssertion`).
+    Authenticate,
+    /// Selecting this authenticator for a request — Chrome's ".dummy" touch
+    /// probe — where there is no real account or relying party to show.
+    Select,
+}
+
 /// User presence/verification, via rosec-prompt.
 #[async_trait]
 pub trait UserGesture: Send + Sync {
-    /// Confirm use of a single account. `true` = approved (counts as UP+UV).
-    async fn confirm(&self, rp_id: &str, account: &str) -> bool;
+    /// Confirm an `action` for a single account. `true` = approved (UP+UV).
+    async fn confirm(&self, action: ConfirmAction, rp_id: &str, account: &str) -> bool;
 
     /// Choose among several accounts; `Some(index)` or `None` if cancelled.
     async fn select(&self, rp_id: &str, accounts: &[String]) -> Option<usize>;
@@ -116,7 +139,11 @@ pub async fn get_assertion(
 
     let chosen = if matches.len() == 1 {
         if !gesture
-            .confirm(&req.rp_id, &matches[0].account_label())
+            .confirm(
+                ConfirmAction::Authenticate,
+                &req.rp_id,
+                &matches[0].account_label(),
+            )
             .await
         {
             return Err(Ctap2Status::OperationDenied);
@@ -175,16 +202,33 @@ pub async fn make_credential(
         .preferred_algorithm()
         .ok_or(Ctap2Status::UnsupportedAlgorithm)?;
 
-    let label = format!(
-        "{} — {}",
-        req.user_name.as_deref().unwrap_or("new passkey"),
-        req.rp_id
-    );
-    if !gesture.confirm(&req.rp_id, &label).await {
+    // A ".dummy" request is Chromium's touch probe for authenticator selection,
+    // not a real registration: honour the touch so the user can pick rosec, but
+    // return an ephemeral credential we never persist (the client discards it).
+    let is_selection_probe = req.rp_id == TOUCH_SELECTION_RP_ID;
+
+    // Selection probe: no real account/RP to show. Real registration: word it
+    // as a registration ("Create a passkey for …"), not "sign in".
+    let (action, account) = if is_selection_probe {
+        (ConfirmAction::Select, String::new())
+    } else {
+        (
+            ConfirmAction::Register,
+            req.user_name
+                .as_deref()
+                .unwrap_or("new passkey")
+                .to_string(),
+        )
+    };
+    if !gesture.confirm(action, &req.rp_id, &account).await {
         return Err(Ctap2Status::OperationDenied);
     }
 
-    let created = store.create(req, algorithm).await?;
+    let created = if is_selection_probe {
+        ephemeral_credential(algorithm)?
+    } else {
+        store.create(req, algorithm).await?
+    };
 
     let acd = authdata::AttestedCredentialData {
         aaguid: ROSEC_AAGUID,
@@ -201,6 +245,19 @@ pub async fn make_credential(
     );
 
     Ok(MakeCredentialResponse { auth_data })
+}
+
+/// Mint a keypair for a selection-probe (`.dummy`) response without persisting
+/// it. The client discards the attestation, so no vault item is created and the
+/// private key is dropped immediately.
+fn ephemeral_credential(algorithm: i64) -> Result<CreatedCredential, Ctap2Status> {
+    let (key, _pem) =
+        SigningKey::generate(algorithm).map_err(|_| Ctap2Status::UnsupportedAlgorithm)?;
+    let cose_public_key = cose::public_key_cbor(&key).map_err(|_| Ctap2Status::Other)?;
+    Ok(CreatedCredential {
+        credential_id: rand::random::<[u8; 16]>().to_vec(),
+        cose_public_key,
+    })
 }
 
 #[cfg(test)]
@@ -276,7 +333,7 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
 
     #[async_trait]
     impl UserGesture for MockGesture {
-        async fn confirm(&self, _rp_id: &str, account: &str) -> bool {
+        async fn confirm(&self, _action: ConfirmAction, _rp_id: &str, account: &str) -> bool {
             self.seen.lock().unwrap().push(account.to_string());
             self.confirm
         }
@@ -470,6 +527,65 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
         use coset::CborSerializable;
         let cose = resp.auth_data[55 + id_len..].to_vec();
         assert!(coset::CoseKey::from_slice(&cose).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dummy_selection_probe_touches_but_never_persists() {
+        // Chromium's ".dummy" touch probe must solicit a touch but never reach
+        // the store — a store whose create() runs would panic this test.
+        struct NoCreateStore;
+        #[async_trait]
+        impl PasskeyStore for NoCreateStore {
+            async fn find(&self, _: &str, _: &[Vec<u8>]) -> Vec<StoredCredential> {
+                Vec::new()
+            }
+            async fn private_key(
+                &self,
+                _: &StoredCredential,
+            ) -> Result<Zeroizing<String>, Ctap2Status> {
+                unreachable!()
+            }
+            async fn create(
+                &self,
+                _: &MakeCredentialRequest,
+                _: i64,
+            ) -> Result<CreatedCredential, Ctap2Status> {
+                panic!("store.create must not run for the .dummy selection probe");
+            }
+        }
+
+        let gesture = MockGesture {
+            confirm: true,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        let mut req = mkreq(&[super::super::sign::ALG_ES256], &[]);
+        req.rp_id = TOUCH_SELECTION_RP_ID.into();
+
+        let resp = make_credential(&req, &NoCreateStore, &gesture)
+            .await
+            .unwrap();
+        // The touch was solicited (the prompt fired once)...
+        assert_eq!(gesture.seen.lock().unwrap().len(), 1);
+        // ...and the returned credential is ephemeral (16 random bytes), not the
+        // store's "new-cred-id" — i.e. nothing was persisted.
+        let id_len = u16::from_be_bytes([resp.auth_data[53], resp.auth_data[54]]) as usize;
+        assert_eq!(id_len, 16);
+        assert_ne!(&resp.auth_data[55..55 + id_len], b"new-cred-id".as_slice());
+    }
+
+    #[tokio::test]
+    async fn dummy_selection_probe_declined_is_denied() {
+        let store = MockStore { creds: vec![] };
+        let gesture = MockGesture {
+            confirm: false,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+        let mut req = mkreq(&[super::super::sign::ALG_ES256], &[]);
+        req.rp_id = TOUCH_SELECTION_RP_ID.into();
+        let err = make_credential(&req, &store, &gesture).await.unwrap_err();
+        assert_eq!(err, Ctap2Status::OperationDenied);
     }
 
     #[tokio::test]
