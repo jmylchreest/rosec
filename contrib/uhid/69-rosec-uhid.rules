@@ -1,0 +1,19 @@
+# Keep the seat-scoped uaccess ACL off rosec's virtual FIDO2 authenticator.
+#
+# The device advertises the FIDO usage page by design, so the stock
+# 60-fido-id.rules sets ID_SECURITY_TOKEN=1 and 70-uaccess.rules would then
+# TAG+="uaccess" — making systemd-logind attach a POSIX ACL granting the
+# *active-seat* user read/write on the hidraw node. On a multi-user or
+# fast-user-switching host that lets another local user reach one user's
+# authenticator, defeating the broker's per-uid ownership. The broker chowns
+# the node to the specific requesting uid at 0600 instead; this rule stops the
+# competing ACL from ever being applied.
+#
+# This file MUST sort after 60-fido-id.rules and before 70-uaccess.rules.
+# Matched by rosec's fixed HID bus:vendor:product on the parent HID device
+# (0003:1209:0053) via KERNELS== — the identifiers live on the parent HID
+# device, not the hidraw node, and ENV{} does not walk parents. Only the root
+# broker can create such a device, since /dev/uhid is root-only.
+ACTION=="remove", GOTO="rosec_uhid_end"
+SUBSYSTEM=="hidraw", KERNELS=="0003:1209:0053.*", ENV{ID_SECURITY_TOKEN}="", ENV{ID_FIDO_TOKEN}="", TAG-="uaccess", TAG-="security-device"
+LABEL="rosec_uhid_end"

@@ -67,6 +67,11 @@ package() {
     install -Dm644 "${srcdir_inner}/contrib/uhid/modules-load.conf" \
         "${pkgdir}/usr/lib/modules-load.d/rosec-uhid.conf"
 
+    # Keep the seat-scoped uaccess ACL off the virtual authenticator node so a
+    # second local user cannot reach it (the broker owns it per-uid instead)
+    install -Dm644 "${srcdir_inner}/contrib/uhid/69-rosec-uhid.rules" \
+        "${pkgdir}/usr/lib/udev/rules.d/69-rosec-uhid.rules"
+
     # License
     install -Dm644 "${srcdir_inner}/LICENSE" \
         "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

@@ -33,6 +33,7 @@ install -Dm755 rosec-uhid            /usr/bin/rosec-uhid
 install -Dm644 rosec-uhid.socket     /usr/lib/systemd/system/rosec-uhid.socket
 install -Dm644 rosec-uhid.service    /usr/lib/systemd/system/rosec-uhid.service
 install -Dm644 modules-load.conf     /usr/lib/modules-load.d/rosec-uhid.conf
+install -Dm644 69-rosec-uhid.rules   /usr/lib/udev/rules.d/69-rosec-uhid.rules
 systemctl enable --now rosec-uhid.socket
 ```
 
@@ -42,21 +43,24 @@ file loads it at boot; the broker cannot load it itself (its unit sets
 
 ## hidraw ownership
 
-The broker chowns the created node to the requesting uid at `0600`. This is
-deliberately **not** left to the stock `fido_id` + `uaccess` rule, which
-grants the node to the active *seat* session — wrong for a seatless virtual
-device on a multi-user host (another logged-in user could enumerate it).
+The broker chowns the created node to the requesting uid at `0600`, so only
+that user can reach their authenticator.
 
-If you prefer a udev rule over the broker's own chown (e.g. for auditing),
-key it on rosec's vendor/product rather than the generic FIDO usage page, so
-it only ever matches rosec's own device:
+That chown is **not sufficient on its own**, and the shipped
+`69-rosec-uhid.rules` is required alongside it. The device advertises the FIDO
+usage page by design, so the stock `60-fido-id.rules` sets
+`ID_SECURITY_TOKEN=1` and `70-uaccess.rules` then tags it `uaccess` — which
+makes systemd-logind attach a POSIX ACL granting the **active-seat** user
+read/write, *in addition to* the owner. On a multi-user or fast-user-switching
+host that hands another local user access to the node, and logind re-applies
+it on every session change, so a one-time `chmod` cannot hold it off.
 
-```udev
-# /etc/udev/rules.d/70-rosec-uhid.rules
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0053", \
-    TAG+="uaccess"
+`69-rosec-uhid.rules` (installed to `/usr/lib/udev/rules.d/`) clears
+`ID_SECURITY_TOKEN` for rosec's device before `70-uaccess.rules` runs, so the
+ACL is never applied. It is matched by rosec's fixed HID vendor:product
+(`0003:1209:0053`), which only the root broker can create. Verify a granted
+node has no extra ACL entry:
+
+```sh
+getfacl /dev/hidrawN   # should show only the owner, no named-user uaccess entry
 ```
-
-Note the udev rule cannot know the *requesting* uid, so the broker's
-per-uid chown is the more precise mechanism on multi-user systems; the udev
-rule falls back to seat-scoped `uaccess`.
