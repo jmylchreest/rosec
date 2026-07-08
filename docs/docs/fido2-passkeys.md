@@ -100,5 +100,7 @@ destroys the device, so a stopped daemon cannot leave a virtual key behind.
   authenticator.
 - Attestation-enforcing relying parties reject software authenticators (see
   Security, above).
-- The authenticator is a per-user desktop feature; it should not be enabled
-  system-wide on shared servers.
+- It is a per-user, opt-in desktop feature. Each user's device is isolated —
+  owned by that user at mode `0600`, keyed to their uid — so concurrent local
+  users are safe from one another; there is simply no reason to install the
+  broker on a headless server.

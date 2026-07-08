@@ -104,8 +104,10 @@ Then enable the frontend for your session — set `fido2 = true` under
 systemctl --user restart rosecd
 ```
 
-The `uhid` kernel module is loaded on demand. This is a per-user desktop
-feature; do not enable it on shared multi-user servers.
+The `uhid` kernel module is loaded on demand. This is a per-user, opt-in
+desktop feature: each user's device is isolated (owned by that user at `0600`),
+so it is safe alongside other local users — there is just no reason to install
+the broker on a headless server.
 
 ## What runs where
 
