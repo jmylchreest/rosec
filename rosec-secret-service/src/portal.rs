@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rand::Rng;
+use zbus::Connection;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
@@ -29,6 +30,11 @@ const PORTAL_SCHEMA: &str = "org.freedesktop.portal.Secret";
 /// The attribute key used to look up portal secrets by application ID.
 const PORTAL_ATTR_APP_ID: &str = "app_id";
 
+/// Well-known name of the trusted xdg-desktop-portal broker. Only that process
+/// may drive this backend — it derives `app_id` from the sandboxed peer, so a
+/// direct session-bus caller passing a forged `app_id` must be refused.
+const PORTAL_BUS_NAME: &str = "org.freedesktop.portal.Desktop";
+
 const PORTAL_ATTR_SCHEMA: &str = "xdg:schema";
 
 /// Size of the per-app secret in bytes (matches gnome-keyring, oo7, and KWallet).
@@ -42,6 +48,27 @@ enum PortalLookup {
     /// Secret exists but the provider is locked — caller should not generate
     /// a replacement (that would silently overwrite the real secret).
     Locked,
+}
+
+/// Verify the D-Bus caller is the xdg-desktop-portal broker — the current
+/// owner of [`PORTAL_BUS_NAME`]. Fail-closed: an absent sender or an
+/// unresolvable name owner is treated as untrusted, so this backend never
+/// hands out or overwrites a secret for a forged `app_id` passed by an
+/// arbitrary session-bus peer.
+async fn caller_is_portal(header: &Header<'_>, conn: &Connection) -> bool {
+    let Some(sender) = header.sender() else {
+        return false;
+    };
+    let Ok(proxy) = zbus::fdo::DBusProxy::new(conn).await else {
+        return false;
+    };
+    let Ok(name) = zbus::names::BusName::try_from(PORTAL_BUS_NAME) else {
+        return false;
+    };
+    match proxy.get_name_owner(name).await {
+        Ok(owner) => owner.as_str() == sender.as_str(),
+        Err(_) => false,
+    }
 }
 
 pub struct PortalSecret {
@@ -67,14 +94,29 @@ impl PortalSecret {
         fd: zvariant::OwnedFd,
         _options: HashMap<String, OwnedValue>,
         #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
     ) -> Result<(u32, HashMap<String, OwnedValue>), FdoError> {
         crate::daemon::log_dbus_caller("portal", "RetrieveSecret", &header);
+
+        // Only xdg-desktop-portal may drive this backend — it derives app_id
+        // from the sandboxed peer's identity. Refuse a direct session-bus
+        // caller passing a forged app_id, which could otherwise read or
+        // overwrite (replace=true) another application's secret.
+        if !caller_is_portal(&header, conn).await {
+            tracing::warn!(
+                app_id,
+                "portal: refusing RetrieveSecret from a caller that is not xdg-desktop-portal"
+            );
+            return Err(FdoError::AccessDenied(
+                "org.freedesktop.impl.portal.Secret may only be called by xdg-desktop-portal"
+                    .to_string(),
+            ));
+        }
+
         self.state.touch_activity();
 
         tracing::info!(app_id, "portal: RetrieveSecret");
 
-        // Defense-in-depth: xdg-desktop-portal validates app_id against the
-        // sandbox, but direct D-Bus callers can pass anything.
         if app_id.is_empty() {
             tracing::warn!("portal: rejecting empty app_id");
             return Ok((2, HashMap::new()));
