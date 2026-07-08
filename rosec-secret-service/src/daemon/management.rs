@@ -368,40 +368,10 @@ impl RosecManagement {
         let state = Arc::clone(&self.state);
         self.state
             .run_on_tokio(async move {
-                // Read password from the pipe into a zeroizing buffer.
-                let password = {
-                    use std::io::Read as _;
-                    // SAFETY: raw is a valid fd from dup() above.
-                    let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(raw) };
-                    let mut file: std::fs::File = file;
-                    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
-                    file.read_to_end(&mut buf)
-                        .map_err(|e| FdoError::Failed(format!("read from pipe failed: {e}")))?;
-                    // file is dropped here → fd closed
-
-                    // Strip trailing null byte (pam_exec null-terminates).
-                    if buf.last() == Some(&0) {
-                        buf.pop();
-                    }
-                    // Strip trailing newline.
-                    if buf.last() == Some(&b'\n') {
-                        buf.pop();
-                    }
-
-                    if buf.is_empty() {
-                        return Err(FdoError::Failed("pipe password is empty".to_string()));
-                    }
-
-                    // Validate UTF-8 against the zeroizing buffer; on success
-                    // copy into a Zeroizing<String>, on failure leave the bytes
-                    // in `buf` (which scrubs on drop). std::mem::take here
-                    // would move the Vec out of the Zeroizing wrapper and the
-                    // UTF-8 error path would drop a non-zeroizing Vec.
-                    let s = std::str::from_utf8(&buf).map_err(|_| {
-                        FdoError::Failed("pipe password is not valid UTF-8".to_string())
-                    })?;
-                    zeroize::Zeroizing::new(s.to_owned())
-                };
+                // Read the password off the pipe on a blocking thread bounded
+                // by a timeout, so a caller that never writes cannot pin a
+                // runtime worker (see read_pipe_password).
+                let password = read_pipe_password(raw, "auth").await?;
 
                 // Look up the password field ID for this provider.
                 let provider = state.provider_by_id(&provider_id).ok_or_else(|| {
@@ -591,42 +561,11 @@ impl RosecManagement {
         let state = Arc::clone(&self.state);
         self.state
             .run_on_tokio(async move {
-                // Helper: read a password from a pipe fd into Zeroizing<String>.
-                let read_pipe_password =
-                    |raw_fd: libc::c_int,
-                     name: &str|
-                     -> Result<zeroize::Zeroizing<String>, FdoError> {
-                        use std::io::Read as _;
-                        let file: std::fs::File =
-                            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(raw_fd) };
-                        let mut file = file;
-                        let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
-                        file.read_to_end(&mut buf).map_err(|e| {
-                            FdoError::Failed(format!("read from {name} pipe failed: {e}"))
-                        })?;
-                        // file dropped here → fd closed
-
-                        // Strip trailing null byte (pam_exec null-terminates).
-                        if buf.last() == Some(&0) {
-                            buf.pop();
-                        }
-                        // Strip trailing newline.
-                        if buf.last() == Some(&b'\n') {
-                            buf.pop();
-                        }
-
-                        if buf.is_empty() {
-                            return Err(FdoError::Failed(format!("{name} password is empty")));
-                        }
-
-                        let s = String::from_utf8(std::mem::take(&mut *buf)).map_err(|_| {
-                            FdoError::Failed(format!("{name} password is not valid UTF-8"))
-                        })?;
-                        Ok(zeroize::Zeroizing::new(s))
-                    };
-
-                let old_password = read_pipe_password(old_raw, "old")?;
-                let new_password = read_pipe_password(new_raw, "new")?;
+                // Read both passwords off the pipes on blocking threads bounded
+                // by a timeout (see read_pipe_password), so a caller that never
+                // writes cannot pin a runtime worker.
+                let old_password = read_pipe_password(old_raw, "old").await?;
+                let new_password = read_pipe_password(new_raw, "new").await?;
 
                 let provider = state.provider_by_id(&provider_id).ok_or_else(|| {
                     FdoError::Failed(format!("provider '{provider_id}' not found"))
@@ -638,6 +577,62 @@ impl RosecManagement {
                     .map_err(|e| FdoError::Failed(format!("change_password failed: {e}")))
             })
             .await?
+    }
+}
+
+/// Give up waiting for a password on a caller-supplied pipe after this long,
+/// so a peer that passes a pipe and never writes cannot tie up a thread.
+const PIPE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Blocking read of a password from a raw pipe fd into a `Zeroizing<String>`.
+/// Takes ownership of `raw` and closes it on return.
+fn read_pipe_password_blocking(
+    raw: std::os::unix::io::RawFd,
+    name: &str,
+) -> Result<zeroize::Zeroizing<String>, FdoError> {
+    use std::io::Read as _;
+    use std::os::unix::io::FromRawFd as _;
+    // SAFETY: `raw` is a valid, owned dup'd fd handed to this function.
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
+    file.read_to_end(&mut buf)
+        .map_err(|e| FdoError::Failed(format!("read from {name} pipe failed: {e}")))?;
+    // Strip a trailing null (pam_exec null-terminates) then a trailing newline.
+    if buf.last() == Some(&0) {
+        buf.pop();
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    if buf.is_empty() {
+        return Err(FdoError::Failed(format!("{name} password is empty")));
+    }
+    // Validate UTF-8 against the zeroizing buffer and copy into a
+    // Zeroizing<String>; a mem::take would move the bytes out of the zeroizing
+    // wrapper and drop a plain Vec on the error path.
+    let s = std::str::from_utf8(&buf)
+        .map_err(|_| FdoError::Failed(format!("{name} password is not valid UTF-8")))?;
+    Ok(zeroize::Zeroizing::new(s.to_owned()))
+}
+
+/// Read a password from a caller-supplied pipe fd *off* the async runtime: the
+/// blocking read runs on a `spawn_blocking` thread and is bounded by
+/// [`PIPE_READ_TIMEOUT`]. A caller that passes a pipe read-end and never writes
+/// therefore cannot pin a Tokio worker — which would otherwise starve the
+/// runtime that every provider/secret operation funnels through.
+async fn read_pipe_password(
+    raw: std::os::unix::io::RawFd,
+    name: &'static str,
+) -> Result<zeroize::Zeroizing<String>, FdoError> {
+    let handle = tokio::task::spawn_blocking(move || read_pipe_password_blocking(raw, name));
+    match tokio::time::timeout(PIPE_READ_TIMEOUT, handle).await {
+        Ok(join) => {
+            join.map_err(|e| FdoError::Failed(format!("{name} pipe read task failed: {e}")))?
+        }
+        Err(_) => Err(FdoError::Failed(format!(
+            "{name} password pipe read timed out after {}s",
+            PIPE_READ_TIMEOUT.as_secs()
+        ))),
     }
 }
 

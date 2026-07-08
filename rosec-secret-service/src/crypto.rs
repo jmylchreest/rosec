@@ -20,7 +20,7 @@ use hkdf::Hkdf;
 use num_bigint::BigUint;
 use rosec_core::ProviderError;
 use sha2::Sha256;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The 1024-bit MODP prime from RFC 2409 §6.2.
 ///
@@ -194,10 +194,19 @@ pub fn aes128_cbc_decrypt(
 /// `BigUint::to_bytes_be()` omits leading zeros; the DH public key and shared
 /// secret must be exactly 128 bytes for the spec to work correctly.
 fn pad_to_128(mut bytes: Vec<u8>) -> Vec<u8> {
-    while bytes.len() < DH_KEY_BYTES {
-        bytes.insert(0, 0);
+    // Mod-p values never exceed 128 bytes; nothing to pad.
+    if bytes.len() >= DH_KEY_BYTES {
+        return bytes;
     }
-    bytes
+    // Build the result in a single pre-sized buffer. A growing `insert(0, 0)`
+    // loop reallocates and leaves stray copies of the (possibly secret) bytes
+    // in freed heap; copy once and scrub the input instead. NOTE: the source
+    // `BigUint` itself still holds un-scrubbed limbs — num-bigint has no
+    // zeroize support; fully scrubbing needs a bignum migration.
+    let mut out = vec![0u8; DH_KEY_BYTES];
+    out[DH_KEY_BYTES - bytes.len()..].copy_from_slice(&bytes);
+    bytes.zeroize();
+    out
 }
 
 #[cfg(test)]
