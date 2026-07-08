@@ -1,24 +1,22 @@
----
-sidebar_position: 6
-title: FIDO2 passkeys
----
+# FIDO2 passkeys — design notes
 
-# FIDO2 passkeys
+Internal design and rationale for rosec's passkey storage and virtual CTAP2
+authenticator. For user-facing setup and usage, see the website guide at
+`docs/docs/fido2-passkeys.md`.
 
 Status, tracked in [#13](https://github.com/jmylchreest/rosec/issues/13):
 
-- **Phase 1 (done)** — credential model, `Capability::Fido2`, the three
-  storage mappings, the local-vault write path (`makeCredential` storage),
-  and `rosec-prompt`'s selection UI.
-- **Phase 2 (in progress)** — the `rosec-uhid` frontend. Landed so far: the
-  privileged broker (device creation, per-uid hidraw chown, `SCM_RIGHTS`
-  fd-passing), the `/dev/uhid` codec with the hard-coded FIDO descriptor,
-  CTAPHID transport framing, and the system unit. **Remaining**: the CTAP2
-  command/ceremony engine (`getInfo`/`getAssertion`/`makeCredential`
-  signing wired to the registry), which needs root + a real browser to
-  verify end to end.
-- **Phase 3 (future)** — the credentialsd provider bridge, once their
-  upstream provider API exists.
+- **Storage (implemented)** — credential model, `Capability::Fido2`, the three
+  storage mappings, the local-vault write path (`makeCredential` storage), and
+  `rosec-prompt`'s selection UI.
+- **Virtual CTAP2 authenticator (implemented)** — the `rosec-uhid` broker
+  (device creation, per-uid hidraw chown, `SCM_RIGHTS` fd-passing), the
+  `/dev/uhid` codec with the hard-coded FIDO descriptor, CTAPHID transport, and
+  the CTAP2 ceremony engine (`getInfo`/`getAssertion`/`makeCredential`) wired to
+  the registry. Verified end to end — register and authenticate — against Chrome
+  and libfido2.
+- **credentialsd provider bridge (future)** — pending the upstream provider
+  API (see below).
 
 ## Architecture: storage is a provider concern, serving is a frontend
 
@@ -44,14 +42,14 @@ The pieces:
   `list_fido2_credentials()` (metadata for discovery/selection: rpId, user
   handle, algorithm, …) and `get_fido2_key(item_id, credential_id)` (PEM
   PKCS#8 private key, fetched only at ceremony time, zeroized after use).
-- **Passkey registry** (future) — a rosecd-side index of the passkeys held
+- **Passkey registry** — a rosecd-side index of the passkeys held
   by unlocked providers, consumed by both frontends so neither talks to
   providers directly. It is rebuilt whenever a provider unlocks or reports a
   changed sync, and cleared on lock — the same discipline the SSH and TOTP
   managers use. It never serves a stale snapshot: each rebuild re-reads the
   current set of passkey-capable providers and re-queries their credentials,
   so an unlock or sync is always reflected.
-- **Ceremony engine** (future) — one implementation of
+- **Ceremony engine** — one implementation of
   `authenticatorGetAssertion` / `authenticatorMakeCredential`:
   authenticatorData assembly, client-data hashing, ES256/EdDSA/RS256
   signing, attestation `"none"`. User presence/verification goes through
@@ -124,7 +122,7 @@ build on the generic capability-set routing in `rosec_core`
 | algorithm | COSE id (`-7` ES256, `-8` EdDSA, `-257` RS256) | always ES256 | sniffed from the key's PKCS#8 OID |
 | user handle | base64url, unpadded | pass-through | pass-through |
 
-## Backend mappings (phase 1, implemented)
+## Backend mappings
 
 - **bitwarden-pm** — parses the `fido2Credentials` array on login ciphers
   (every field vault-encrypted; decrypted alongside the login, key material
@@ -156,9 +154,9 @@ passwords the local vault already protects:
   regardless of which manager stores them — we sign with attestation
   `"none"`, the industry norm for synced passkeys.
 
-## Frontends (phase 2, designed)
+## Frontends
 
-### A. credentialsd provider bridge — the strategic path
+### A. credentialsd provider bridge — the strategic path (future)
 
 [credentialsd](https://github.com/linux-credentials/credentialsd) is the
 emerging D-Bus WebAuthn mediator for Linux (SUSE-sponsored, xdg-desktop-portal
@@ -172,10 +170,11 @@ owns browser wiring and the account-selection UI; rosec answers matching
 queries from the registry and performs signing via the ceremony engine,
 prompting through `rosec-prompt` for unlock/UV.
 
-### B. Virtual CTAP2 authenticator over uhid — works with today's browsers
+### B. Virtual CTAP2 authenticator over uhid — works with today's browsers (implemented)
 
-A `rosec-fido` frontend can present a **virtual FIDO2 HID device** so
-*unmodified* Firefox (114+) and Chromium use rosec as a security key.
+The `rosec-uhid` broker plus the fido2 frontend in rosecd present a **virtual
+FIDO2 HID device** so *unmodified* Firefox (114+) and Chromium use rosec as a
+security key.
 
 **This is not a filesystem mount.** rosec's FUSE frontends work because SSH
 public keys and TOTP codes are file-shaped; CTAP2 is not — it is a
@@ -184,8 +183,8 @@ speak directly to `/dev/hidraw*` device nodes. The kernel facility for
 creating such a device from userspace is **`/dev/uhid`** (virtual HID), a
 character device, not a mount point. The flow:
 
-1. `rosec-fido` opens `/dev/uhid` and creates a HID device declaring the
-   FIDO usage page (`0xF1D0`).
+1. The `rosec-uhid` broker opens `/dev/uhid` and creates a HID device
+   declaring the FIDO usage page (`0xF1D0`), then passes the fd to rosecd.
 2. The kernel materialises `/dev/hidrawN`. The node must be owned by the
    requesting user at `0600` (see *Multi-user safety* below) — **not** left
    to the generic `fido_id` uaccess tag, which is active-seat-scoped and
@@ -289,10 +288,12 @@ self-cleaning:
   FIDO device** — the key safety property). The broker holds nothing after
   fd-passing, so it has no cleanup responsibility and no persistent
   privileged state.
-- **Lock / logout**: on vault lock or session end, destroy the device
-  (default — no authenticator present while locked, browser sees the key
-  unplugged) rather than leaving it to fail every ceremony against a locked
-  provider. This matches rosec's autolock model.
+- **Lock / logout**: current behaviour keeps the device present and rebuilds
+  the registry to empty on lock, so a locked vault simply offers no
+  credentials (assertions return no-credentials; registration fails against a
+  locked write provider). Destroying the device on lock instead — so the
+  browser sees the key unplugged — is a possible future refinement, but is not
+  wired today.
 
 "User level" is achievable, with one caveat: `/dev/uhid` itself is
 root-only by default — deliberately, because uhid can create *any* HID
@@ -326,22 +327,14 @@ logic is unprivileged:
 | CTAP2 surface | — | `getInfo` (`rk=true`, `uv=true`), `getAssertion`/`getNextAssertion` (registry lookup → rosec-prompt UP/UV → `get_fido2_key` → sign → zeroize), `makeCredential` (stores into a writable `Fido2` provider — the local vault) |
 | lifetime | milliseconds | session; closing the fd destroys the device |
 
-Useful crates surveyed for phase 2:
+The ceremony engine is built in-house (in `rosec-uhid`) rather than on
+`passkey-rs` or `webauthn-authenticator-rs`: the CTAP2 surface we need is
+small, and owning it keeps the trust boundary (signing over provider-held
+keys, `rosec-prompt` for presence) explicit and dependency-light. `webauthn-rs`
+(the relying-party side) is used *in tests* to verify our assertions the way an
+RP would.
 
-- **`passkey-rs`** (1Password: `passkey-authenticator`, `passkey-types`) —
-  a maintained software-authenticator implementation with WebAuthn/CTAP2
-  types; the strongest candidate to base the ceremony engine on.
-- **`webauthn-authenticator-rs`** (kanidm workspace) — authenticator-side
-  implementation including a SoftToken; good prior art, and its sibling
-  **`webauthn-rs`** (RP side) is ideal *in tests* to verify our assertions
-  the way a relying party would.
-- **`authenticator`** (Mozilla's authenticator-rs) — the *client* side of
-  CTAP (what browsers use to talk **to** tokens); useful only if rosec ever
-  mediates hardware keys, not for serving credentials.
-- **`uhid-virt`** — thin wrapper over `/dev/uhid` for frontend B's device
-  plumbing.
-
-## Code surface (phase 1)
+## Code surface
 
 - `rosec-core` — `Capability::Fido2`, `Fido2CredentialMeta`,
   `Fido2KeyMaterial`, `Provider::{list_fido2_credentials, get_fido2_key}`.
@@ -349,3 +342,7 @@ Useful crates surveyed for phase 2:
   exports, `WasmFido2CredentialMeta` wire struct) and host glue.
 - `rosec-vault/src/fido2.rs`, `rosec-bitwarden-pm`, `rosec-keepassxc-file`
   — the three storage mappings.
+- `rosec-uhid` — the privileged broker (`bin/broker.rs`), the `/dev/uhid`
+  codec and CTAPHID transport, and the CTAP2 ceremony engine (`ctap2/`).
+- `rosecd/src/fido2.rs` (registry) and `rosecd/src/fido2_ceremony.rs`
+  (`PasskeyStore`/`UserGesture` adapters and the device event loop).
