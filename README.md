@@ -105,7 +105,7 @@ Or via the CLI: `rosec totp get github`.
 
 A handful of greatest hits — the [FAQ on the docs site](https://jmylchreest.github.io/rosec/faq) has the full set.
 
-**Is this a drop-in for GNOME Keyring?** For the Secret Service API, yes. PKCS#11 and the gnome-keyring SSH agent are not implemented; if you depend on those keep gnome-keyring around alongside.
+**Is this a drop-in for GNOME Keyring?** For the Secret Service API, yes — and rosec ships its own SSH agent (serving keys from your providers), so `rosec enable` even masks gnome-keyring's SSH autostart. The one component it does not provide is the **PKCS#11** module (certificate / crypto-token storage); if you depend on that, keep gnome-keyring installed for it alone.
 
 **Does the daemon sync between machines?** No — rosec is a local daemon. Sync happens within individual providers (Bitwarden API, KeePassXC kdbx via Syncthing, etc.).
 

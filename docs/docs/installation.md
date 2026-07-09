@@ -60,6 +60,19 @@ busctl --user list | grep secrets
 
 If `gnome-keyring-daemon` keeps grabbing the bus name on login, rerun `rosec enable --force` and check the [Troubleshooting guide](./troubleshooting).
 
+## Disabling rosec
+
+To hand the Secret Service back to gnome-keyring, `rosec disable` removes the
+D-Bus activation overrides and un-hides the upstream autostart files:
+
+```bash
+rosec disable
+systemctl --user stop rosecd
+```
+
+Your providers and config are left untouched — rerun `rosec enable` to switch
+back.
+
 ## Add your first provider
 
 ```bash

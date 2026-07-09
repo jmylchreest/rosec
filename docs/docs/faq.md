@@ -8,9 +8,13 @@ sidebar_position: 99
 
 For the Secret Service API, yes. Applications using `libsecret`, `secret-tool`, or talking to `org.freedesktop.secrets` directly will work unchanged. `rosec enable` writes the systemd / D-Bus activation files needed to take over the bus name from `gnome-keyring-daemon` and masks the upstream service so it doesn't fight you on login.
 
-The PKCS#11 store and the Secrets-PIN-Entry agent that `gnome-keyring-daemon` ships are **not** implemented — if you depend on those, keep gnome-keyring around alongside.
+The one `gnome-keyring-daemon` component rosec doesn't provide is the **PKCS#11** module (certificate and crypto-token storage) — if you depend on that, keep gnome-keyring installed for it alone. Its SSH agent *is* covered: rosec ships its own (see [Where do SSH keys come from?](#where-do-ssh-keys-come-from) below), and `rosec enable` masks gnome-keyring's SSH autostart so the two don't both try to own the agent.
 
 If you have existing `~/.local/share/keyrings/*.keyring` files, the `gnome-keyring` provider mounts them read-only inside rosec so you can migrate without retyping every secret. See [Providers → GNOME Keyring](./providers/capabilities).
+
+## Can Flatpak apps use rosec?
+
+Yes. rosec implements the XDG Desktop Portal's Secret backend, so sandboxed apps get their secrets from your providers automatically — including ones originally stored by gnome-keyring or oo7. See [Flatpak app secrets](./portal).
 
 ## Why does `gnome-keyring-daemon` keep stealing the bus name back?
 

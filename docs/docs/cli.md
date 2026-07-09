@@ -68,3 +68,14 @@ Triggers a sync on all providers that declare the `Sync` capability. Providers w
 ## TOTP
 
 `rosec totp [get|add]` reads and stores time-based one-time passwords. Codes are also exposed via the FUSE mount at `$XDG_RUNTIME_DIR/rosec/totp/` and the `GetTotpCode` D-Bus method. Full reference: [TOTP](./totp).
+
+## Backup & migration (export / import)
+
+`rosec item export` writes a single item — selected by ID or a `key=value` filter — to TOML on stdout, secrets included. `rosec item import` reads that format back, into the first writable provider (or `--provider`); `--force` overwrites an item with the same attributes.
+
+```bash
+rosec item export github > github.toml     # dump one item to TOML
+rosec item import --force < github.toml     # restore it (secrets included)
+```
+
+Because export includes secret values, treat the output as sensitive.
