@@ -197,7 +197,7 @@ fn http_request_impl(
     // value drops at end of scope. Best-effort: we can't change the upstream
     // type, but we can overwrite the contents in place via zeroize.
     use zeroize::Zeroize as _;
-    for (_, v) in req.headers.iter_mut() {
+    for v in req.headers.values_mut() {
         v.zeroize();
     }
 

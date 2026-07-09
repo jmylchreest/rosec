@@ -79,7 +79,7 @@ pub async fn run(args: TotpAddArgs) -> Result<()> {
             bail!("cancelled");
         }
     } else {
-        eprintln!("Current code: {}", &*test_code);
+        eprintln!("Current code: {}", test_code.as_str());
         eprint!("Does this match? [y/N] ");
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;

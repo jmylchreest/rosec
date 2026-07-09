@@ -202,7 +202,7 @@ impl SynthSnapshot for Snapshot {
             warn!(error = %e, "TOTP code generation failed");
             Errno::EIO
         })?;
-        let content = Zeroizing::new(format!("{}\n", &*code));
+        let content = Zeroizing::new(format!("{}\n", code.as_str()));
         let bytes = content.as_bytes();
         let start = (offset as usize).min(bytes.len());
         let end = (start + size as usize).min(bytes.len());
