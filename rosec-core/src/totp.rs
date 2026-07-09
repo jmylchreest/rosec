@@ -190,7 +190,7 @@ fn decode_base32(input: &str) -> Result<Zeroizing<Vec<u8>>, TotpError> {
 
     // Re-pad to a multiple of 8 for the decoder.
     let pad_len = (8 - cleaned.len() % 8) % 8;
-    let padded = Zeroizing::new(format!("{}{}", &*cleaned, "=".repeat(pad_len)));
+    let padded = Zeroizing::new(format!("{}{}", cleaned.as_str(), "=".repeat(pad_len)));
 
     data_encoding::BASE32
         .decode(padded.as_bytes())
