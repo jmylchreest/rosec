@@ -1014,6 +1014,190 @@ pub(crate) fn fit_columns(cols: &mut [ColSpec], gap: usize, avail: usize) -> boo
     total(cols) <= avail
 }
 
+/// Render the shared provider table used by `provider list` and `status`.
+///
+/// Builds one row per live provider plus one per disabled config entry, sizes
+/// the columns to the terminal (minus `indent`), and prints the header,
+/// separator, and each row prefixed with `indent` (`""` for `provider list`,
+/// `"  "` for the indented `status` block). Returns whether any row is an
+/// experimental provider kind, so the caller can print the `*` footnote (and,
+/// for `provider list`, the CAPS legend) in its own order.
+pub(crate) fn render_provider_table(
+    providers: &[ProviderEntry],
+    disabled: &[&rosec_core::config::ProviderEntry],
+    is_experimental_kind: &dyn Fn(&str) -> bool,
+    indent: &str,
+) -> bool {
+    struct RowData {
+        id: String,
+        name: String,
+        kind: String,
+        caps: String,
+        state: String,
+        sync: String,
+    }
+
+    let now_epoch = epoch_now();
+    let mut any_experimental = false;
+    let mut kind_display = |kind: &str| -> String {
+        if is_experimental_kind(kind) {
+            any_experimental = true;
+            format!("{kind}*")
+        } else {
+            kind.to_string()
+        }
+    };
+
+    let mut rows: Vec<RowData> = providers
+        .iter()
+        .map(
+            |(id, name, kind, locked, cached, _, _, last_sync, capabilities)| {
+                let state = match (*locked, *cached) {
+                    (true, _) => "locked".to_string(),
+                    (false, true) => "unlocked (cached)".to_string(),
+                    (false, false) => "unlocked".to_string(),
+                };
+                let sync = if *locked {
+                    String::new()
+                } else {
+                    format_relative_time(*last_sync, now_epoch)
+                };
+                RowData {
+                    id: id.clone(),
+                    name: name.clone(),
+                    kind: kind_display(kind),
+                    caps: capability_codes(capabilities),
+                    state,
+                    sync,
+                }
+            },
+        )
+        .collect();
+
+    for entry in disabled {
+        rows.push(RowData {
+            id: entry.id.clone(),
+            name: entry.id.clone(),
+            kind: kind_display(&entry.kind),
+            caps: String::new(),
+            state: "disabled".to_string(),
+            sync: String::new(),
+        });
+    }
+
+    let id_w = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
+    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
+    let kind_w = rows.iter().map(|r| r.kind.len()).max().unwrap_or(4).max(4);
+    let caps_w = rows
+        .iter()
+        .map(|r| r.caps.len())
+        .max()
+        .unwrap_or(0)
+        .max("CAPS".len());
+    let state_w = rows.iter().map(|r| r.state.len()).max().unwrap_or(5).max(5);
+    let sync_w = rows.iter().map(|r| r.sync.len()).max().unwrap_or(0).max(
+        if rows.iter().any(|r| !r.sync.is_empty()) {
+            "LAST SYNC".len()
+        } else {
+            0
+        },
+    );
+
+    let has_sync_col = sync_w > 0;
+
+    // Priority: ID > NAME > KIND > CAPS > STATE > SYNC (fit to terminal).
+    let mut cols = vec![
+        ColSpec {
+            natural: id_w,
+            min: 2,
+            allocated: 0,
+        },
+        ColSpec {
+            natural: name_w,
+            min: 4,
+            allocated: 0,
+        },
+        ColSpec {
+            natural: kind_w,
+            min: 4,
+            allocated: 0,
+        },
+        ColSpec {
+            natural: caps_w,
+            min: "CAPS".len(),
+            allocated: 0,
+        },
+        ColSpec {
+            natural: state_w,
+            min: 5,
+            allocated: 0,
+        },
+    ];
+    if has_sync_col {
+        cols.push(ColSpec {
+            natural: sync_w,
+            min: "SYNC".len(),
+            allocated: 0,
+        });
+    }
+
+    fit_columns(&mut cols, 2, terminal_width().saturating_sub(indent.len()));
+    let id_w = cols[0].allocated;
+    let name_w = cols[1].allocated;
+    let kind_w = cols[2].allocated;
+    let caps_w = cols[3].allocated;
+    let state_w = cols[4].allocated;
+    let sync_w = if has_sync_col { cols[5].allocated } else { 0 };
+
+    if has_sync_col {
+        println!(
+            "{indent}{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {:<state_w$}  LAST SYNC",
+            "ID", "NAME", "KIND", "CAPS", "STATE",
+        );
+    } else {
+        println!(
+            "{indent}{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  STATE",
+            "ID", "NAME", "KIND", "CAPS",
+        );
+    }
+    let sep_w = id_w
+        + 2
+        + name_w
+        + 2
+        + kind_w
+        + 2
+        + caps_w
+        + 2
+        + state_w
+        + if has_sync_col { 2 + sync_w } else { 0 };
+    println!("{indent}{}", "\u{2500}".repeat(sep_w));
+
+    for row in &rows {
+        if has_sync_col {
+            println!(
+                "{indent}{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {:<state_w$}  {}",
+                trunc(&row.id, id_w),
+                trunc(&row.name, name_w),
+                trunc(&row.kind, kind_w),
+                trunc(&row.caps, caps_w),
+                trunc(&row.state, state_w),
+                trunc(&row.sync, sync_w),
+            );
+        } else {
+            println!(
+                "{indent}{:<id_w$}  {:<name_w$}  {:<kind_w$}  {:<caps_w$}  {}",
+                trunc(&row.id, id_w),
+                trunc(&row.name, name_w),
+                trunc(&row.kind, kind_w),
+                trunc(&row.caps, caps_w),
+                trunc(&row.state, state_w),
+            );
+        }
+    }
+
+    any_experimental
+}
+
 /// Print results as an aligned table.
 ///
 /// Columns: TYPE | PROVIDER | NAME | USERNAME | URI | ID [| PATH]

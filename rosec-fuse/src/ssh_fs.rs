@@ -26,20 +26,22 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use fuser::{
     AccessFlags, BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request,
+    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyStatfs, Request,
 };
 use rosec_ssh_agent::KeyEntry;
-use tracing::{debug, warn};
+use tracing::warn;
+use zeroize::Zeroizing;
 
 use crate::config::build_config_snippets;
 use crate::fs::ArcFs;
 use crate::naming::{normalise_host_pattern, sanitise_filename};
+use crate::tree::{self, SynthSnapshot};
 
 // Well-known inode numbers for static directories
 const INO_ROOT: u64 = 1;
@@ -258,7 +260,9 @@ impl Snapshot {
 
         snap
     }
+}
 
+impl SynthSnapshot for Snapshot {
     fn file_attr(&self, ino: u64) -> Option<FileAttr> {
         let (kind, size, nlink) = match ino {
             INO_ROOT | INO_KEYS | INO_BY_NAME | INO_BY_FINGERPRINT | INO_BY_HOST | INO_CONFIG_D => {
@@ -269,15 +273,11 @@ impl Snapshot {
                 (FileType::RegularFile, f.content.len() as u64, 1u32)
             }
         };
-        Some(make_attr(INodeNo(ino), kind, size, nlink, self.mtime))
+        Some(tree::make_attr(INodeNo(ino), kind, size, nlink, self.mtime))
     }
 
-    fn lookup_in_dir(&self, parent: u64, name: &str) -> Option<u64> {
-        self.dir_children
-            .get(&parent)?
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, ino, _)| *ino)
+    fn dir_children(&self, ino: u64) -> Option<&[(String, u64, bool)]> {
+        self.dir_children.get(&ino).map(Vec::as_slice)
     }
 
     fn is_dir(&self, ino: u64) -> bool {
@@ -292,31 +292,20 @@ impl Snapshot {
             _ => INO_ROOT,
         }
     }
-}
 
-fn make_attr(ino: INodeNo, kind: FileType, size: u64, nlink: u32, mtime: SystemTime) -> FileAttr {
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
-    FileAttr {
-        ino,
-        size,
-        blocks: size.div_ceil(512),
-        atime: mtime,
-        mtime,
-        ctime: mtime,
-        crtime: UNIX_EPOCH,
-        kind,
-        perm: if kind == FileType::Directory {
-            0o500
-        } else {
-            0o400
-        },
-        nlink,
-        uid,
-        gid,
-        rdev: 0,
-        blksize: 4096,
-        flags: 0,
+    fn contains_file(&self, ino: u64) -> bool {
+        self.files.contains_key(&ino)
+    }
+
+    fn read_file(&self, ino: u64, offset: u64, size: u32) -> Result<Zeroizing<Vec<u8>>, Errno> {
+        let f = self.files.get(&ino).ok_or(Errno::ENOENT)?;
+        let start = (offset as usize).min(f.content.len());
+        let end = (start + size as usize).min(f.content.len());
+        Ok(Zeroizing::new(f.content[start..end].to_vec()))
+    }
+
+    fn file_count(&self) -> u64 {
+        self.files.len() as u64
     }
 }
 
@@ -354,91 +343,23 @@ impl SshFuse {
 
 impl Filesystem for SshFuse {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        match snap.lookup_in_dir(parent.0, name_str) {
-            None => reply.error(Errno::ENOENT),
-            Some(ino) => match snap.file_attr(ino) {
-                None => reply.error(Errno::ENOENT),
-                Some(attr) => {
-                    debug!(parent = parent.0, name = name_str, ino, "fuse lookup");
-                    reply.entry(&Duration::from_secs(1), &attr, Generation(0));
-                }
-            },
-        }
+        tree::lookup(&self.snapshot, parent, name, reply);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        match snap.file_attr(ino.0) {
-            None => reply.error(Errno::ENOENT),
-            Some(attr) => reply.attr(&Duration::from_secs(1), &attr),
-        }
+        tree::getattr(&self.snapshot, ino, reply);
     }
 
     fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
-        // Permission checks are handled by the kernel (SessionACL::Owner
-        // restricts to our UID), so we only need to verify the inode exists.
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        match snap.file_attr(ino.0) {
-            None => reply.error(Errno::ENOENT),
-            Some(_) => reply.ok(),
-        }
+        tree::access(&self.snapshot, ino, reply);
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        // Read-only filesystem — just check the inode exists.
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        if snap.files.contains_key(&ino.0) {
-            reply.opened(FileHandle(0), FopenFlags::empty());
-        } else {
-            reply.error(Errno::ENOENT);
-        }
+        tree::open(&self.snapshot, ino, reply);
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        if snap.is_dir(ino.0) {
-            reply.opened(FileHandle(0), FopenFlags::empty());
-        } else {
-            reply.error(Errno::ENOENT);
-        }
+        tree::opendir(&self.snapshot, ino, reply);
     }
 
     fn read(
@@ -452,21 +373,7 @@ impl Filesystem for SshFuse {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        match snap.files.get(&ino.0) {
-            None => reply.error(Errno::ENOENT),
-            Some(f) => {
-                let start = (offset as usize).min(f.content.len());
-                let end = (start + size as usize).min(f.content.len());
-                reply.data(&f.content[start..end]);
-            }
-        }
+        tree::read(&self.snapshot, ino, offset, size, reply);
     }
 
     fn readdir(
@@ -475,62 +382,13 @@ impl Filesystem for SshFuse {
         ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
-        mut reply: ReplyDirectory,
+        reply: ReplyDirectory,
     ) {
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        if !snap.is_dir(ino.0) {
-            reply.error(Errno::ENOENT);
-            return;
-        }
-        let parent_ino = snap.parent_ino(ino.0);
-
-        let mut entries: Vec<(u64, FileType, String)> = vec![
-            (ino.0, FileType::Directory, ".".to_string()),
-            (parent_ino, FileType::Directory, "..".to_string()),
-        ];
-        if let Some(children) = snap.dir_children.get(&ino.0) {
-            for (name, child_ino, is_dir) in children {
-                entries.push((
-                    *child_ino,
-                    if *is_dir {
-                        FileType::Directory
-                    } else {
-                        FileType::RegularFile
-                    },
-                    name.clone(),
-                ));
-            }
-        }
-
-        for (i, (child_ino, kind, name)) in entries.iter().enumerate() {
-            if (i as u64) < offset {
-                continue;
-            }
-            if reply.add(INodeNo(*child_ino), (i + 1) as u64, *kind, name) {
-                break;
-            }
-        }
-        reply.ok();
+        tree::readdir(&self.snapshot, ino, offset, reply);
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let snap = match self.snapshot.read() {
-            Ok(g) => g,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
-        let files = snap.files.len() as u64;
-        // bsize, frsize=4096; blocks=0 (virtual); bfree/bavail=0 (read-only);
-        // files=count; ffree=0; namelen=255
-        reply.statfs(0, 0, 0, files, 0, 4096, 255, 0);
+        tree::statfs(&self.snapshot, reply);
     }
 }
 

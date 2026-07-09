@@ -27,6 +27,7 @@ pub mod naming;
 pub mod sandbox;
 pub mod ssh_fs;
 pub mod totp_fs;
+mod tree;
 
 pub use config::build_config_snippets;
 pub use ssh_fs::{MountHandle, SshFuse, mount};
