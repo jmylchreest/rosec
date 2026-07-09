@@ -76,11 +76,11 @@ SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rosec/agent.sock" ssh-add -l
 
 ## SSH Key Sources
 
-rosec discovers SSH keys from any vault item regardless of type.  Two sources are supported:
+rosec discovers SSH keys from any vault item regardless of type.  Three sources are supported:
 
 ### Native SSH Key items (type `sshkey`)
 
-Vault backends that have a first-class SSH key type (e.g. Bitwarden's native SSH Key item) expose the key directly.  rosec uses the `private_key` field for signing and derives the public key automatically.
+Vault backends that have a first-class SSH key type (e.g. Bitwarden's native SSH Key item) expose the key directly.  rosec uses the `private_key` field for signing and derives the public key automatically. To create one in your local vault, `rosec item add --type=ssh-key --generate-ssh-key` mints an ed25519 key pair and stores it.
 
 ### KeePassXC SSH Agent integration
 

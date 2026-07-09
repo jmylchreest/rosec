@@ -2,6 +2,19 @@
 
 Config file: `$XDG_CONFIG_HOME/rosec/config.toml` (default: `~/.config/rosec/config.toml`)
 
+## Editing from the CLI
+
+Read or change individual settings without opening the file — the daemon
+hot-reloads on `set`:
+
+```bash
+rosec config show                                 # print the resolved config
+rosec config get autolock.idle_timeout_minutes    # read one dotted key
+rosec config set service.refresh_interval_secs 120
+```
+
+The reference below documents every key.
+
 ---
 
 ## `[service]`

@@ -15,6 +15,7 @@ It also bundles two FUSE filesystems and an SSH agent, so secrets stored in any 
 - **Stays out of the way.** Drop-in for GNOME Keyring; `rosec enable` writes the same systemd / D-Bus activation files Keyring would, masking the upstream service.
 - **Useful without writing code.** SSH keys discovered in any provider auto-populate the bundled SSH agent; TOTP seeds appear as live files under `$XDG_RUNTIME_DIR/rosec/totp/`. PAM unlock means your master password is the same as your login.
 - **Sandboxed plugins.** Non-built-in providers (Bitwarden, KeePassXC, gnome-keyring) run as Extism WASM guests with per-file allow-listing — the daemon hosts the network/filesystem capabilities they need; the plugin can't touch anything you didn't authorise.
+- **Sandboxed apps too.** rosec implements the XDG Secret portal, so Flatpak apps retrieve their secrets from your providers — see [Flatpak app secrets](./portal).
 
 ## Status
 
