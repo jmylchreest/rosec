@@ -557,7 +557,7 @@ jobs:
             contrib/aur/PKGBUILD-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: rosec-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -605,7 +605,7 @@ jobs:
             contrib/aur/PKGBUILD-uhid-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: rosec-uhid-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -670,7 +670,7 @@ jobs:
             ${{ matrix.pkgbuild }} > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ${{ matrix.aur_name }}
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -705,7 +705,7 @@ jobs:
             contrib/aur/PKGBUILD-git > "$GITHUB_WORKSPACE/PKGBUILD-git-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: rosec-git
           pkgbuild: ${{ github.workspace }}/PKGBUILD-git-rendered
@@ -738,7 +738,7 @@ jobs:
             contrib/aur/PKGBUILD-uhid-git > "$GITHUB_WORKSPACE/PKGBUILD-uhid-git-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: rosec-uhid-git
           pkgbuild: ${{ github.workspace }}/PKGBUILD-uhid-git-rendered
