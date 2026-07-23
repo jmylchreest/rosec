@@ -235,6 +235,23 @@ pub(super) fn default_vault_path(id: &str) -> String {
         .into_owned()
 }
 
+/// Find an existing `kind = "local"` provider whose vault path resolves to
+/// the same file as `raw_path` (after `~` expansion, vault-dir resolution,
+/// and symlink canonicalization).
+///
+/// Used by `provider add`/`attach` to refuse a second entry on one vault
+/// file — concurrent writers would silently overwrite each other's saves.
+pub(super) fn find_local_path_conflict<'a>(
+    cfg: &'a rosec_core::config::Config,
+    raw_path: &str,
+) -> Option<&'a rosec_core::config::ProviderEntry> {
+    let identity = rosec_core::config::vault_path_identity(raw_path);
+    cfg.provider.iter().find(|p| {
+        p.kind == "local"
+            && rosec_core::config::vault_path_identity(p.path.as_deref().unwrap_or("")) == identity
+    })
+}
+
 /// Derive a vault ID from a file path.
 ///
 /// Takes the filename stem (e.g. `/mnt/shared/team.vault` → `team`).

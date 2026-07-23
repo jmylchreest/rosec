@@ -123,6 +123,21 @@ pub async fn run(args: ProviderAddArgs) -> Result<()> {
     if cfg_data.provider.iter().any(|p| p.id == id) {
         bail!("provider '{id}' already exists. Use --id to choose a different name.");
     }
+    if kind == "local" {
+        let path_value = options
+            .iter()
+            .find(|(k, _)| k == "path")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        if let Some(other) = super::find_local_path_conflict(&cfg_data, path_value) {
+            let state = if other.enabled { "" } else { " (disabled)" };
+            bail!(
+                "vault file {path_value} is already used by provider '{}'{state}.\n\
+                 Two providers on one vault file would overwrite each other's writes.",
+                other.id
+            );
+        }
+    }
 
     let cfg = config_path();
     config_edit::add_provider(&cfg, &id, kind, &options)?;

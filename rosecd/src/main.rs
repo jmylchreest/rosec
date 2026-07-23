@@ -1391,6 +1391,10 @@ async fn build_providers(
         return Ok(Vec::new());
     }
 
+    if let Err(msg) = rosec_core::config::check_local_vault_path_conflicts(config) {
+        anyhow::bail!("invalid provider config: {msg}");
+    }
+
     let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(config.provider.len());
 
     for entry in &config.provider {
@@ -1446,36 +1450,8 @@ async fn build_providers(
 /// The path undergoes `~` expansion and, if relative, is resolved against
 /// `$XDG_DATA_HOME/rosec/vaults/`.
 fn build_vault_provider(entry: &rosec_core::config::ProviderEntry) -> Arc<dyn Provider> {
-    let path = expand_vault_path(entry.path.as_deref().unwrap_or(""));
+    let path = rosec_core::config::resolve_vault_path(entry.path.as_deref().unwrap_or(""));
     Arc::new(rosec_vault::LocalVault::new(&entry.id, path))
-}
-
-/// Expand `~` in a vault path and resolve relative paths against the default
-/// vault directory.
-fn expand_vault_path(raw: &str) -> PathBuf {
-    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            PathBuf::from(home).join(stripped)
-        } else {
-            PathBuf::from(raw)
-        }
-    } else {
-        PathBuf::from(raw)
-    };
-
-    if expanded.is_relative() {
-        // Default vault directory: $XDG_DATA_HOME/rosec/vaults/
-        let data_dir = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                PathBuf::from(home).join(".local/share")
-            })
-            .join("rosec/vaults");
-        data_dir.join(expanded)
-    } else {
-        expanded
-    }
 }
 
 /// Compute a stable fingerprint string for a provider config entry.
@@ -1615,6 +1591,17 @@ async fn config_watcher(
                 continue;
             }
         };
+
+        // Same treatment as a parse error: an invalid provider set never
+        // reaches reconcile_providers, so the running config stays intact.
+        if let Err(msg) = rosec_core::config::check_local_vault_path_conflicts(&new_config) {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %msg,
+                "config hot-reload: invalid provider config — keeping current config"
+            );
+            continue;
+        }
 
         // Build fingerprints for the new config.
         let new_fingerprints = fingerprint_providers(&new_config);

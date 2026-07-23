@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -536,6 +537,72 @@ impl ProviderEntry {
             .unwrap_or(DEFAULT_CACHE_SYNC_MODIFIER);
         raw.clamp(f64::MIN_POSITIVE, 5.0)
     }
+}
+
+/// Resolve a `kind = "local"` vault path the way rosecd loads it: `~` is
+/// expanded against `$HOME`, then relative paths are resolved against
+/// `$XDG_DATA_HOME/rosec/vaults/`.
+///
+/// Shared between the daemon (provider construction) and the CLI
+/// (`provider add`/`attach` conflict checks) so both agree on which file a
+/// config entry denotes.
+pub fn resolve_vault_path(raw: &str) -> PathBuf {
+    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
+        match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(stripped),
+            None => PathBuf::from(raw),
+        }
+    } else {
+        PathBuf::from(raw)
+    };
+
+    if expanded.is_relative() {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("rosec/vaults")
+            .join(expanded)
+    } else {
+        expanded
+    }
+}
+
+/// Stable identity of a vault path for duplicate detection: the canonicalized
+/// path when the file exists (collapsing symlinks and `..`), the resolved
+/// path otherwise (a vault that hasn't been created yet can still conflict
+/// by spelling).
+pub fn vault_path_identity(raw: &str) -> PathBuf {
+    let resolved = resolve_vault_path(raw);
+    std::fs::canonicalize(&resolved).unwrap_or(resolved)
+}
+
+/// Reject configs where two enabled `kind = "local"` providers resolve to the
+/// same vault file.  Vault writes are atomic-rename with no file locking, so
+/// two live instances on one file silently overwrite each other's saves.
+///
+/// Disabled entries are exempt on purpose: a handover between two entries
+/// sharing a path can be staged with `enabled = false` and completed by
+/// flipping both flags in one edit (hot-reload removes the old instance
+/// before adding the new one).
+pub fn check_local_vault_path_conflicts(cfg: &Config) -> Result<(), String> {
+    let mut seen: HashMap<PathBuf, &str> = HashMap::new();
+    for entry in cfg
+        .provider
+        .iter()
+        .filter(|e| e.enabled && e.kind == "local")
+    {
+        let identity = vault_path_identity(entry.path.as_deref().unwrap_or(""));
+        if let Some(first) = seen.insert(identity.clone(), &entry.id) {
+            return Err(format!(
+                "providers '{first}' and '{}' both point at vault file {} — \
+                 concurrent writes would silently overwrite each other",
+                entry.id,
+                identity.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Default for AutoLockPolicy {
@@ -1080,6 +1147,106 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert!((cfg.provider[0].effective_cache_sync_modifier() - 5.0).abs() < f64::EPSILON);
+    }
+
+    /// Build a minimal `kind = "local"` entry for conflict-check tests.
+    fn local_entry(id: &str, path: &str, enabled: bool) -> ProviderEntry {
+        let toml_str = format!(
+            "[[provider]]\nid = \"{id}\"\nkind = \"local\"\npath = \"{path}\"\nenabled = {enabled}"
+        );
+        let cfg: Config = toml::from_str(&toml_str).unwrap();
+        cfg.provider.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn vault_path_conflict_same_absolute_path() {
+        let cfg = Config {
+            provider: vec![
+                local_entry("a", "/tmp/rosec-test-conflict/shared.vault", true),
+                local_entry("b", "/tmp/rosec-test-conflict/shared.vault", true),
+            ],
+            ..Default::default()
+        };
+        let err = check_local_vault_path_conflicts(&cfg).unwrap_err();
+        assert!(
+            err.contains("'a'"),
+            "error should name first provider: {err}"
+        );
+        assert!(
+            err.contains("'b'"),
+            "error should name second provider: {err}"
+        );
+    }
+
+    #[test]
+    fn vault_path_conflict_distinct_paths_ok() {
+        let cfg = Config {
+            provider: vec![
+                local_entry("a", "/tmp/rosec-test-conflict/a.vault", true),
+                local_entry("b", "/tmp/rosec-test-conflict/b.vault", true),
+            ],
+            ..Default::default()
+        };
+        assert!(check_local_vault_path_conflicts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn vault_path_conflict_disabled_entry_exempt() {
+        // The staged-handover case: same file, but only one entry enabled.
+        let cfg = Config {
+            provider: vec![
+                local_entry("old", "/tmp/rosec-test-conflict/shared.vault", true),
+                local_entry("new", "/tmp/rosec-test-conflict/shared.vault", false),
+            ],
+            ..Default::default()
+        };
+        assert!(check_local_vault_path_conflicts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn vault_path_conflict_ignores_non_local_kinds() {
+        // External providers may share option values freely; only `local`
+        // entries participate in the path check.
+        let mut bw = local_entry("bw", "/tmp/rosec-test-conflict/shared.vault", true);
+        bw.kind = "bitwarden-pm".to_string();
+        let cfg = Config {
+            provider: vec![
+                local_entry("a", "/tmp/rosec-test-conflict/shared.vault", true),
+                bw,
+            ],
+            ..Default::default()
+        };
+        assert!(check_local_vault_path_conflicts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn vault_path_conflict_detected_through_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.vault");
+        std::fs::write(&real, b"stub").unwrap();
+        let link = dir.path().join("alias.vault");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let cfg = Config {
+            provider: vec![
+                local_entry("a", real.to_str().unwrap(), true),
+                local_entry("b", link.to_str().unwrap(), true),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            check_local_vault_path_conflicts(&cfg).is_err(),
+            "symlinked spellings of one file should conflict"
+        );
+    }
+
+    #[test]
+    fn vault_path_identity_absolute_passthrough() {
+        // A nonexistent absolute path resolves to itself (no canonicalize).
+        assert_eq!(
+            vault_path_identity("/tmp/rosec-test-conflict/nonexistent.vault"),
+            PathBuf::from("/tmp/rosec-test-conflict/nonexistent.vault")
+        );
     }
 
     #[test]
