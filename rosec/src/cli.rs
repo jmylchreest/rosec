@@ -166,7 +166,15 @@ EXAMPLES:
     Lock,
 
     /// Unlock (triggers GUI/TTY prompt)
-    Unlock,
+    Unlock {
+        /// Prompt in `rosec-prompt` dialogs rather than on this terminal.
+        ///
+        /// Same walk as the terminal form — including registration and
+        /// second-factor rounds such as Bitwarden 2FA/TOTP — but needs no
+        /// controlling TTY, so it works from keybindings and systemd units.
+        #[arg(long)]
+        gui: bool,
+    },
 
     /// Activate rosec as the Secret Service provider
     #[command(

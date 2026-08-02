@@ -967,7 +967,9 @@ impl ServiceState {
         self: &Arc<Self>,
         prompt_path: &str,
         title: &str,
+        message: &str,
         fields_json: &[serde_json::Value],
+        caller: Option<CallerInfo>,
     ) -> Result<HashMap<String, Zeroizing<String>>, FdoError> {
         use std::io::BufRead as _;
         use std::process::Stdio;
@@ -993,7 +995,7 @@ impl ServiceState {
             ));
         }
 
-        let json = build_prompt_fields_json(title, fields_json, &prompt_cfg);
+        let json = build_prompt_fields_json(title, message, fields_json, &prompt_cfg, caller);
 
         let mut cmd = std::process::Command::new(&program);
         // SAFETY: pre_exec runs after fork() in the child process.
@@ -2211,15 +2213,23 @@ fn format_caller_info(fmt: &str, caller: &CallerInfo) -> String {
 /// selector, TOTP code) rather than the fixed single password field.
 fn build_prompt_fields_json(
     title: &str,
+    message: &str,
     fields: &[serde_json::Value],
     cfg: &PromptConfig,
+    caller: Option<CallerInfo>,
 ) -> String {
     use serde_json::{Value, json};
     let theme = serde_json::to_value(&cfg.theme).unwrap_or_default();
+    // Unattributed, a dialog summoned over D-Bus is indistinguishable from one
+    // the user started.
+    let info = caller
+        .map(|c| format_caller_info(&cfg.info_format, &c))
+        .unwrap_or_default();
     let req: Value = json!({
         "title": title,
-        "message": "",
+        "message": message,
         "hint": "",
+        "info": info,
         "provider": "",
         "confirm_label": "Submit",
         "cancel_label": "Cancel",

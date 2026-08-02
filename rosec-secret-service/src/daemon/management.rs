@@ -9,7 +9,7 @@ use zvariant::OwnedFd;
 
 use super::log_dbus_caller;
 use crate::state::ServiceState;
-use crate::unlock::{auth_provider_with_tty, unlock_with_tty};
+use crate::unlock::{CredentialSink, auth_provider_with_tty, unlock_all, unlock_with_tty};
 
 pub struct RosecManagement {
     pub(super) state: Arc<ServiceState>,
@@ -271,6 +271,48 @@ impl RosecManagement {
                 .collect()),
             Ok(Err(e)) => Err(FdoError::Failed(format!("unlock_with_tty error: {e}"))),
             Err(e) => Err(e),
+        }
+    }
+
+    /// Unlock every locked provider, prompting in `rosec-prompt` dialogs.
+    ///
+    /// Same walk and same return as `UnlockWithTty`, but needs no controlling
+    /// terminal — usable from keybindings and systemd units.
+    async fn unlock_with_prompt(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<Vec<UnlockResultEntry>, FdoError> {
+        log_dbus_caller("management", "UnlockWithPrompt", &header);
+
+        // Anything on the session bus can call this, and a dialog carries no
+        // evidence of who asked for it — so name the caller on every prompt.
+        let caller = crate::prompt::resolve_caller_info(&header, &self.state.conn()).await;
+
+        // One path for the whole walk, so CancelPrompt works as it does for
+        // the spec Prompt flow.
+        let prompt_path = self.state.allocate_prompt("");
+        let state = Arc::clone(&self.state);
+        let path_for_task = prompt_path.clone();
+        let handle = self.state.spawn_on_tokio(async move {
+            let sink = CredentialSink::prompt(path_for_task, caller);
+            unlock_all(state, &sink).await
+        });
+
+        let result = handle
+            .await
+            .map_err(|e| FdoError::Failed(format!("unlock task panicked: {e}")))?;
+        self.state.finish_prompt(&prompt_path);
+
+        match result {
+            Ok(results) => Ok(results
+                .into_iter()
+                .map(|r| UnlockResultEntry {
+                    provider_id: r.provider_id,
+                    success: r.success,
+                    message: r.message,
+                })
+                .collect()),
+            Err(e) => Err(FdoError::Failed(format!("unlock_with_prompt error: {e}"))),
         }
     }
 

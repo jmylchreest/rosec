@@ -343,13 +343,16 @@ async fn run_prompt_task(
                     format!("{provider_name} — two-factor authentication")
                 };
                 let fields_for_prompt = two_fa_fields.clone();
+                let caller_2fa = caller.clone();
 
                 let two_fa_result: Result<HashMap<String, Zeroizing<String>>, zbus::fdo::Error> =
                     match tokio::task::spawn_blocking(move || {
                         state_2fa.spawn_prompt_fields(
                             &prompt_path_2fa,
                             &title_2fa,
+                            "",
                             &fields_for_prompt,
+                            caller_2fa,
                         )
                     })
                     .await
@@ -614,7 +617,7 @@ async fn execute_deferred_delete(
 /// Uses `GetConnectionUnixProcessID` to get the PID, then reads
 /// `/proc/<pid>/comm` for the short name and `/proc/<pid>/exe` for the full
 /// path.  Returns `None` if the sender is unknown or the PID lookup fails.
-async fn resolve_caller_info(
+pub(crate) async fn resolve_caller_info(
     header: &zbus::message::Header<'_>,
     conn: &Connection,
 ) -> Option<CallerInfo> {

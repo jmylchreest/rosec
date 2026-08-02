@@ -1,11 +1,10 @@
 /// In-process credential collection and unlock logic.
 ///
-/// `rosecd` receives a TTY file descriptor from the CLI client via D-Bus
-/// fd-passing (SCM_RIGHTS).  All prompting happens here — inside the daemon
-/// process — so credentials never appear in any D-Bus message payload.
+/// Prompting happens inside the daemon — via the client's TTY fd or a
+/// `rosec-prompt` dialog — so credentials never cross D-Bus.
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use futures_util::future::join_all;
@@ -14,16 +13,168 @@ use zeroize::Zeroizing;
 
 use rosec_core::ProviderError;
 
-use crate::state::ServiceState;
+use crate::state::{CallerInfo, ServiceState};
 use crate::tty::{TtyField, collect_tty_on_fd, prompt_field_on_fd};
 
-/// Result of a single provider unlock attempt inside `unlock_with_tty`.
+/// Result of a single provider unlock attempt inside [`unlock_all`].
 #[derive(Debug)]
 pub struct UnlockResult {
     pub provider_id: String,
     pub success: bool,
     /// Human-readable status message (e.g. "unlocked", "wrong password", etc.).
     pub message: String,
+}
+
+/// Where credential prompts are rendered.  The unlock walk is the same either
+/// way — only the transport differs.
+pub enum CredentialSink {
+    Tty {
+        fd: RawFd,
+        /// Read end of a pipe; closing the write end aborts a blocking read.
+        cancel_fd: Option<RawFd>,
+    },
+    Prompt {
+        path: String,
+        /// A dialog has nowhere to put running commentary, so progress lines
+        /// accumulate here and ride along on the next prompt.
+        pending: Mutex<String>,
+        /// Anything on the session bus can ask for a dialog, so name who did.
+        caller: Option<CallerInfo>,
+    },
+}
+
+impl CredentialSink {
+    pub fn tty(fd: RawFd, cancel_fd: Option<RawFd>) -> Self {
+        Self::Tty { fd, cancel_fd }
+    }
+
+    pub fn prompt(path: String, caller: Option<CallerInfo>) -> Self {
+        Self::Prompt {
+            path,
+            pending: Mutex::new(String::new()),
+            caller,
+        }
+    }
+
+    /// Supplementary detail: printed on a TTY, shown in the dialog body.
+    fn notice(&self, s: &str) {
+        match self {
+            Self::Tty { fd, .. } => print_on_fd(*fd, s),
+            Self::Prompt { pending, .. } => {
+                if let Ok(mut buf) = pending.lock() {
+                    buf.push_str(s);
+                }
+            }
+        }
+    }
+
+    /// Text that is also passed to [`collect`](Self::collect) as its title.
+    /// Dropped on the dialog path, which would otherwise render it twice.
+    fn header(&self, s: &str) {
+        if let Self::Tty { fd, .. } = self {
+            print_on_fd(*fd, s);
+        }
+    }
+
+    /// Column-aligned on a TTY; a dialog is proportional, so padding there
+    /// only produces ragged lines.
+    fn list_item(&self, id: &str, name: &str) {
+        let unnamed = name.is_empty() || name == id;
+        match self {
+            Self::Tty { .. } if unnamed => self.notice(&format!("  {id}\n")),
+            Self::Tty { .. } => self.notice(&format!("  {id:<30}  ({name})\n")),
+            Self::Prompt { .. } if unnamed => self.notice(&format!("  {id}\n")),
+            Self::Prompt { .. } => self.notice(&format!("  {id} ({name})\n")),
+        }
+    }
+
+    /// Drops blank lines at either end, but never touches a line's indent — a
+    /// blanket `trim` eats it off the first line only, leaving a list with its
+    /// first entry hanging out to the left.
+    fn take_pending(&self) -> String {
+        let Self::Prompt { pending, .. } = self else {
+            return String::new();
+        };
+        let raw = pending
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default();
+        let lines: Vec<&str> = raw.lines().collect();
+        let first = lines.iter().position(|l| !l.trim().is_empty());
+        let last = lines.iter().rposition(|l| !l.trim().is_empty());
+        match (first, last) {
+            (Some(a), Some(b)) => lines[a..=b].join("\n"),
+            _ => String::new(),
+        }
+    }
+
+    /// `title` is the dialog heading and is ignored on a TTY, where
+    /// [`header`](Self::header) has already written it.  Pass `""` when the
+    /// field labels alone are clear enough.
+    async fn collect(
+        &self,
+        state: &Arc<ServiceState>,
+        title: &str,
+        fields: &[TtyField],
+    ) -> Result<HashMap<String, Zeroizing<String>>> {
+        match self {
+            Self::Tty { fd, cancel_fd } => collect_tty_on_fd(*fd, fields, *cancel_fd).await,
+            Self::Prompt { path, caller, .. } => {
+                let fields_json: Vec<serde_json::Value> =
+                    fields.iter().map(field_to_json).collect();
+                let message = self.take_pending();
+                let title = title.trim().to_string();
+                let state = Arc::clone(state);
+                let path = path.clone();
+                let caller = caller.clone();
+                tokio::task::spawn_blocking(move || {
+                    state.spawn_prompt_fields(&path, &title, &message, &fields_json, caller)
+                })
+                .await
+                .map_err(|e| anyhow!("prompt task panicked: {e}"))?
+                .map_err(|e| anyhow!("{e}"))
+            }
+        }
+    }
+
+    async fn prompt_field(
+        &self,
+        state: &Arc<ServiceState>,
+        label: &str,
+        placeholder: &str,
+        kind: &str,
+    ) -> Result<Zeroizing<String>> {
+        match self {
+            Self::Tty { fd, cancel_fd } => {
+                prompt_field_on_fd(*fd, label, placeholder, kind, *cancel_fd).await
+            }
+            Self::Prompt { .. } => {
+                let field = TtyField {
+                    id: "__confirm".to_string(),
+                    label: label.to_string(),
+                    kind: kind.to_string(),
+                    placeholder: placeholder.to_string(),
+                };
+                // `label` is the field's own label; the notices explain why.
+                let map = self
+                    .collect(state, "", std::slice::from_ref(&field))
+                    .await?;
+                Ok(map
+                    .get("__confirm")
+                    .cloned()
+                    .unwrap_or_else(|| Zeroizing::new(String::new())))
+            }
+        }
+    }
+}
+
+fn field_to_json(f: &TtyField) -> serde_json::Value {
+    serde_json::json!({
+        "id": f.id,
+        "label": f.label,
+        "kind": f.kind,
+        "placeholder": f.placeholder,
+    })
 }
 
 /// Build the success message for a provider unlock, reflecting whether the
@@ -46,22 +197,32 @@ async fn unlock_success_message(state: &ServiceState, provider_id: &str, suffix:
     }
 }
 
-/// Unlock all locked providers using credentials prompted on `tty_fd`.
+/// Unlock all locked providers, prompting on `tty_fd`.
+///
+/// Thin wrapper over [`unlock_all`]; see it for the walk itself.
+///
+/// `cancel_fd` is the read end of a pipe; closing the write end from outside
+/// this function will abort any in-progress blocking TTY read.  Pass `None`
+/// if cancellation is not needed.
+pub async fn unlock_with_tty(
+    state: Arc<ServiceState>,
+    tty_fd: RawFd,
+    cancel_fd: Option<RawFd>,
+) -> Result<Vec<UnlockResult>> {
+    unlock_all(state, &CredentialSink::tty(tty_fd, cancel_fd)).await
+}
+
+/// Unlock all locked providers, prompting through `sink`.
 ///
 /// Implements the opportunistic sweep: if there are multiple locked providers,
 /// prompts once and tries the same password against all of them.  Any that
 /// fail (wrong password) or require registration are handled individually
 /// afterwards.
 ///
-/// `cancel_fd` is the read end of a pipe; closing the write end from outside
-/// this function will abort any in-progress blocking TTY read.  Pass `None`
-/// if cancellation is not needed.
-///
 /// This function must be called from a Tokio task context.
-pub async fn unlock_with_tty(
+pub async fn unlock_all(
     state: Arc<ServiceState>,
-    tty_fd: RawFd,
-    cancel_fd: Option<RawFd>,
+    sink: &CredentialSink,
 ) -> Result<Vec<UnlockResult>> {
     let providers = state.providers_ordered();
     let mut locked: Vec<_> = Vec::new();
@@ -88,8 +249,7 @@ pub async fn unlock_with_tty(
         let id = provider.id().to_string();
         let fields = provider_auth_fields(provider.as_ref());
         let _password =
-            auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, &id, &fields, None, false)
-                .await?;
+            auth_provider_with_tty_inner(&state, sink, &id, &fields, None, false).await?;
         // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
@@ -106,16 +266,10 @@ pub async fn unlock_with_tty(
     }
 
     // Multiple providers — print a header listing them all, then prompt once.
-    print_on_fd(tty_fd, "\n");
-    print_on_fd(tty_fd, &format!("Unlocking {} providers:\n", locked.len()));
+    sink.notice("\n");
+    sink.header(&format!("Unlocking {} providers:\n", locked.len()));
     for b in &locked {
-        let id = b.id();
-        let name = b.name();
-        if name.is_empty() || name == id {
-            print_on_fd(tty_fd, &format!("  {id}\n"));
-        } else {
-            print_on_fd(tty_fd, &format!("  {id:<30}  ({name})\n"));
-        }
+        sink.list_item(b.id(), b.name());
     }
 
     // Use the first provider's password field descriptor as representative for
@@ -125,7 +279,13 @@ pub async fn unlock_with_tty(
         .first()
         .ok_or_else(|| anyhow!("provider returned no auth fields"))?;
 
-    let collected = collect_tty_on_fd(tty_fd, std::slice::from_ref(pw_field), cancel_fd).await?;
+    let collected = sink
+        .collect(
+            &state,
+            &format!("Unlocking {} providers", locked.len()),
+            std::slice::from_ref(pw_field),
+        )
+        .await?;
 
     // Extract the raw password value.  The collected map is keyed by the first
     // provider's field ID, but other providers may use a different field name
@@ -197,7 +357,7 @@ pub async fn unlock_with_tty(
                 need_2fa.push((id, raw_password.clone()));
             }
             Err(ProviderError::AuthFailed) => {
-                print_on_fd(tty_fd, &format!("  {id}: wrong password (skipped)\n"));
+                sink.notice(&format!("  {id}: wrong password (skipped)\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -205,7 +365,7 @@ pub async fn unlock_with_tty(
                 });
             }
             Err(ProviderError::Unavailable(ref reason)) => {
-                print_on_fd(tty_fd, &format!("  {id}: {reason}\n"));
+                sink.notice(&format!("  {id}: {reason}\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -213,12 +373,9 @@ pub async fn unlock_with_tty(
                 });
             }
             Err(ProviderError::NotFound) => {
-                print_on_fd(
-                    tty_fd,
-                    &format!(
-                        "  {id}: not available — run `rosec provider auth {id}` to initialise\n"
-                    ),
-                );
+                sink.notice(&format!(
+                    "  {id}: not available — run `rosec provider auth {id}` to initialise\n"
+                ));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -227,7 +384,7 @@ pub async fn unlock_with_tty(
             }
             Err(ProviderError::Other(ref e)) => {
                 let hint = crate::state::user_facing_hint(e);
-                print_on_fd(tty_fd, &format!("  {id}: {hint}\n"));
+                sink.notice(&format!("  {id}: {hint}\n"));
                 results.push(UnlockResult {
                     provider_id: id.clone(),
                     success: false,
@@ -255,16 +412,8 @@ pub async fn unlock_with_tty(
         // Build prefill map using this provider's own password field name.
         let mut prefill = HashMap::new();
         prefill.insert(pw_field_id, password);
-        let _password = auth_provider_with_tty_inner(
-            &state,
-            tty_fd,
-            cancel_fd,
-            &id,
-            &fields,
-            Some(prefill),
-            false,
-        )
-        .await?;
+        let _password =
+            auth_provider_with_tty_inner(&state, sink, &id, &fields, Some(prefill), false).await?;
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
@@ -286,11 +435,11 @@ pub async fn unlock_with_tty(
             (b.password_field().id.to_string(), b.name().to_string())
         };
         // Print a header so the user knows which provider needs 2FA.
-        print_on_fd(tty_fd, "\n");
+        sink.notice("\n");
         if name.is_empty() || name == id {
-            print_on_fd(tty_fd, &format!("Unlocking {id}\n"));
+            sink.notice(&format!("Unlocking {id}\n"));
         } else {
-            print_on_fd(tty_fd, &format!("Unlocking {id}  ({name})\n"));
+            sink.notice(&format!("Unlocking {id}  ({name})\n"));
         }
         let mut prefill = HashMap::new();
         prefill.insert(pw_field_id, password);
@@ -300,16 +449,8 @@ pub async fn unlock_with_tty(
                 .ok_or_else(|| anyhow!("provider '{id}' not found"))?;
             provider_auth_fields(b.as_ref())
         };
-        let _password = auth_provider_with_tty_inner(
-            &state,
-            tty_fd,
-            cancel_fd,
-            &id,
-            &fields,
-            Some(prefill),
-            false,
-        )
-        .await?;
+        let _password =
+            auth_provider_with_tty_inner(&state, sink, &id, &fields, Some(prefill), false).await?;
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
@@ -330,8 +471,7 @@ pub async fn unlock_with_tty(
             provider_auth_fields(b.as_ref())
         };
         let _password =
-            auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, &id, &fields, None, false)
-                .await?;
+            auth_provider_with_tty_inner(&state, sink, &id, &fields, None, false).await?;
         if let Err(e) = state.try_sync_provider(&id).await {
             debug!(provider = %id, "post-unlock sync failed: {e}");
         }
@@ -350,23 +490,41 @@ pub async fn unlock_with_tty(
     Ok(results)
 }
 
-/// Authenticate a single provider using credentials prompted on `tty_fd`.
+/// Authenticate a single provider, prompting on `tty_fd`.
 ///
-/// This is the `AuthProviderWithTty` D-Bus method implementation.
-/// Must be called from a Tokio task context.
+/// This is the `AuthProviderWithTty` D-Bus method implementation; a thin
+/// wrapper over [`auth_provider_via`].
 ///
 /// `cancel_fd` is the read end of a pipe; closing the write end from outside
 /// this function will abort any in-progress blocking TTY read.  Pass `None`
 /// if cancellation is not needed.
+pub async fn auth_provider_with_tty(
+    state: Arc<ServiceState>,
+    tty_fd: RawFd,
+    cancel_fd: Option<RawFd>,
+    provider_id: &str,
+    force: bool,
+) -> Result<()> {
+    auth_provider_via(
+        state,
+        &CredentialSink::tty(tty_fd, cancel_fd),
+        provider_id,
+        force,
+    )
+    .await
+}
+
+/// Authenticate a single provider, prompting through `sink`.
+///
+/// Must be called from a Tokio task context.
 ///
 /// When `force` is `true`, the normal unlock attempt is skipped and the
 /// registration flow is entered unconditionally.  This allows re-registering
 /// provider credentials (e.g. rotating a Bitwarden SM access token or
 /// re-registering a Bitwarden PM device) without deleting stored state first.
-pub async fn auth_provider_with_tty(
+pub async fn auth_provider_via(
     state: Arc<ServiceState>,
-    tty_fd: RawFd,
-    cancel_fd: Option<RawFd>,
+    sink: &CredentialSink,
     provider_id: &str,
     force: bool,
 ) -> Result<()> {
@@ -377,8 +535,7 @@ pub async fn auth_provider_with_tty(
         provider_auth_fields(b.as_ref())
     };
     let password =
-        auth_provider_with_tty_inner(&state, tty_fd, cancel_fd, provider_id, &fields, None, force)
-            .await?;
+        auth_provider_with_tty_inner(&state, sink, provider_id, &fields, None, force).await?;
     // auth_provider (called by auth_provider_with_tty_inner) already
     // called mark_provider_unlocked + touch_activity.
     // Sync immediately so on_sync_succeeded callbacks fire (e.g. SSH rebuild).
@@ -418,8 +575,7 @@ pub async fn auth_provider_with_tty(
 /// can pass it to `opportunistic_sweep` if desired.
 async fn auth_provider_with_tty_inner(
     state: &Arc<ServiceState>,
-    tty_fd: RawFd,
-    cancel_fd: Option<RawFd>,
+    sink: &CredentialSink,
     provider_id: &str,
     fields: &[TtyField],
     prefill: Option<HashMap<String, Zeroizing<String>>>,
@@ -454,36 +610,33 @@ async fn auth_provider_with_tty_inner(
         // Credentials already collected by the sweep — skip prompting.
         existing
     } else {
-        print_on_fd(tty_fd, "\n");
+        sink.notice("\n");
         let b = state
             .provider_by_id(provider_id)
             .ok_or_else(|| anyhow!("provider '{provider_id}' not found"))?;
         let name = b.name().to_string();
-        if name.is_empty() || name == provider_id {
-            if is_token_auth {
-                print_on_fd(tty_fd, &format!("Authenticating {provider_id}\n"));
-            } else {
-                print_on_fd(tty_fd, &format!("Unlocking {provider_id}\n"));
-            }
-        } else if is_token_auth {
-            print_on_fd(tty_fd, &format!("Authenticating {provider_id}  ({name})\n"));
+        let verb = if is_token_auth {
+            "Authenticating"
         } else {
-            print_on_fd(tty_fd, &format!("Unlocking {provider_id}  ({name})\n"));
-        }
+            "Unlocking"
+        };
+        let title = if name.is_empty() || name == provider_id {
+            format!("{verb} {provider_id}")
+        } else {
+            format!("{verb} {provider_id}  ({name})")
+        };
+        sink.header(&format!("{title}\n"));
 
-        collect_tty_on_fd(tty_fd, fields, cancel_fd).await?
+        sink.collect(state, &title, fields).await?
     };
 
     // If the provider requires new-password confirmation (e.g. creating a new
     // local vault where nothing is stored yet to verify against), prompt the
     // user to type the password a second time before proceeding.
     if needs_confirmation {
-        print_on_fd(tty_fd, "\n");
-        print_on_fd(
-            tty_fd,
-            "This vault does not exist yet and will be created with this password.\n",
-        );
-        print_on_fd(tty_fd, "Please confirm your password:\n\n");
+        sink.notice("\n");
+        sink.notice("This vault does not exist yet and will be created with this password.\n");
+        sink.notice("Please confirm your password:\n\n");
         for field in fields
             .iter()
             .filter(|f| f.kind == "password" || f.kind == "secret")
@@ -494,12 +647,13 @@ async fn auth_provider_with_tty_inner(
                 .unwrap_or_else(|| Zeroizing::new(String::new()));
             loop {
                 let confirm_label = format!("Confirm {}", field.label);
-                let entry =
-                    prompt_field_on_fd(tty_fd, &confirm_label, "", &field.kind, cancel_fd).await?;
+                let entry = sink
+                    .prompt_field(state, &confirm_label, "", &field.kind)
+                    .await?;
                 if entry.as_str() == original.as_str() {
                     break;
                 }
-                print_on_fd(tty_fd, "Does not match — please try again.\n\n");
+                sink.notice("Does not match — please try again.\n\n");
             }
         }
     }
@@ -539,10 +693,10 @@ async fn auth_provider_with_tty_inner(
         let chosen = if text_methods.len() == 1 {
             text_methods[0]
         } else {
-            print_on_fd(tty_fd, "\nTwo-factor authentication required.\n");
-            print_on_fd(tty_fd, "Available methods:\n");
+            sink.header("\nTwo-factor authentication required.\n");
+            sink.notice("Available methods:\n");
             for (i, m) in text_methods.iter().enumerate() {
-                print_on_fd(tty_fd, &format!("  [{}] {}\n", i + 1, m.label));
+                sink.notice(&format!("  [{}] {}\n", i + 1, m.label));
             }
             let choice_field = vec![TtyField {
                 id: "__2fa_choice".to_string(),
@@ -550,7 +704,13 @@ async fn auth_provider_with_tty_inner(
                 kind: "text".to_string(),
                 placeholder: "1".to_string(),
             }];
-            let choice_map = collect_tty_on_fd(tty_fd, &choice_field, cancel_fd).await?;
+            let choice_map = sink
+                .collect(
+                    state,
+                    &format!("{provider_id} — two-factor authentication"),
+                    &choice_field,
+                )
+                .await?;
             let choice_str = choice_map
                 .get("__2fa_choice")
                 .map(|v| v.as_str())
@@ -559,7 +719,7 @@ async fn auth_provider_with_tty_inner(
             text_methods.get(idx).copied().unwrap_or(text_methods[0])
         };
 
-        print_on_fd(tty_fd, &format!("\n{}\n", chosen.label));
+        sink.notice(&format!("\n{}\n", chosen.label));
 
         let token_field = vec![TtyField {
             id: "__2fa_token".to_string(),
@@ -567,7 +727,15 @@ async fn auth_provider_with_tty_inner(
             kind: "secret".to_string(),
             placeholder: String::new(),
         }];
-        let token_map = collect_tty_on_fd(tty_fd, &token_field, cancel_fd).await?;
+        // The chosen method's label went out through notice() just above, so on
+        // the dialog path it arrives as part of the heading.
+        let token_map = sink
+            .collect(
+                state,
+                &format!("{provider_id} — two-factor authentication"),
+                &token_field,
+            )
+            .await?;
 
         // Inject the chosen method + token into cred_map and loop back to
         // try_auth, which will resend the credentials with the 2FA fields.
@@ -592,9 +760,9 @@ async fn auth_provider_with_tty_inner(
             anyhow!("provider reported registration_required but has no registration_info")
         })?;
 
-        print_on_fd(tty_fd, "\n");
-        print_on_fd(tty_fd, &format!("{}\n", reg_info.instructions));
-        print_on_fd(tty_fd, "\n");
+        sink.notice("\n");
+        sink.notice(&format!("{}\n", reg_info.instructions));
+        sink.notice("\n");
 
         // Collect registration-specific fields (e.g. the SM access token).
         let reg_fields: Vec<TtyField> = reg_info
@@ -608,7 +776,9 @@ async fn auth_provider_with_tty_inner(
             })
             .collect();
 
-        let reg_extra = collect_tty_on_fd(tty_fd, &reg_fields, cancel_fd).await?;
+        let reg_extra = sink
+            .collect(state, &format!("{provider_id} — registration"), &reg_fields)
+            .await?;
         cred_map.extend(reg_extra);
 
         state
@@ -634,7 +804,11 @@ async fn auth_provider_with_tty_inner(
     // cred_map is dropped here; all Zeroizing<String> values are scrubbed.
     drop(cred_map);
 
-    info!(provider = %provider_id, "provider authenticated via AuthProviderWithTty");
+    let via = match sink {
+        CredentialSink::Tty { .. } => "tty",
+        CredentialSink::Prompt { .. } => "prompt",
+    };
+    info!(provider = %provider_id, via, "provider authenticated");
     Ok(password)
 }
 
