@@ -245,3 +245,81 @@ pub async fn collect_tty_on_fd(
     }
     Ok(map)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Allocate a pty pair.  `read_hidden` drives `tcgetattr`/`tcsetattr` on the
+    /// fd, which fail with ENOTTY on a pipe — only a real terminal will do.
+    fn openpty_pair() -> (RawFd, RawFd) {
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error());
+        (master, slave)
+    }
+
+    #[test]
+    fn read_hidden_reads_a_line_from_a_pty() {
+        use std::io::Write as _;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (master, slave) = openpty_pair();
+
+        // `read_hidden` installs its termios with TCSAFLUSH, which discards
+        // anything already queued.  A single write racing that setup is silently
+        // dropped and the read blocks forever, so keep offering the line until
+        // one lands after the flush.
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let r = read_hidden(slave, None);
+                done.store(true, Ordering::SeqCst);
+                r
+            })
+        };
+
+        let mut w = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(master) };
+        while !done.load(Ordering::SeqCst) {
+            let _ = writeln!(w, "hunter2");
+            let _ = w.flush();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let got = reader.join().expect("reader thread").expect("read_hidden");
+        assert_eq!(&*got, "hunter2");
+    }
+
+    /// Closing the cancel pipe's write end must unblock the read rather than
+    /// leaving the thread parked on the tty forever.
+    #[test]
+    fn read_hidden_is_cancellable() {
+        let (_master, slave) = openpty_pair();
+
+        let mut fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe failed");
+        let (cancel_r, cancel_w) = (fds[0], fds[1]);
+
+        let reader = std::thread::spawn(move || read_hidden(slave, Some(cancel_r)));
+
+        // Hang up the cancel pipe — poll() sees POLLHUP and bails out.
+        unsafe { libc::close(cancel_w) };
+
+        let err = reader
+            .join()
+            .expect("reader thread")
+            .expect_err("should be cancelled, not read");
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    }
+}
