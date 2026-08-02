@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         Commands::Totp(cmd) => totp::dispatch(cmd).await,
         Commands::Inspect(args) => inspect::run(args).await,
         Commands::Lock => lock::run().await,
-        Commands::Unlock => unlock::run().await,
+        Commands::Unlock { gui } => unlock::run(gui).await,
         Commands::Enable(args) => enable::cmd_enable(args),
         Commands::Disable(args) => enable::cmd_disable(args),
     }
