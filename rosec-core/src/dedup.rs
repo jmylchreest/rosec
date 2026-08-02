@@ -36,9 +36,16 @@ pub fn dedup(
         // identity and may differ across providers.  Two items from different
         // providers that share the same label and the same client-visible
         // attributes should be considered duplicates.
-        let mut attrs: Vec<(String, String)> = item
-            .attributes
-            .iter()
+        // Sidecar-sourced items (provider locked) carry attribute names with
+        // blank values, so deduping on those collapses distinct items sharing a
+        // label and key set — the losers vanish from `SearchItems` and libsecret
+        // clients overwrite the survivor as if no key existed.  The HMAC
+        // fingerprints stay distinct while locked, so key on those instead.
+        let source: Box<dyn Iterator<Item = (&String, &String)>> = match &item.attribute_hashes {
+            Some(hashes) => Box::new(hashes.iter()),
+            None => Box::new(item.attributes.iter()),
+        };
+        let mut attrs: Vec<(String, String)> = source
             .filter(|(k, _)| !k.starts_with("rosec:") && !k.starts_with("xdg:"))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -333,5 +340,47 @@ mod tests {
             result.items[0].provider_id, "local",
             "local item is newer and should win"
         );
+    }
+
+    /// Two "Chromium Safe Storage" items differing only by `application`
+    /// (Signal vs chromium) are indistinguishable once locked, since the
+    /// sidecar blanks attribute values.  Collapsing them loses one from
+    /// `SearchItems`, and libsecret clients then overwrite the survivor.
+    #[test]
+    fn locked_items_dedup_on_hashes_not_blank_values() {
+        let mut signal = meta("signal", "local", "Chromium Safe Storage", None);
+        signal.locked = true;
+        signal.attributes = Attributes::from([
+            ("application".to_string(), String::new()),
+            ("xdg:schema".to_string(), String::new()),
+        ]);
+        signal.attribute_hashes = Some(HashMap::from([
+            ("application".to_string(), "hash-of-Signal".to_string()),
+            ("xdg:schema".to_string(), "hash-of-schema".to_string()),
+        ]));
+
+        let mut chromium = meta("chromium", "local", "Chromium Safe Storage", None);
+        chromium.locked = true;
+        chromium.attributes = signal.attributes.clone();
+        chromium.attribute_hashes = Some(HashMap::from([
+            ("application".to_string(), "hash-of-chromium".to_string()),
+            ("xdg:schema".to_string(), "hash-of-schema".to_string()),
+        ]));
+
+        let config = DedupConfig {
+            strategy: DedupStrategy::Newest,
+            time_fallback: DedupTimeFallback::Created,
+        };
+        let map = provider_priority_map(vec!["local".into()]);
+        let result = dedup(vec![signal, chromium], config, &map);
+
+        assert_eq!(
+            result.items.len(),
+            2,
+            "locked items with distinct attribute hashes must not be collapsed"
+        );
+        let mut ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["chromium", "signal"]);
     }
 }
