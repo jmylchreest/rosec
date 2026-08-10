@@ -333,6 +333,10 @@ lint-fix:
 check:
   cargo check --workspace
 
+# Fail if any advisory accepted in .cargo/audit.toml has been fixed upstream
+audit-stale:
+  ./contrib/check-stale-audit-ignores.sh
+
 # Show current version information
 version:
   @echo "Cargo version:  {{ cargo_version }}"

@@ -4,6 +4,12 @@
 # entry must have a rationale and, where a fix exists upstream, a tracking
 # reference so it gets removed when unblocked. New advisories NOT listed here
 # will fail CI (see .github/workflows/ci.yml `audit` job).
+#
+# Entries here expire on their own: the audit workflow re-runs the audit with
+# this file out of scope and fails if any id below no longer matches the
+# lockfiles. An accepted risk that has quietly been fixed upstream is a stale
+# exemption, and stale exemptions are how the next real advisory gets waved
+# through. Run `just audit-stale` to check locally.
 
 [advisories]
 ignore = [
@@ -21,17 +27,13 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 
-    # memmap2 0.9.10 unsound (unchecked pointer offset). Pulled transitively
-    # via iced's font stack (fontdb -> cosmic-text) in rosec-prompt; iced
-    # 0.14 caps it, so we cannot advance it independently. Unsoundness, not a
-    # remotely-triggerable vuln. Remove when iced bumps memmap2.
-    "RUSTSEC-2026-0186",
-
-    # rand 0.8.5 unsound (only with a custom RNG-backed logger calling
-    # rand::rng(), which rosec does not do). Pulled transitively via
-    # num-bigint-dig; no rand-0.9 release of that crate exists. Not reachable
-    # in our usage. Remove when num-bigint-dig advances to rand 0.9.
-    "RUSTSEC-2026-0097",
+    # wasmtime 43.0.2 — stores can mix up type indices between engines. Pulled
+    # only via extism, which caps wasmtime at the 43.x major; the advisory's
+    # fixed ranges skip that line entirely, so no semver-compatible release
+    # resolves it. Requires objects to cross between distinct Engines, which
+    # rosec never does directly. Tracked in #45 — remove when extism ships a
+    # release on wasmtime >= 46.0.2.
+    "RUSTSEC-2026-0222",
 
     # --- Unmaintained, transitive -------------------------------------------
     # ttf-parser 0.25.x unmaintained. Pulled via iced's font stack
