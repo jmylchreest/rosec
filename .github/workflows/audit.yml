@@ -49,3 +49,10 @@ jobs:
               --ignore RUSTSEC-2026-0097)
             echo "::endgroup::"
           done
+
+      # An accepted advisory that has quietly been fixed upstream is a stale
+      # exemption, and stale exemptions are how the next real one gets waved
+      # through. cargo audit cannot tell us — it filters ignored advisories out
+      # of its own output — so re-run with the ignore list out of scope.
+      - name: Check for stale audit exemptions
+        run: ./contrib/check-stale-audit-ignores.sh
