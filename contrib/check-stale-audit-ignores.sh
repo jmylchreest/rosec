@@ -28,7 +28,13 @@ trap 'rm -rf "$scratch"' EXIT
 # cargo audit exits non-zero whenever it finds anything, which is the normal
 # case here — we want its report, not its verdict.
 matched() {
-  (cd "$scratch" && cargo audit --file "$1" --json 2>/dev/null || true) |
+  local report status=0
+  report=$(cd "$scratch" && cargo audit --file "$1" --json) || status=$?
+  if (( status > 1 )); then
+    echo "ERROR: cargo audit failed for $1 (exit $status)" >&2
+    return "$status"
+  fi
+  printf '%s\n' "$report" |
     python3 -c '
 import json, sys
 
@@ -50,8 +56,12 @@ def ids(node):
 
 try:
     doc = json.load(sys.stdin)
-except json.JSONDecodeError:
-    sys.exit(0)
+except json.JSONDecodeError as error:
+    print(f"ERROR: invalid cargo audit report: {error}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(doc, dict) or not isinstance(doc.get("vulnerabilities"), dict):
+    print("ERROR: cargo audit report is missing vulnerability results", file=sys.stderr)
+    sys.exit(1)
 print("\n".join(sorted(set(ids(doc)))))
 '
 }

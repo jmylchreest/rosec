@@ -21,6 +21,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Test audit exemption checker
+        run: python3 tests/test_audit_exemptions.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

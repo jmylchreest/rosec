@@ -1682,7 +1682,6 @@ pub fn get_ssh_private_key(
     }
 }
 
-
 // ═══════════════════════════════════════════════════════════════════
 // FIDO2 / passkeys
 // ═══════════════════════════════════════════════════════════════════
@@ -1737,7 +1736,10 @@ fn to_fido2_meta(
     let rp_id = cred.rp_id.clone()?;
     let guid = cred.credential_id.as_deref()?;
     let Some(raw_id) = guid_to_bytes(guid) else {
-        extism_pdk::debug!("fido2: item {} credential id is not a GUID, skipping", dc.id);
+        extism_pdk::debug!(
+            "fido2: item {} credential id is not a GUID, skipping",
+            dc.id
+        );
         return None;
     };
     cred.key_value.as_ref()?;
@@ -2230,9 +2232,7 @@ struct SignalRArgument {
 ///
 /// Returns an error if not authenticated (no access token).
 #[plugin_fn]
-pub fn get_notification_config(
-    _input: (),
-) -> FnResult<Json<protocol::NotificationConfigResponse>> {
+pub fn get_notification_config(_input: ()) -> FnResult<Json<protocol::NotificationConfigResponse>> {
     let guard = STATE.lock();
     let Some(state) = guard.as_ref() else {
         return Ok(Json(protocol::NotificationConfigResponse {
@@ -2268,9 +2268,7 @@ pub fn get_notification_config(
         Ok(resp) => {
             let status = resp.status_code();
             if !(200..300).contains(&(status as i32)) {
-                extism_pdk::warn!(
-                    "SignalR negotiate returned HTTP {status}"
-                );
+                extism_pdk::warn!("SignalR negotiate returned HTTP {status}");
                 // Non-fatal — proceed without negotiate (some Vaultwarden
                 // instances don't support it).
             }
@@ -2282,21 +2280,20 @@ pub fn get_notification_config(
     }
 
     // ── Build WebSocket URL ──────────────────────────────────────
-    let (is_secure, without_schema) =
-        if let Some(s) = notifications_url.strip_prefix("https://") {
-            (true, s)
-        } else if let Some(s) = notifications_url.strip_prefix("http://") {
-            (false, s)
-        } else {
-            return Ok(Json(protocol::NotificationConfigResponse {
-                ok: false,
-                error: Some(format!(
-                    "unsupported schema in notifications URL: {notifications_url}"
-                )),
-                error_kind: Some(protocol::ErrorKind::Other),
-                subscription: None,
-            }));
-        };
+    let (is_secure, without_schema) = if let Some(s) = notifications_url.strip_prefix("https://") {
+        (true, s)
+    } else if let Some(s) = notifications_url.strip_prefix("http://") {
+        (false, s)
+    } else {
+        return Ok(Json(protocol::NotificationConfigResponse {
+            ok: false,
+            error: Some(format!(
+                "unsupported schema in notifications URL: {notifications_url}"
+            )),
+            error_kind: Some(protocol::ErrorKind::Other),
+            subscription: None,
+        }));
+    };
 
     let (host, base_path) = match without_schema.split_once('/') {
         Some((h, p)) => (h, format!("{p}/hub")),
@@ -2375,4 +2372,3 @@ pub fn parse_notification(
 
     Ok(Json(protocol::NotificationAction { action: result }))
 }
-

@@ -23,11 +23,11 @@
 //! ```
 
 mod cipher;
+mod fido2;
 mod host_file;
 mod host_watch;
 mod protocol;
 mod ssh;
-mod fido2;
 
 use std::io::Cursor;
 use std::sync::{Mutex, MutexGuard};
@@ -647,7 +647,6 @@ pub fn get_ssh_private_key(
 }
 
 // ── Static metadata queried once at plugin load ───────────────────────────────
-
 
 #[plugin_fn]
 pub fn list_fido2_credentials(_: ()) -> FnResult<Json<Fido2CredentialListResponse>> {

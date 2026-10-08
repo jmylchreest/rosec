@@ -24,11 +24,11 @@ mod protocol;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use extism_pdk::*;
 use zeroize::Zeroizing;
 
-use crate::api::{fetch_secrets, login, AccessToken, DecryptedSecret, SmUrls};
+use crate::api::{AccessToken, DecryptedSecret, SmUrls, fetch_secrets, login};
 use crate::error::SmError;
 use crate::protocol::*;
 

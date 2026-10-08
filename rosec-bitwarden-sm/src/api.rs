@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -521,10 +521,12 @@ mod tests {
 
     #[test]
     fn parse_access_token_wrong_version() {
-        assert!(AccessToken::parse(
-            "1.ec2c1d46-6a4b-4751-a310-af9601317f2d.secret:X8vbvA0bduihIDe/qrzIQQ=="
-        )
-        .is_err());
+        assert!(
+            AccessToken::parse(
+                "1.ec2c1d46-6a4b-4751-a310-af9601317f2d.secret:X8vbvA0bduihIDe/qrzIQQ=="
+            )
+            .is_err()
+        );
     }
 
     #[test]

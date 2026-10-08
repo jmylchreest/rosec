@@ -36,11 +36,11 @@ mod protocol;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use extism_pdk::*;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::keyring::{parse_keyring_file, AttributeValue, ParsedKeyring};
+use crate::keyring::{AttributeValue, ParsedKeyring, parse_keyring_file};
 use crate::protocol::*;
 
 // ── Global state ──────────────────────────────────────────────────────────────

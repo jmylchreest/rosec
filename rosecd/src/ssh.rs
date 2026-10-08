@@ -430,7 +430,7 @@ pub fn build_confirm_callback(
             }
 
             let request_json = serde_json::json!({
-                "title": format!("SSH sign request"),
+                "title": "SSH sign request",
                 "message": format!("Allow key \u{201c}{item_name}\u{201d} ({fingerprint}) to sign?"),
                 "hint": "",
                 "provider": "",

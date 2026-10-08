@@ -9,8 +9,8 @@
 //! - `decrypt_field_opt`: decrypt an optional EncString field → `String`
 //! - `hkdf_expand_sha256`: low-level HKDF-Expand
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};

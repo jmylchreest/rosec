@@ -135,4 +135,3 @@ pub(crate) fn resolve_fido2_key(
             )
         })
 }
-
