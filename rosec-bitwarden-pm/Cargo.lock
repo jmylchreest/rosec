@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-bitwarden-pm"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "aes",
  "argon2",
