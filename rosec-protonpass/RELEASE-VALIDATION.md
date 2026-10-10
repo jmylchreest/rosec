@@ -51,7 +51,7 @@ Final synthetic benchmark: 1,000 items, 1,000 lookups, p50 **30.509 microseconds
 p95 **51.889 microseconds**, full sync **69 ms**, **12 HTTP requests**. This is a
 local fixture measurement, not a live-network throughput promise.
 
-The local release gates are complete. The plugin is no longer marked experimental.
+The local release gates are complete. The plugin remains marked experimental.
 No release/tag/AUR upload has been published. Release-key signing and GitHub/AUR
 execution remain deployment steps, and were not simulated with real release keys.
 

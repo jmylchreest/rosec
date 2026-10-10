@@ -1,5 +1,7 @@
 # Proton Pass
 
+**Experimental provider.**
+
 The `protonpass` WASM provider reads a Proton Pass vault directly through Proton's
 API using a personal access token (PAT). It does not invoke the Proton CLI at
 runtime. The plugin is read-only and separately distributed under GPL-3.0-or-later.

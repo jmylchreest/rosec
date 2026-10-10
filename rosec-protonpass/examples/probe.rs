@@ -328,7 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let descriptor = call(&mut p, "plugin_manifest", Value::Null)?;
     assert_eq!(descriptor["kind"], "protonpass");
-    assert_eq!(descriptor["experimental"], false);
+    assert_eq!(descriptor["experimental"], true);
     assert_eq!(
         call(&mut p, "auth_fields", Value::Null)?["fields"],
         json!([])

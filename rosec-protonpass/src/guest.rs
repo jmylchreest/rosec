@@ -778,7 +778,7 @@ pub fn change_password(_: Json<Value>) -> FnResult<Json<Value>> {
 #[plugin_fn]
 pub fn plugin_manifest(_: String) -> FnResult<Json<Value>> {
     Ok(Json(
-        json!({"kind":"protonpass","name":"Proton Pass","description":"Read-only Proton Pass provider","version":env!("CARGO_PKG_VERSION"),"default_allowed_hosts":["pass-api.proton.me"],"required_options":[],"optional_options":[],"experimental":false}),
+        json!({"kind":"protonpass","name":"Proton Pass","description":"Experimental read-only Proton Pass provider","version":env!("CARGO_PKG_VERSION"),"default_allowed_hosts":["pass-api.proton.me"],"required_options":[],"optional_options":[],"experimental":true}),
     ))
 }
 #[plugin_fn]
