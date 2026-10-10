@@ -9,7 +9,7 @@
 //!
 //! **EXPERIMENTAL.** Marked via `PluginManifest.experimental = true`.
 //! Read-only: unlock decrypts via `keepass-rs`, but the plugin never writes
-//! back to the .kdbx file.  Capabilities advertised: `Sync` only.
+//! back to the .kdbx file. Supports sync, SSH keys, passkeys, and TOTP.
 //!
 //! # Configuration
 //!
@@ -712,7 +712,7 @@ pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     // Phase 1: read-only, sync via mtime polling.
     // Ssh: SSH key extraction from KeeAgent.settings + binary attachments.
     Ok(Json(CapabilitiesResponse {
-        capabilities: vec!["Sync".into(), "Ssh".into(), "Fido2".into()],
+        capabilities: vec!["Sync".into(), "Ssh".into(), "Fido2".into(), "Totp".into()],
     }))
 }
 

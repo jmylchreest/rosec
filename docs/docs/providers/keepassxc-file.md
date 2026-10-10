@@ -32,6 +32,10 @@ Set up TOTP on a KeePassXC entry the normal way:
 
 The plugin reads the TOTP from KeePassXC's standard `otp` field via `entry.get_raw_otp_value()`. No custom field is needed.
 
+SHA1, SHA256, SHA512, custom digit counts and periods, and KeePassXC's
+Steam Guard (`encoder=steam`) format are supported. The seed remains a
+secret even if the `otp` field is stored unprotected in the database.
+
 After save:
 
 ```bash
