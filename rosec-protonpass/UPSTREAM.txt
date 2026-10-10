@@ -29,7 +29,8 @@ Commit: 7ae51e52818bca8df905988e4b149d43d31d4c83
 Adapted into src/lib.rs:
   pass/src/constants.rs (item content format version 7)
   pass/src/auth/personal_access_token.rs (PAT parser)
-  Changes: zeroizing token, strict 32-byte key check, generic redacted errors.
+  Changes: zeroizing token, bounded PAT length, strict 32-byte key check,
+  generic redacted errors.
 
 Adapted into src/crypto.rs:
   pass/src/domain/crypto.rs (AES-GCM decrypt and AAD constants)
@@ -44,7 +45,9 @@ Adapted protocol handling in src/guest.rs:
   pass/src/item/list.rs
   pass/src/item/open.rs
   Changes: synchronous Extism transport, read-only bounded full sync, only direct
-  vault shares/root items, no native/browser runtime or muon dependency, no debug
+  vault shares/root items, indexed bounded snapshots and guarded session JSON,
+  HTTP-buffer wiping, fail-closed authentication and test-only loopback HTTP,
+  no native/browser runtime or muon dependency, no debug
   logging of API bodies. Unsupported data fails explicitly. See README.txt.
 
 All test credentials, keys and item contents are newly authored synthetic data.

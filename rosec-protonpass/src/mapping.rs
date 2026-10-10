@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::sensitive::SensitiveItem;
 use crate::upstream::item_v1;
 use protobuf::Message;
 use std::collections::BTreeMap;
@@ -10,14 +11,18 @@ pub struct Entry {
     pub secrets: BTreeMap<String, Zeroizing<String>>,
 }
 pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
-    let mut item = item_v1::Item::parse_from_bytes(bytes).map_err(|_| "Invalid item protobuf")?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("Item content too large");
+    }
+    let mut item =
+        SensitiveItem(item_v1::Item::parse_from_bytes(bytes).map_err(|_| "Invalid item protobuf")?);
     let mut e = Entry {
         id,
         label: String::new(),
         public: BTreeMap::new(),
         secrets: BTreeMap::new(),
     };
-    if let Some(mut metadata) = item.metadata.take() {
+    if let Some(metadata) = item.metadata.as_mut() {
         e.label = std::mem::take(&mut metadata.name);
         e.secrets.insert(
             "notes".into(),
@@ -27,7 +32,7 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
     let content = item
         .content
         .as_mut()
-        .and_then(|c| c.content.take())
+        .and_then(|c| c.content.as_mut())
         .ok_or("Missing item content")?;
     macro_rules! secret_fields {
         ($e:ident, $item:ident, $($field:ident),+) => { $(
@@ -35,7 +40,7 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
         )+ };
     }
     match content {
-        item_v1::content::Content::Login(mut login) => {
+        item_v1::content::Content::Login(login) => {
             e.public.insert("rosec:type".into(), "login".into());
             e.public
                 .insert("username".into(), std::mem::take(&mut login.item_username));
@@ -64,7 +69,7 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
         item_v1::content::Content::Note(_) => {
             e.public.insert("rosec:type".into(), "note".into());
         }
-        item_v1::content::Content::SshKey(mut ssh) => {
+        item_v1::content::Content::SshKey(ssh) => {
             e.public.insert("rosec:type".into(), "ssh-key".into());
             e.public
                 .insert("public_key".into(), std::mem::take(&mut ssh.public_key));
@@ -72,13 +77,13 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
                 "private_key".into(),
                 Zeroizing::new(std::mem::take(&mut ssh.private_key)),
             );
-            map_sections(&mut e, ssh.sections)?;
+            map_sections(&mut e, &mut ssh.sections)?;
         }
         item_v1::content::Content::Alias(_) => {
             e.public.insert("rosec:type".into(), "generic".into());
             e.public.insert("proton_type".into(), "alias".into());
         }
-        item_v1::content::Content::CreditCard(mut card) => {
+        item_v1::content::Content::CreditCard(card) => {
             e.public.insert("rosec:type".into(), "card".into());
             secret_fields!(
                 e,
@@ -94,7 +99,7 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
                 format!("{:?}", card.card_type.enum_value_or_default()),
             );
         }
-        item_v1::content::Content::Identity(mut identity) => {
+        item_v1::content::Content::Identity(identity) => {
             e.public.insert("rosec:type".into(), "identity".into());
             secret_fields!(
                 e,
@@ -133,16 +138,16 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
                 work_email
             );
             for fields in [
-                identity.extra_personal_details,
-                identity.extra_address_details,
-                identity.extra_contact_details,
-                identity.extra_work_details,
+                &mut identity.extra_personal_details,
+                &mut identity.extra_address_details,
+                &mut identity.extra_contact_details,
+                &mut identity.extra_work_details,
             ] {
                 map_fields(&mut e, "custom", fields)?;
             }
-            map_sections(&mut e, identity.extra_sections)?;
+            map_sections(&mut e, &mut identity.extra_sections)?;
         }
-        item_v1::content::Content::Wifi(mut wifi) => {
+        item_v1::content::Content::Wifi(wifi) => {
             e.public.insert("rosec:type".into(), "generic".into());
             e.public.insert("proton_type".into(), "wifi".into());
             e.public
@@ -152,24 +157,27 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
                 format!("{:?}", wifi.security.enum_value_or_default()),
             );
             secret_fields!(e, wifi, password);
-            map_sections(&mut e, wifi.sections)?;
+            map_sections(&mut e, &mut wifi.sections)?;
         }
         item_v1::content::Content::Custom(custom) => {
             e.public.insert("rosec:type".into(), "generic".into());
             e.public.insert("proton_type".into(), "custom".into());
-            map_sections(&mut e, custom.sections)?;
+            map_sections(&mut e, &mut custom.sections)?;
         }
     }
-    map_fields(&mut e, "custom", item.extra_fields)?;
+    map_fields(&mut e, "custom", &mut item.extra_fields)?;
     Ok(e)
 }
 
-fn map_sections(e: &mut Entry, sections: Vec<item_v1::CustomSection>) -> Result<(), &'static str> {
+fn map_sections(
+    e: &mut Entry,
+    sections: &mut [item_v1::CustomSection],
+) -> Result<(), &'static str> {
     for section in sections {
         map_fields(
             e,
             &format!("custom.{}", section.section_name),
-            section.section_fields,
+            &mut section.section_fields,
         )?;
     }
     Ok(())
@@ -177,15 +185,15 @@ fn map_sections(e: &mut Entry, sections: Vec<item_v1::CustomSection>) -> Result<
 fn map_fields(
     e: &mut Entry,
     prefix: &str,
-    fields: Vec<item_v1::ExtraField>,
+    fields: &mut [item_v1::ExtraField],
 ) -> Result<(), &'static str> {
     use item_v1::extra_field::Content;
     for field in fields {
         let name = format!("{prefix}.{}", field.field_name);
-        let value = match field.content {
-            Some(Content::Text(mut v)) => std::mem::take(&mut v.content),
-            Some(Content::Hidden(mut v)) => std::mem::take(&mut v.content),
-            Some(Content::Totp(mut v)) => std::mem::take(&mut v.totp_uri),
+        let value = match field.content.as_mut() {
+            Some(Content::Text(v)) => std::mem::take(&mut v.content),
+            Some(Content::Hidden(v)) => std::mem::take(&mut v.content),
+            Some(Content::Totp(v)) => std::mem::take(&mut v.totp_uri),
             Some(Content::Timestamp(v)) => v
                 .timestamp
                 .as_ref()

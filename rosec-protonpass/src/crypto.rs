@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Proton AG
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from pass-cli 2.4.2 pass/src/domain/crypto.rs (see UPSTREAM.md).
+// Adapted from pass-cli 2.4.2 pass/src/domain/crypto.rs (see UPSTREAM.txt).
 // Uses aes-gcm 0.10, fixed AAD slices, checked lengths and zeroizing output.
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,

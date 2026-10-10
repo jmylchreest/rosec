@@ -1,0 +1,11 @@
+schema_version = 1
+kind = "protonpass"
+name = "Proton Pass (experimental)"
+
+# This plugin requires no filesystem preopens or host file access.
+[network]
+allowed_hosts = ["pass-api.proton.me"]
+
+[options]
+required = []
+optional = []

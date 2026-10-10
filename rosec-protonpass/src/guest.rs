@@ -1,10 +1,11 @@
 // Copyright (c) 2026 Proton AG (adapted protocol handling)
 // SPDX-License-Identifier: GPL-3.0-or-later
-// REST envelope and PAT flow adapted from Proton pass-cli 2.4.2; see UPSTREAM.md.
+// REST envelope and PAT flow adapted from Proton pass-cli 2.4.2; see UPSTREAM.txt.
 use crate::{
     crypto,
     mapping::{Entry, map_item},
     parse_pat,
+    sensitive::SensitiveJson,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use extism_pdk::*;
@@ -16,7 +17,7 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 struct State {
     api: String,
     session: Option<Session>,
-    items: Vec<Entry>,
+    items: BTreeMap<String, Entry>,
 }
 struct Session {
     uid: Zeroizing<String>,
@@ -24,6 +25,23 @@ struct Session {
     key: Zeroizing<Vec<u8>>,
 }
 
+// HTTP session replies contain bearer tokens even when later validation fails.
+struct WipedResponse(ManagedMemory);
+impl Drop for WipedResponse {
+    fn drop(&mut self) {
+        let zeros = [0u8; 4096];
+        for start in (0..self.0.len()).step_by(zeros.len()) {
+            let len = (self.0.len() - start).min(zeros.len());
+            extism_pdk::memory::internal::store(
+                MemoryHandle {
+                    offset: self.0.offset() + start as u64,
+                    length: len as u64,
+                },
+                &zeros[..len],
+            );
+        }
+    }
+}
 fn fail(kind: &str, message: &str) -> Json<Value> {
     Json(json!({"ok":false,"error_kind":kind,"error":message}))
 }
@@ -32,7 +50,7 @@ fn request(
     method: &str,
     path: &str,
     body: Option<&[u8]>,
-) -> Result<Value, &'static str> {
+) -> Result<SensitiveJson, &'static str> {
     let mut req = HttpRequest::new(format!("{}{path}", s.api))
         .with_method(method)
         .with_header("Content-Type", "application/json")
@@ -48,17 +66,21 @@ fn request(
     }
     let response = http::request::<&[u8]>(&req, body).map_err(|_| "HTTP transport failed")?;
     let code = response.status_code();
+    let memory = WipedResponse(ManagedMemory::new(response.into_memory()));
     if code == 401 || code == 403 {
         return Err("Proton authorization rejected");
     }
     if !(200..300).contains(&code) {
         return Err("Proton HTTP request failed");
     }
-    let bytes = Zeroizing::new(response.body());
-    if bytes.len() > 16 * 1024 * 1024 {
+    // Check the host response allocation before making a second guest copy.
+    if memory.0.len() > 8 * 1024 * 1024 {
         return Err("Response too large");
     }
-    serde_json::from_slice(&bytes).map_err(|_| "Invalid API response")
+    let bytes = Zeroizing::new(memory.0.0.to_vec());
+    serde_json::from_slice(&bytes)
+        .map(SensitiveJson)
+        .map_err(|_| "Invalid API response")
 }
 fn field<'a>(v: &'a Value, name: &str) -> Result<&'a str, &'static str> {
     v.get(name)
@@ -71,22 +93,33 @@ fn array<'a>(v: &'a Value, name: &str) -> Result<&'a Vec<Value>, &'static str> {
         .ok_or("Missing API array")
 }
 fn decode(v: &str) -> Result<Vec<u8>, &'static str> {
+    if v.len() > 2 * 1024 * 1024 {
+        return Err("Encrypted field too large");
+    }
     STANDARD
         .decode(v)
         .map_err(|_| "Invalid ciphertext encoding")
 }
 fn take_secret(v: &mut Value, name: &str) -> Result<Zeroizing<String>, &'static str> {
-    match v[name].take() {
-        Value::String(s) => Ok(Zeroizing::new(s)),
+    if !v.get(name).is_some_and(Value::is_string) {
+        return Err("Missing session field");
+    }
+    match v.get_mut(name).map(Value::take) {
+        Some(Value::String(s)) => Ok(Zeroizing::new(s)),
         _ => Err("Missing session field"),
     }
 }
 
-fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
+fn fetch_items(s: &State) -> Result<BTreeMap<String, Entry>, &'static str> {
     let session = s.session.as_ref().ok_or("locked")?;
     let shares = request(s, "GET", "/pass/v1/share", None)?;
-    let mut result = Vec::new();
-    for share in array(&shares, "Shares")? {
+    let mut result = BTreeMap::new();
+    let shares = array(&shares, "Shares")?;
+    if shares.len() > 32 {
+        return Err("Too many shares");
+    }
+    let mut total_bytes = 0usize;
+    for share in shares {
         if share["TargetType"].as_u64() != Some(1) || !share["GroupID"].is_null() {
             return Err("Only direct vault shares supported in spike");
         }
@@ -101,6 +134,9 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                 None,
             )?;
             let rows = array(&response["ShareKeys"], "Keys")?;
+            if rows.len() > 100 || keys.len() + rows.len() > 128 {
+                return Err("Too many share keys");
+            }
             for row in rows {
                 let rotation = row["KeyRotation"].as_u64().ok_or("Missing key rotation")?;
                 let key = crypto::decrypt(
@@ -108,7 +144,12 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                     &session.key,
                     crypto::SHARE_KEY,
                 )?;
-                keys.insert(rotation, key);
+                if key.len() != 32 {
+                    return Err("Invalid share key length");
+                }
+                if keys.insert(rotation, key).is_some() {
+                    return Err("Duplicate key rotation");
+                }
             }
             if rows.len() < 100 {
                 break;
@@ -131,6 +172,9 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                 None,
             )?;
             let rows = array(&response["Items"], "RevisionsData")?;
+            if rows.len() > 100 {
+                return Err("Item page too large");
+            }
             for row in rows {
                 if row["State"].as_u64() != Some(1) {
                     continue;
@@ -146,11 +190,20 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                 let key = keys.get(&rotation).ok_or("Missing share key")?;
                 let item_key =
                     crypto::decrypt(&decode(field(row, "ItemKey")?)?, key, crypto::ITEM_KEY)?;
+                if result.len() >= 10_000 {
+                    return Err("Too many items");
+                }
                 let content = crypto::decrypt(
                     &decode(field(row, "Content")?)?,
                     &item_key,
                     crypto::ITEM_CONTENT,
                 )?;
+                total_bytes = total_bytes
+                    .checked_add(content.len())
+                    .ok_or("Vault too large")?;
+                if total_bytes > 32 * 1024 * 1024 {
+                    return Err("Vault too large");
+                }
                 let mut entry = map_item(format!("{sid}/{}", field(row, "ItemID")?), &content)?;
                 if entry
                     .public
@@ -160,7 +213,9 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                 {
                     entry.public.insert("email".into(), email.into());
                 }
-                result.push(entry);
+                if result.insert(entry.id.to_owned(), entry).is_some() {
+                    return Err("Duplicate item ID");
+                }
             }
             let next = response["Items"]["LastToken"].as_str().unwrap_or_default();
             if next.is_empty() {
@@ -177,19 +232,20 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
 
 #[plugin_fn]
 pub fn init(Json(v): Json<Value>) -> FnResult<Json<Value>> {
+    *STATE.lock().map_err(|_| Error::msg("State unavailable"))? = None;
     // Configurable only for the loopback harness. The host must separately allowlist HTTP.
     let api = v["options"]["api_url"]
         .as_str()
         .unwrap_or("https://pass-api.proton.me")
         .trim_end_matches('/')
         .to_owned();
-    if api != "https://pass-api.proton.me" && !api.starts_with("http://127.0.0.1:") {
+    if !crate::valid_api_endpoint(&api) {
         return Ok(fail("invalid_input", "Unsupported API endpoint"));
     }
     *STATE.lock().map_err(|_| Error::msg("State unavailable"))? = Some(State {
         api,
         session: None,
-        items: Vec::new(),
+        items: BTreeMap::new(),
     });
     Ok(Json(json!({"ok":true})))
 }
@@ -205,30 +261,47 @@ pub fn status(_: ()) -> FnResult<Json<Value>> {
     ))
 }
 #[plugin_fn]
-pub fn unlock(Json(mut input): Json<Value>) -> FnResult<Json<Value>> {
+pub fn unlock(Json(input): Json<Value>) -> FnResult<Json<Value>> {
+    let mut input = SensitiveJson(input);
+    let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
+    let Some(s) = guard.as_mut() else {
+        return Ok(fail("invalid_input", "Not initialized"));
+    };
+    // Every re-authentication attempt invalidates the previous snapshot first.
+    s.session = None;
+    s.items.clear();
     // The daemon currently routes additional interactive auth fields through
     // WithRegistration; the direct harness uses WithAuth. Accept both envelopes.
     let token = if input["auth_fields"]["personal_access_token"].is_string() {
-        take_secret(&mut input["auth_fields"], "personal_access_token")
+        take_secret(
+            input
+                .get_mut("auth_fields")
+                .ok_or_else(|| Error::msg("Invalid auth envelope"))?,
+            "personal_access_token",
+        )
     } else {
-        take_secret(&mut input["registration_fields"], "personal_access_token")
+        input
+            .get_mut("registration_fields")
+            .ok_or("Missing auth fields")
+            .and_then(|v| take_secret(v, "personal_access_token"))
     };
     let password = take_secret(&mut input, "password");
     if !password.as_ref().is_ok_and(|p| !p.is_empty()) {
         return Ok(fail("auth_failed", "Local passphrase required"));
     }
-    let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
-    let Some(s) = guard.as_mut() else {
-        return Ok(fail("invalid_input", "Not initialized"));
-    };
-    s.session = None;
-    s.items.clear();
     let result = (|| {
         let raw = token?;
         let (token, key) = parse_pat(&raw)?;
+        #[derive(serde::Serialize)]
+        struct TokenBody<'a> {
+            #[serde(rename = "Token")]
+            token: &'a str,
+        }
         let body = Zeroizing::new(
-            serde_json::to_vec(&json!({"Token":token.as_str()}))
-                .map_err(|_| "Invalid login request")?,
+            serde_json::to_vec(&TokenBody {
+                token: token.as_str(),
+            })
+            .map_err(|_| "Invalid login request")?,
         );
         let mut response = request(
             s,
@@ -236,9 +309,18 @@ pub fn unlock(Json(mut input): Json<Value>) -> FnResult<Json<Value>> {
             "/account/v4/personal-access-token/session",
             Some(&body),
         )?;
-        let uid = take_secret(&mut response["Session"], "SessionUID")?;
-        let access = take_secret(&mut response["Session"], "AccessToken")?;
-        let _refresh = take_secret(&mut response["Session"], "RefreshToken")?;
+        let uid = take_secret(
+            response.get_mut("Session").ok_or("Missing session")?,
+            "SessionUID",
+        )?;
+        let access = take_secret(
+            response.get_mut("Session").ok_or("Missing session")?,
+            "AccessToken",
+        )?;
+        let _refresh = take_secret(
+            response.get_mut("Session").ok_or("Missing session")?,
+            "RefreshToken",
+        )?;
         s.session = Some(Session { uid, access, key });
         s.items = fetch_items(s)?;
         Ok::<(), &'static str>(())
@@ -297,7 +379,7 @@ fn search_impl(v: Value) -> FnResult<Json<Value>> {
     };
     let items: Vec<_> = s
         .items
-        .iter()
+        .values()
         .filter(|e| {
             v["attributes"].as_object().is_none_or(|a| {
                 a.iter()
@@ -314,11 +396,7 @@ pub fn get_item_attributes(Json(v): Json<Value>) -> FnResult<Json<Value>> {
     let Some(s) = guard.as_ref().filter(|s| s.session.is_some()) else {
         return Ok(fail("locked", "locked"));
     };
-    match s
-        .items
-        .iter()
-        .find(|e| Some(e.id.as_str()) == v["id"].as_str())
-    {
+    match v["id"].as_str().and_then(|id| s.items.get(id)) {
         Some(e) => Ok(Json(
             json!({"ok":true,"public":e.public,"secret_names":e.secrets.keys().collect::<Vec<_>>()}),
         )),
@@ -331,10 +409,9 @@ pub fn get_secret_attr(Json(v): Json<Value>) -> FnResult<Json<Value>> {
     let Some(s) = guard.as_ref().filter(|s| s.session.is_some()) else {
         return Ok(fail("locked", "locked"));
     };
-    let secret = s
-        .items
-        .iter()
-        .find(|e| Some(e.id.as_str()) == v["id"].as_str())
+    let secret = v["id"]
+        .as_str()
+        .and_then(|id| s.items.get(id))
         .and_then(|e| e.secrets.get(v["attr"].as_str().unwrap_or_default()));
     match secret {
         Some(secret) => Ok(Json(

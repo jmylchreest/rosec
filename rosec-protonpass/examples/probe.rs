@@ -64,7 +64,37 @@ fn fixture(updated: bool) -> Value {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|a| a == "--check-production") {
+        let wasm = std::env::var("PROTONPASS_WASM")
+            .map_err(|_| "PROTONPASS_WASM must point to a build without test-http")?;
+        let mut plugin = Plugin::new(
+            Manifest::new([Wasm::file(wasm)]).with_timeout(Duration::from_secs(5)),
+            [],
+            true,
+        )?;
+        for endpoint in [
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:80@evil.invalid",
+            "https://evil.invalid",
+        ] {
+            assert_eq!(
+                call(&mut plugin, "init", json!({"options":{"api_url":endpoint}}))?["ok"],
+                false
+            );
+            assert_eq!(call(&mut plugin, "status", Value::Null)?["locked"], true);
+        }
+        assert_eq!(
+            call(&mut plugin, "init", json!({"options":{}}))?["ok"],
+            true
+        );
+        println!("PASS: production WASM rejects test/foreign endpoints; no HTTP requests made");
+        return Ok(());
+    }
+    let bench = std::env::args().any(|a| a == "--bench");
     let live = std::env::args().any(|a| a == "--live");
+    if bench && live {
+        return Err("Benchmarks must use synthetic data".into());
+    }
     let check_fixture = std::env::args().any(|a| a == "--check-fixture");
     let mode = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -128,14 +158,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (status, body) = if path == "/account/v4/personal-access-token/session" {
                     (
                         200,
-                        json!({"Session":{"SessionUID":"synthetic-uid","AccessToken":"synthetic-access","RefreshToken":"synthetic-refresh"}}),
+                        if current == 8 {
+                            json!({"Session":[]})
+                        } else {
+                            json!({"Session":{"SessionUID":"synthetic-uid","AccessToken":"synthetic-access","RefreshToken":"synthetic-refresh"}})
+                        },
                     )
                 } else if current == 2 {
                     (401, json!({"Error":"synthetic revocation"}))
                 } else if path == "/pass/v1/share" {
                     (
                         200,
-                        json!({"Shares":[{"ShareID":"share1","TargetType":1,"GroupID":null}]}),
+                        json!({"Shares":vec![json!({"ShareID":"share1","TargetType":1,"GroupID":null}); if current==7 {33} else {1}]}),
                     )
                 } else if path.starts_with("/pass/v1/share/share1/key?") {
                     (
@@ -147,10 +181,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if current == 1 {
                         item["Content"] = json!(STANDARD.encode([0; 64]));
                     }
-                    let items = if current == 4 { Vec::new() } else { vec![item] };
+                    let start = path
+                        .split("Since=")
+                        .nth(1)
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let items = if current == 4 {
+                        Vec::new()
+                    } else if bench {
+                        (start..start + 100)
+                            .map(|n| {
+                                let mut row = item.clone();
+                                row["ItemID"] = json!(format!("item{n:05}"));
+                                row
+                            })
+                            .collect()
+                    } else if current == 5 {
+                        vec![item.clone(), item]
+                    } else if current == 6 {
+                        vec![item; 101]
+                    } else {
+                        vec![item]
+                    };
+                    let next = if bench && start + 100 < 1000 {
+                        Some((start + 100).to_string())
+                    } else {
+                        None
+                    };
                     (
                         200,
-                        json!({"Items":{"RevisionsData":items,"LastToken":null}}),
+                        json!({"Items":{"RevisionsData":items,"LastToken":next}}),
                     )
                 } else {
                     panic!("Unexpected fixture API path");
@@ -207,6 +267,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let list = call(&mut p, "list_items", Value::Null)?;
     let count = list["items"].as_array().ok_or("Missing items")?.len();
     println!("Guest authenticated; synchronized {count} items");
+    if bench {
+        assert_eq!(count, 1000);
+        let mut samples = Vec::new();
+        for _ in 0..50 {
+            call(
+                &mut p,
+                "get_item_attributes",
+                json!({"id":"share1/item00999"}),
+            )?;
+        }
+        for _ in 0..1000 {
+            let start = std::time::Instant::now();
+            let result = call(
+                &mut p,
+                "get_item_attributes",
+                json!({"id":"share1/item00999"}),
+            )?;
+            assert_eq!(result["ok"], true);
+            samples.push(start.elapsed().as_nanos());
+        }
+        samples.sort();
+        println!(
+            "BENCH items=1000 lookup_samples=1000 p50_ns={} p95_ns={}",
+            samples[500], samples[950]
+        );
+        let before = requests.load(Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        println!(
+            "BENCH full_sync_ms={} requests={}",
+            start.elapsed().as_millis(),
+            requests.load(Ordering::SeqCst) - before
+        );
+        stop.store(true, Ordering::SeqCst);
+        if let Some(server) = server {
+            server.join().unwrap();
+        }
+        return Ok(());
+    }
     if live && check_fixture {
         if count != 1 || list["items"][0]["label"] != "rosec WASM live fixture" {
             return Err("Dedicated live fixture was not found".into());
@@ -341,6 +440,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?["ok"],
             true
         );
+        // A rejected re-authentication must not keep the prior session unlocked.
+        assert_eq!(call(&mut p, "unlock", json!({"password":""}))?["ok"], false);
+        assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+        assert_eq!(
+            call(
+                &mut p,
+                "unlock",
+                json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+            )?["ok"],
+            true
+        );
+        for bad in [
+            Value::Null,
+            json!([]),
+            json!({"password":3}),
+            json!({"password":"x","registration_fields":[]}),
+        ] {
+            assert_eq!(call(&mut p, "unlock", bad)?["ok"], false);
+            assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+        }
+        for bad_mode in [5, 6, 7, 8] {
+            mode.store(bad_mode, Ordering::SeqCst);
+            assert_eq!(
+                call(
+                    &mut p,
+                    "unlock",
+                    json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+                )?["ok"],
+                false
+            );
+            assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+        }
+        mode.store(0, Ordering::SeqCst);
+        assert_eq!(
+            call(
+                &mut p,
+                "unlock",
+                json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+            )?["ok"],
+            true
+        );
+        assert_eq!(
+            call(
+                &mut p,
+                "init",
+                json!({"options":{"api_url":"http://127.0.0.1:80@evil.invalid"}})
+            )?["ok"],
+            false
+        );
+        assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+        assert_eq!(
+            call(&mut p, "init", json!({"options":{"api_url":api}}))?["ok"],
+            true
+        );
+        assert_eq!(
+            call(
+                &mut p,
+                "unlock",
+                json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+            )?["ok"],
+            true
+        );
         mode.store(2, Ordering::SeqCst);
         assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], false);
         assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
@@ -360,7 +521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     } else {
         println!(
-            "PASS: compiled WASM, HTTP, decryption, metadata separation, TOTP, sync changes/deletions, lock and read-only boundary"
+            "PASS: compiled WASM, HTTP, decryption, metadata separation, TOTP, sync changes/deletions, malformed input, limits, lock and read-only boundary"
         );
     }
     Ok(())

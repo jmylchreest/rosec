@@ -44,3 +44,8 @@ Each provider declares a set of capabilities — the optional pieces of function
 **GNOME Keyring (`gnome-keyring`)** — Read-only access to existing `~/.local/share/keyrings/*.keyring` files. No optional capabilities — items are loaded once at unlock time. Intended as a migration bridge: access old GNOME Keyring items while running rosec as the Secret Service daemon.
 
 **[KeePassXC (file)](./keepassxc-file) (`keepassxc-file`)** *(experimental)* — Reads a KeePassXC `.kdbx` database directly from disk (KDBX 4). Decrypts in-memory; never writes back. The host's filesystem watcher (`host_watch`) re-decrypts automatically when KeePassXC saves the file. SSH keys stored via KeePassXC's built-in SSH-agent integration (binary attachment + `KeeAgent.settings`) are surfaced to the rosec SSH agent and FUSE, and passkeys stored via KeePassXC's passkey support are served through the [FIDO2 frontend](../fido2-passkeys.md).
+
+**[Proton Pass](./protonpass) (`protonpass`)** is a separate development spike and
+is not included in the released-provider matrix. It currently advertises `Sync`
+and `Totp`, reads all eight native item types, and intentionally has no write
+capability. SSH-agent support, passkeys and offline cache remain incomplete.

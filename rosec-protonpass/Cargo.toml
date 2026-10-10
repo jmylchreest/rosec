@@ -6,6 +6,10 @@ license = "GPL-3.0-or-later"
 publish = false
 description = "Experimental read-only Proton Pass Extism feasibility spike"
 
+[features]
+# Never enable for a distributed plugin.
+test-http = []
+
 [workspace]
 
 [lib]
