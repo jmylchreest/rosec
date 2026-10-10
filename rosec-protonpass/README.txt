@@ -39,18 +39,36 @@ it directly from a secret manager; do not paste credentials into shell history.
 It performs PAT login, full sync of direct vault/root supported items, metadata
 counting and local lock. It does not write items. It does not currently revoke
 the remote PAT session; use a short-lived test-only PAT and revoke it afterwards.
+Use --live --check-fixture to additionally verify the synthetic login named
+"rosec WASM live fixture", its known password, RFC 6238 TOTP vector and resync.
 Only pass a PAT scoped to a dedicated synthetic test vault. Output contains counts,
 not item names, usernames, passwords, seeds or tokens. API failures are redacted.
 
-Live account attempt on 2026-10-10
---------------------------------
-The official checksum-verified pass-cli 2.4.2 successfully authenticated with the
-user-authorized account credentials and TOTP obtained privately from rosec.
-It then refused access with "Your account is not yet allowed to use our CLI".
-The upstream eligibility guard logs out on that path. No account upgrade, vault,
-item or PAT was created. Temporary encrypted session storage was removed; its
-encryption key existed only in the probe process. No credentials or live responses
-are saved in this worktree. Live guest vault interoperability is therefore unproven.
+Live interoperability verified on 2026-10-10
+------------------------------------------
+The first account attempt authenticated but was rejected by the official CLI's
+eligibility guard. After the user upgraded their subscription, login succeeded.
+
+Using the official checksum-verified pass-cli 2.4.2, the test created a dedicated
+vault containing one synthetic login/password/TOTP item, then created a one-hour
+PAT with viewer permission on that vault only. The compiled WASM guest used the
+PAT directly against https://pass-api.proton.me; it did not invoke the CLI.
+
+Live assertions passed: PAT authentication, share/item key decryption, expected
+password retrieval, RFC 6238 TOTP code at a fixed timestamp, absence of secrets
+in public metadata, a second sync, and secret-access denial after local lock.
+The first live attempt exposed an incorrect fixture assumption: upstream currently
+writes ContentFormatVersion 7, not 1. The guest and fixtures now use the constant
+from pass-cli 2.4.2 pass/src/constants.rs; the corrected live run passed.
+
+After each attempt the test revoked its PAT, deleted only its dedicated synthetic
+vault, logged out of the official CLI and removed temporary encrypted session
+storage. All cleanup operations succeeded. User credentials and TOTP were fetched
+privately from rosec through captured subprocess pipes and passed to the official
+CLI using anonymous memory-backed file descriptors. No account credentials, PATs,
+private vault contents or live API responses are saved in this worktree.
+
+This proves the direct-vault/root-login live path, not all first-release features.
 
 Limitations and next implementation steps
 -----------------------------------------

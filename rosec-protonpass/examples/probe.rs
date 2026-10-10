@@ -58,13 +58,14 @@ fn fixture(updated: bool) -> Value {
     let mut content = item_v1::Content::new();
     content.content = Some(item_v1::content::Content::Login(login));
     item.content = MessageField::some(content);
-    json!({"ItemID":"item1","State":1,"ContentFormatVersion":1,"KeyRotation":1,
+    json!({"ItemID":"item1","State":1,"ContentFormatVersion":rosec_protonpass::ITEM_CONTENT_FORMAT_VERSION,"KeyRotation":1,
         "ItemKey":seal(&[3;32],&[2;32],crypto::ITEM_KEY,2),
         "Content":seal(&item.write_to_bytes().unwrap(),&[3;32],crypto::ITEM_CONTENT,3)})
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live = std::env::args().any(|a| a == "--live");
+    let check_fixture = std::env::args().any(|a| a == "--check-fixture");
     let mode = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(AtomicUsize::new(0));
@@ -188,11 +189,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let unlock = json!({"password":"ephemeral-test-only","auth_fields":{"personal_access_token":pat.trim()}});
     let result = call(&mut p, "unlock", unlock)?;
     if result["ok"] != true {
+        // Guest errors are fixed messages, never API response bodies or credentials.
+        eprintln!(
+            "Guest status: {}",
+            result["error"].as_str().unwrap_or("Unknown failure")
+        );
         return Err("Guest authentication/sync failed (response withheld)".into());
     }
     let list = call(&mut p, "list_items", Value::Null)?;
     let count = list["items"].as_array().ok_or("Missing items")?.len();
     println!("Guest authenticated; synchronized {count} items");
+    if live && check_fixture {
+        if count != 1 || list["items"][0]["label"] != "rosec WASM live fixture" {
+            return Err("Dedicated live fixture was not found".into());
+        }
+        let id = list["items"][0]["id"]
+            .as_str()
+            .ok_or("Missing fixture ID")?;
+        let password = call(
+            &mut p,
+            "get_secret_attr",
+            json!({"id":id,"attr":"password"}),
+        )?;
+        let password = Zeroizing::new(
+            STANDARD.decode(password["value_b64"].as_str().ok_or("Missing password")?)?,
+        );
+        if password.as_slice() != b"rosec-synthetic-live-password" {
+            return Err("Live password mismatch".into());
+        }
+        let secret = call(&mut p, "get_secret_attr", json!({"id":id,"attr":"totp"}))?;
+        let uri =
+            Zeroizing::new(STANDARD.decode(secret["value_b64"].as_str().ok_or("Missing TOTP")?)?);
+        let params = rosec_core::totp::parse_totp_input(&uri)?;
+        if rosec_core::totp::generate_code(
+            &params,
+            std::time::UNIX_EPOCH + Duration::from_secs(59),
+        )?
+        .as_str()
+            != "94287082"
+        {
+            return Err("Live TOTP vector mismatch".into());
+        }
+        let public = list.to_string();
+        if public.contains("rosec-synthetic-live-password") || public.contains("GEZDGNBV") {
+            return Err("Secret appeared in metadata".into());
+        }
+        if call(&mut p, "sync", Value::Null)?["ok"] != true {
+            return Err("Live resync failed".into());
+        }
+        println!("PASS: live fixture password, TOTP vector, metadata separation and resync");
+    }
     if !live {
         assert_eq!(count, 1);
         let serialized = list.to_string();

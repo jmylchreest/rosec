@@ -27,6 +27,7 @@ Tag: 2.4.2
 Commit: 7ae51e52818bca8df905988e4b149d43d31d4c83
 
 Adapted into src/lib.rs:
+  pass/src/constants.rs (item content format version 7)
   pass/src/auth/personal_access_token.rs (PAT parser)
   Changes: zeroizing token, strict 32-byte key check, generic redacted errors.
 

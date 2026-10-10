@@ -207,7 +207,8 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                 if !row["FolderID"].is_null() {
                     return Err("Folders not implemented in spike");
                 }
-                if row["ContentFormatVersion"].as_u64() != Some(1) {
+                if row["ContentFormatVersion"].as_u64() != Some(crate::ITEM_CONTENT_FORMAT_VERSION)
+                {
                     return Err("Unsupported item format");
                 }
                 let rotation = row["KeyRotation"].as_u64().ok_or("Missing key rotation")?;

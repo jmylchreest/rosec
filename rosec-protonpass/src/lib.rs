@@ -11,6 +11,9 @@ pub mod upstream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use zeroize::Zeroizing;
 
+/// pass-cli 2.4.2 pass/src/constants.rs. Pin to the format exercised live.
+pub const ITEM_CONTENT_FORMAT_VERSION: u64 = 7;
+
 /// Adapted from pass-cli 2.4.2, pass/src/auth/personal_access_token.rs.
 /// Errors deliberately never include the supplied credential.
 pub fn parse_pat(input: &str) -> Result<(Zeroizing<String>, Zeroizing<Vec<u8>>), &'static str> {
