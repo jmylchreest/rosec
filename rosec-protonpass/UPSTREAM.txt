@@ -1,0 +1,57 @@
+This crate is GPL-3.0-or-later. See LICENSE.
+Copyright (c) 2026 Proton AG for the upstream material listed below.
+Local adaptations are supplied under the same licence, without warranty.
+
+Pinned upstream sources
+=======================
+
+https://github.com/protonpass/proton-pass-common
+Tag: 2.1.1
+Commit: 25b673b98ed84982e74a1fbcdf036ebd7957950f
+
+Vendored without modification:
+  proton-pass-types/proto/item_v1.proto -> src/upstream/item_v1.proto
+  proton-pass-types/src/protos/item/item_v1.rs -> src/upstream/item_v1.rs
+  LICENSE -> LICENSE
+
+SHA256:
+  item_v1.proto 2e05fbd21bd296eab23f3d3f1e56fc76a86b310778a881415a332cb42bdc7d91
+  item_v1.rs    86d41914290d9d54cb54bd94b81ecd237794aa79eed98387e8f9cd24ad8082ac
+
+The generated Rust is checked in by upstream. It is deliberately not reformatted.
+protobuf 3.7.2 is pinned to its generator version. The proto is included for source
+provenance and regeneration; building this spike needs no proprietary generator.
+
+https://github.com/protonpass/pass-cli
+Tag: 2.4.2
+Commit: 7ae51e52818bca8df905988e4b149d43d31d4c83
+
+Adapted into src/lib.rs:
+  pass/src/auth/personal_access_token.rs (PAT parser)
+  Changes: zeroizing token, strict 32-byte key check, generic redacted errors.
+
+Adapted into src/crypto.rs:
+  pass/src/domain/crypto.rs (AES-GCM decrypt and AAD constants)
+  Changes: aes-gcm 0.10 API, zeroizing result, checked nonce/tag lengths,
+  fixed AAD byte strings, no encryption/randomness API in production guest.
+
+Adapted protocol handling in src/guest.rs:
+  pass/src/auth/personal_access_token.rs
+  pass/src/share/list.rs
+  pass/src/share/keys.rs
+  pass/src/share/open_key.rs
+  pass/src/item/list.rs
+  pass/src/item/open.rs
+  Changes: synchronous Extism transport, read-only bounded full sync, only direct
+  vault shares/root items, no native/browser runtime or muon dependency, no debug
+  logging of API bodies. Unsupported data fails explicitly. See README.txt.
+
+All test credentials, keys and item contents are newly authored synthetic data.
+No account credentials, personal vault contents, or live API responses are fixtures.
+
+Distribution
+============
+This spike is not included in rosec release packaging. A distributed binary must
+be accompanied by GPL-compliant corresponding source/build materials and applicable
+third-party notices. Cargo.lock records the dependency versions. Host/plugin combined
+distribution review remains required; WASM alone does not establish a licence boundary.
