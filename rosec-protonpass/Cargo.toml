@@ -23,7 +23,7 @@ aes = { version = "0.8", features = ["zeroize"] }
 ctr = { version = "0.9", features = ["zeroize"] }
 ghash = { version = "0.5", features = ["zeroize"] }
 polyval = { version = "0.6", features = ["zeroize"] }
-base64 = "0.22"
+base64 = "0.23"
 protobuf = "=3.7.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

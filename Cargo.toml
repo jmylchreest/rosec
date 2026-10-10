@@ -51,7 +51,7 @@ aes = { version = "0.8.4", features = ["zeroize"] }
 cbc = { version = "0.1.2", features = ["alloc", "std", "zeroize"] }
 hmac = "0.12.1"
 hkdf = "0.12.4"
-base64 = "0.22.1"
+base64 = "0.23.1"
 rand = "0.10.0"
 block-padding = "0.3.3"
 num-bigint = { version = "0.4.6", features = ["rand"] }
