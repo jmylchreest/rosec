@@ -147,3 +147,25 @@ protobuf files. [UPSTREAM.txt](UPSTREAM.txt) records exact commits, hashes and
 modifications; [LICENSE](LICENSE) contains the licence. `Cargo.lock` pins dependencies.
 See [DISTRIBUTION.md](DISTRIBUTION.md) for licence review, dependency notices,
 corresponding-source packaging and rebuild instructions.
+
+## Tracking upstream changes
+
+The `Proton upstream changes` workflow runs weekly and can be started manually.
+It compares the schemas, passkey handling, PAT/authentication, cryptography,
+share/item/folder code, licence and dependency manifests against the commits in
+`UPSTREAM.txt`. Source changes produce a failed check with a file list and upstream
+comparison links in the Actions summary. API errors also fail the check; they are
+not treated as proof that the sources are current. Unrelated documentation-only
+changes are ignored. This detects source drift, not every new release tag.
+
+Run it locally with `python3 contrib/check-proton-upstream.py`. An optional
+`GITHUB_TOKEN` raises the public API rate limit. Exit codes are 0 (unchanged),
+1 (review required), and 2 (check failed). No Proton account credentials are used.
+
+Review changes before updating vendored schemas or adapted code. Update the pins,
+hashes and adaptation notes in `UPSTREAM.txt` with the implementation, then run
+the provider checks and corresponding-source packaging described above.
+Dependabot separately opens weekly Cargo dependency update PRs for this standalone
+crate. Neither mechanism automatically merges changes or changes installed plugins.
+Scheduled checks and Dependabot become active after this configuration reaches the
+default branch.
