@@ -100,7 +100,7 @@ fn refresh_session(s: &mut State) -> Result<(), &'static str> {
     let mut state = Zeroizing::new([0u8; 32]);
     getrandom::getrandom(state.as_mut()).map_err(|_| "Refresh randomness unavailable")?;
     let refresh_body = SensitiveJson(json!({"UID":session.uid.as_str(),
-        "State":STANDARD.encode(&*state), "AccessToken":session.access.as_str(),
+        "State":STANDARD.encode(state.as_slice()), "AccessToken":session.access.as_str(),
         "RefreshToken":session.refresh.as_str(), "ResponseType":"token",
         "GrantType":"refresh_token", "RedirectURI":"https://protonmail.ch"}));
     let bytes =
@@ -778,7 +778,7 @@ pub fn change_password(_: Json<Value>) -> FnResult<Json<Value>> {
 #[plugin_fn]
 pub fn plugin_manifest(_: String) -> FnResult<Json<Value>> {
     Ok(Json(
-        json!({"kind":"protonpass","name":"Proton Pass","description":"Experimental read-only Proton Pass provider","version":env!("CARGO_PKG_VERSION"),"default_allowed_hosts":["pass-api.proton.me"],"required_options":[],"optional_options":[],"experimental":true}),
+        json!({"kind":"protonpass","name":"Proton Pass","description":"Read-only Proton Pass provider","version":env!("CARGO_PKG_VERSION"),"default_allowed_hosts":["pass-api.proton.me"],"required_options":[],"optional_options":[],"experimental":false}),
     ))
 }
 #[plugin_fn]

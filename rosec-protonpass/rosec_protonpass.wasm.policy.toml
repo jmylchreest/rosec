@@ -1,6 +1,6 @@
 schema_version = 1
 kind = "protonpass"
-name = "Proton Pass (experimental)"
+name = "Proton Pass"
 
 # This plugin requires no filesystem preopens or host file access.
 [network]
