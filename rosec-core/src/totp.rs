@@ -18,6 +18,13 @@ pub enum TotpAlgorithm {
     Sha512,
 }
 
+/// Alphabet used for the displayed code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotpEncoding {
+    Decimal,
+    Steam,
+}
+
 /// Parsed TOTP parameters — everything needed to generate a code.
 #[derive(Clone)]
 pub struct TotpParams {
@@ -25,7 +32,9 @@ pub struct TotpParams {
     pub secret: Zeroizing<Vec<u8>>,
     /// HMAC algorithm (default: SHA1).
     pub algorithm: TotpAlgorithm,
-    /// Number of output digits (default: 6).
+    /// Output alphabet (default: decimal).
+    pub encoding: TotpEncoding,
+    /// Number of output characters (default: 6).
     pub digits: u32,
     /// Time step in seconds (default: 30).
     pub period: u64,
@@ -39,6 +48,7 @@ impl std::fmt::Debug for TotpParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TotpParams")
             .field("algorithm", &self.algorithm)
+            .field("encoding", &self.encoding)
             .field("digits", &self.digits)
             .field("period", &self.period)
             .field("issuer", &self.issuer)
@@ -83,6 +93,7 @@ pub fn parse_totp_input(raw: &[u8]) -> Result<TotpParams, TotpError> {
         Ok(TotpParams {
             secret,
             algorithm: TotpAlgorithm::Sha1,
+            encoding: TotpEncoding::Decimal,
             digits: 6,
             period: 30,
             issuer: None,
@@ -108,6 +119,7 @@ fn parse_otpauth_uri(uri: &str) -> Result<TotpParams, TotpError> {
 
     let mut secret_str: Option<Zeroizing<String>> = None;
     let mut algorithm = TotpAlgorithm::Sha1;
+    let mut encoding = TotpEncoding::Decimal;
     let mut digits: u32 = 6;
     let mut period: u64 = 30;
     let mut issuer: Option<String> = None;
@@ -141,6 +153,13 @@ fn parse_otpauth_uri(uri: &str) -> Result<TotpParams, TotpError> {
                     return Err(TotpError::InvalidUri("period must be > 0".into()));
                 }
             }
+            "encoder" => {
+                encoding = match value.as_ref() {
+                    "" => TotpEncoding::Decimal,
+                    "steam" => TotpEncoding::Steam,
+                    _ => return Err(TotpError::InvalidUri("unsupported OTP encoder".into())),
+                };
+            }
             "issuer" => issuer = Some(value.into_owned()),
             _ => {}
         }
@@ -151,6 +170,7 @@ fn parse_otpauth_uri(uri: &str) -> Result<TotpParams, TotpError> {
     Ok(TotpParams {
         secret,
         algorithm,
+        encoding,
         digits,
         period,
         issuer,
@@ -167,6 +187,7 @@ fn parse_steam_uri(uri: &str) -> Result<TotpParams, TotpError> {
     Ok(TotpParams {
         secret,
         algorithm: TotpAlgorithm::Sha1,
+        encoding: TotpEncoding::Steam,
         digits: 5,
         period: 30,
         issuer: Some("Steam".to_string()),
@@ -255,6 +276,17 @@ pub fn generate_code(
         | ((hash[offset + 2] as u32) << 8)
         | (hash[offset + 3] as u32);
 
+    if params.encoding == TotpEncoding::Steam {
+        const ALPHABET: &[u8] = b"23456789BCDFGHJKMNPQRTVWXY";
+        let mut value = binary;
+        let mut code = Zeroizing::new(String::with_capacity(params.digits as usize));
+        for _ in 0..params.digits {
+            code.push(ALPHABET[value as usize % ALPHABET.len()] as char);
+            value /= ALPHABET.len() as u32;
+        }
+        return Ok(code);
+    }
+
     let modulus = 10u32.pow(params.digits);
     Ok(Zeroizing::new(format!(
         "{:0>width$}",
@@ -299,6 +331,7 @@ mod tests {
         TotpParams {
             secret: decode_base32(secret).unwrap(),
             algorithm: alg,
+            encoding: TotpEncoding::Decimal,
             digits: 8,
             period: 30,
             issuer: None,
@@ -424,6 +457,27 @@ mod tests {
     }
 
     #[test]
+    fn keepassxc_steam_codes() {
+        // KeePassXC TestTotp::testSteamTotp vectors from its public test suite.
+        let uri = b"otpauth://totp/test?secret=63BEDWCQZKTQWPESARIERL5DTTQFCJTK&issuer=Valve&algorithm=SHA1&digits=5&period=30&encoder=steam";
+        let params = parse_totp_input(uri).unwrap();
+        let steam = parse_totp_input(b"steam://63BEDWCQZKTQWPESARIERL5DTTQFCJTK").unwrap();
+        for (timestamp, expected) in [(1511200518, "FR8RV"), (1511200714, "9P3VP")] {
+            let time = UNIX_EPOCH + Duration::from_secs(timestamp);
+            assert_eq!(generate_code(&params, time).unwrap().as_str(), expected);
+            assert_eq!(generate_code(&steam, time).unwrap().as_str(), expected);
+        }
+        // The issuer is metadata, not an instruction to change encoding.
+        let decimal =
+            parse_totp_input(b"otpauth://totp/test?secret=JBSWY3DPEHPK3PXP&issuer=Steam").unwrap();
+        assert_eq!(decimal.encoding, TotpEncoding::Decimal);
+        assert!(
+            parse_totp_input(b"otpauth://totp/test?secret=JBSWY3DPEHPK3PXP&encoder=unknown")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn parse_missing_secret_errors() {
         assert!(parse_totp_input(b"otpauth://totp/Test?issuer=Foo").is_err());
     }
@@ -439,6 +493,7 @@ mod tests {
         let params = TotpParams {
             secret: Zeroizing::new(vec![0x41; 20]),
             algorithm: TotpAlgorithm::Sha1,
+            encoding: TotpEncoding::Decimal,
             digits: 6,
             period: 30,
             issuer: None,
@@ -454,6 +509,7 @@ mod tests {
         let params = TotpParams {
             secret: Zeroizing::new(b"12345678901234567890".to_vec()),
             algorithm: TotpAlgorithm::Sha1,
+            encoding: TotpEncoding::Decimal,
             digits: 6,
             period: 30,
             issuer: None,

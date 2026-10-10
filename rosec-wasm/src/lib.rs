@@ -45,6 +45,9 @@ mod provider;
 mod sandbox;
 mod wasm_cred;
 
+#[cfg(test)]
+mod keepassxc_tests;
+
 pub use discovery::PluginRegistry;
 pub use policy::{PluginPolicy, PolicyError, ResolvedPolicy};
 pub use provider::{WasmProvider, WasmProviderConfig};

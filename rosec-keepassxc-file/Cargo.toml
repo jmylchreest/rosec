@@ -12,6 +12,13 @@ description = "KeePassXC .kdbx file provider as an Extism WASM guest plugin for 
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+fixture-generation = ["keepass/save_kdbx4"]
+
+[[example]]
+name = "totp_fixture"
+required-features = ["fixture-generation"]
+
 [dependencies]
 # Extism guest SDK
 extism-pdk = "1.4.1"
