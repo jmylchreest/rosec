@@ -9,7 +9,7 @@ description = "WASM plugin host for rosec providers (Extism-based)"
 
 [dependencies]
 rosec-core = { path = "../rosec-core" }
-extism = "1.13.0"
+extism = "=1.41.0"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -20,6 +20,7 @@ zeroize = { workspace = true }
 tokio = { workspace = true }
 base64 = { workspace = true }
 hkdf = { workspace = true }
+argon2 = { version = "0.5", features = ["zeroize"] }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 semver = { workspace = true }
@@ -30,7 +31,7 @@ hmac = { workspace = true }
 block-padding = { workspace = true }
 rand = { workspace = true }
 ureq = { version = "3", features = ["platform-verifier"] }
-extism-manifest = "1.13.0"
+extism-manifest = "=1.41.0"
 url = "2"
 glob = "0.3"
 tokio-websockets = { workspace = true }

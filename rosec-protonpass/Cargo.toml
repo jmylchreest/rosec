@@ -16,7 +16,12 @@ test-http = []
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+# Enable wiping throughout AES-GCM's key schedule and authentication state.
+aes = { version = "0.8", features = ["zeroize"] }
+ctr = { version = "0.9", features = ["zeroize"] }
+ghash = { version = "0.5", features = ["zeroize"] }
+polyval = { version = "0.6", features = ["zeroize"] }
 base64 = "0.22"
 protobuf = "=3.7.2"
 serde = { version = "1", features = ["derive"] }
@@ -28,5 +33,5 @@ urlencoding = "2"
 extism-pdk = "1.4.1"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-extism = "=1.30.0"
+extism = "=1.41.0"
 rosec-core = { path = "../rosec-core" }

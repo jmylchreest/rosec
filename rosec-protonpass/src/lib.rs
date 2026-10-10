@@ -51,3 +51,12 @@ pub fn valid_api_endpoint(api: &str) -> bool {
     }
     false
 }
+
+// Cover allocations made inside parsers, including partial/unknown fields and
+// temporary serialization buffers which never reach our typed cleanup guards.
+#[cfg(any(target_arch = "wasm32", test))]
+mod wiping_allocator;
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOCATOR: wiping_allocator::WipingAllocator<std::alloc::System> =
+    wiping_allocator::WipingAllocator(std::alloc::System);

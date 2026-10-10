@@ -13,6 +13,7 @@
 //! every guest call without disturbing the rest of the daemon.
 
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -33,11 +34,40 @@ use crate::provider::{
     query_registration_info,
 };
 
-/// Host-side ceiling on how long any caller will wait for a wasm worker
-/// to reply.  Tighter than extism's [`GUEST_CALL_TIMEOUT`] (180s) so the
-/// host releases the await well before extism's trap, freeing downstream
-/// rebuilds / searches for other providers.
-const HOST_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// The guest and HTTP execution deadline expires before the caller deadline.
+const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(185);
+
+#[derive(Default)]
+struct Control {
+    generation: u64,
+    preserve_for_lock: bool,
+    next_id: u64,
+    active: Option<(u64, extism::CancelHandle)>,
+}
+
+// A cancelled future must invalidate the instance even if its reply was already
+// queued. The worker checks generation again before servicing any later call.
+struct CallGuard {
+    control: Arc<Mutex<Control>>,
+    id: u64,
+    armed: bool,
+    wake: cb::Sender<()>,
+}
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut c = self.control.lock().unwrap_or_else(|e| e.into_inner());
+            c.generation = c.generation.wrapping_add(1);
+            c.preserve_for_lock = false;
+            let _ = self.wake.try_send(());
+            if let Some((id, handle)) = &c.active
+                && *id == self.id
+            {
+                let _ = handle.cancel();
+            }
+        }
+    }
+}
 
 /// Capacity of the call-request channel between async callers and the
 /// worker thread. Per-provider activity is sequential (one user, one
@@ -72,10 +102,19 @@ pub(crate) struct WasmInitOutputs {
 pub(crate) struct WasmWorker {
     tx: cb::Sender<CallFn>,
     label: String,
+    call_timeout: Duration,
+    control: Arc<Mutex<Control>>,
+    wake: cb::Sender<()>,
     /// Held so callers can identify the thread in panics / debuggers.
     /// Not joined on Drop because pending guest calls (e.g. an in-flight
     /// 60-second Argon2 unlock) could pin shutdown.
     _handle: thread::JoinHandle<()>,
+}
+
+impl Drop for WasmWorker {
+    fn drop(&mut self) {
+        self.invalidate();
+    }
 }
 
 impl WasmWorker {
@@ -94,12 +133,27 @@ impl WasmWorker {
             std::sync::mpsc::sync_channel::<Result<WasmInitOutputs, String>>(0);
         let label = format!("wasm-{}", config.id);
         let label_for_thread = label.clone();
+        let call_timeout = if config.kind == "protonpass" {
+            Duration::from_secs(65)
+        } else {
+            HOST_CALL_TIMEOUT
+        };
         let config_for_thread = config.clone();
+        let control = Arc::new(Mutex::new(Control::default()));
+        let thread_control = Arc::clone(&control);
+        let (wake, wake_rx) = cb::bounded(1);
 
         let handle = thread::Builder::new()
             .name(label.clone())
             .spawn(move || {
-                worker_thread_main(config_for_thread, call_rx, init_tx, label_for_thread)
+                worker_thread_main(
+                    config_for_thread,
+                    call_rx,
+                    init_tx,
+                    label_for_thread,
+                    thread_control,
+                    wake_rx,
+                )
             })
             .map_err(|e| {
                 ProviderError::Other(anyhow!("failed to spawn wasm worker thread: {e}"))
@@ -110,6 +164,9 @@ impl WasmWorker {
                 Self {
                     tx: call_tx,
                     label,
+                    call_timeout,
+                    control,
+                    wake,
                     _handle: handle,
                 },
                 outputs,
@@ -138,38 +195,156 @@ impl WasmWorker {
         T: Send + 'static,
         F: FnOnce(&mut Plugin) -> (Result<T, ProviderError>, CallOutcome) + Send + 'static,
     {
+        self.call_with_timeout(self.call_timeout, f).await
+    }
+
+    async fn call_with_timeout<T, F>(&self, timeout: Duration, f: F) -> Result<T, ProviderError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Plugin) -> (Result<T, ProviderError>, CallOutcome) + Send + 'static,
+    {
+        self.call_in_generation(None, timeout, f).await
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.control
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    pub(crate) fn check_generation(&self, generation: u64) -> Result<(), ProviderError> {
+        if self.generation() == generation {
+            Ok(())
+        } else {
+            Err(ProviderError::Locked)
+        }
+    }
+
+    pub(crate) async fn call_for_generation<T, F>(
+        &self,
+        generation: u64,
+        f: F,
+    ) -> Result<T, ProviderError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Plugin) -> (Result<T, ProviderError>, CallOutcome) + Send + 'static,
+    {
+        self.call_in_generation(Some(generation), self.call_timeout, f)
+            .await
+    }
+
+    async fn call_in_generation<T, F>(
+        &self,
+        expected: Option<u64>,
+        timeout: Duration,
+        f: F,
+    ) -> Result<T, ProviderError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Plugin) -> (Result<T, ProviderError>, CallOutcome) + Send + 'static,
+    {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let (id, generation) = {
+            let mut c = self.control.lock().unwrap_or_else(|e| e.into_inner());
+            if expected.is_some_and(|generation| generation != c.generation) {
+                return Err(ProviderError::Locked);
+            }
+            c.next_id = c.next_id.wrapping_add(1);
+            (c.next_id, c.generation)
+        };
+        let control = Arc::clone(&self.control);
+        let mut guard = CallGuard {
+            control: Arc::clone(&control),
+            id,
+            armed: false,
+            wake: self.wake.clone(),
+        };
         self.tx
-            .send(Box::new(move |plugin, needs_recreate| {
-                let (result, outcome) = f(plugin);
+            .try_send(Box::new(move |plugin, needs_recreate| {
+                {
+                    let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
+                    if reply_tx.is_closed() || generation != c.generation {
+                        let _ = reply_tx.send(Err(ProviderError::Locked));
+                        return;
+                    }
+                    c.active = Some((id, plugin.cancel_handle()));
+                }
+                let (mut result, outcome) = f(plugin);
+                let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
+                c.active = None;
+                if generation != c.generation || reply_tx.is_closed() {
+                    *needs_recreate = true;
+                    result = Err(ProviderError::Locked);
+                }
                 if outcome == CallOutcome::PluginCallFailed {
                     *needs_recreate = true;
                 }
                 let _ = reply_tx.send(result);
             }))
-            .map_err(|_| {
-                ProviderError::Unavailable(format!("wasm worker '{}' has stopped", self.label))
+            .map_err(|e| {
+                ProviderError::Unavailable(match e {
+                    cb::TrySendError::Full(_) => format!("wasm worker '{}' is busy", self.label),
+                    cb::TrySendError::Disconnected(_) => {
+                        format!("wasm worker '{}' has stopped", self.label)
+                    }
+                })
             })?;
-        // Host-side ceiling: bounds how long any caller waits for the worker
-        // to reply, independent of extism's in-guest timeout (which only
-        // covers wasm execution, not host functions like network I/O).  If
-        // this fires the worker thread keeps running its call until either
-        // it finishes or extism's `GUEST_CALL_TIMEOUT` cuts it short, but
-        // the caller stops blocking and downstream code (cache rebuild,
-        // SearchItems) keeps going for the other providers.
-        let awaited = tokio::time::timeout(HOST_CALL_TIMEOUT, reply_rx).await;
-        match awaited {
-            Ok(Ok(result)) => result,
+        guard.armed = true;
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(result)) => {
+                guard.armed = false;
+                result
+            }
             Ok(Err(_)) => Err(ProviderError::Unavailable(format!(
-                "wasm worker '{}' dropped reply (panic during call)",
+                "wasm worker '{}' dropped reply",
                 self.label
             ))),
             Err(_) => Err(ProviderError::Unavailable(format!(
                 "wasm worker '{}' did not reply within {}s",
                 self.label,
-                HOST_CALL_TIMEOUT.as_secs()
+                timeout.as_secs()
             ))),
         }
+    }
+
+    /// Invalidate queued calls and cancel active execution before locking. Even
+    /// if the queue is full, the next request must use a fresh locked instance.
+    pub(crate) fn invalidate(&self) {
+        let mut c = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        c.generation = c.generation.wrapping_add(1);
+        c.preserve_for_lock = false;
+        let _ = self.wake.try_send(());
+        if let Some((_, handle)) = &c.active {
+            let _ = handle.cancel();
+        }
+    }
+
+    /// Fence queued operations, let an idle guest revoke its session, then
+    /// discard the instance regardless of cleanup success. Active execution is
+    /// cancelled and discarded first; remote cleanup is best effort in that case.
+    pub(crate) async fn lock(&self) -> Result<crate::protocol::SimpleResponse, ProviderError> {
+        struct LockGuard<'a>(&'a WasmWorker);
+        impl Drop for LockGuard<'_> {
+            fn drop(&mut self) {
+                self.0.invalidate();
+            }
+        }
+        let _guard = LockGuard(self);
+        {
+            let mut c = self.control.lock().unwrap_or_else(|e| e.into_inner());
+            c.generation = c.generation.wrapping_add(1);
+            c.preserve_for_lock = c.active.is_none();
+            if let Some((_, handle)) = &c.active {
+                let _ = handle.cancel();
+            }
+            let _ = self.wake.try_send(());
+        }
+        self.call(move |p| {
+            let (result, _) = call_guest_json_no_input(p, "lock");
+            (result, CallOutcome::PluginCallFailed)
+        })
+        .await
     }
 
     /// Convenience wrapper around [`Self::call`] for the canonical pattern:
@@ -208,6 +383,10 @@ fn build_plugin(
         .with_allowed_hosts(config.allowed_hosts.iter().cloned())
         .with_timeout(GUEST_CALL_TIMEOUT)
         .with_memory_max(4096);
+    if config.kind == "protonpass" {
+        manifest = manifest.with_timeout(Duration::from_secs(60));
+        manifest.memory.max_http_response_bytes = Some(8 * 1024 * 1024);
+    }
     for (src, dest) in &config.allowed_paths {
         manifest = manifest.with_allowed_path(src.clone(), dest);
     }
@@ -236,6 +415,8 @@ fn worker_thread_main(
     call_rx: cb::Receiver<CallFn>,
     init_tx: std::sync::mpsc::SyncSender<Result<WasmInitOutputs, String>>,
     label: String,
+    control: Arc<Mutex<Control>>,
+    wake_rx: cb::Receiver<()>,
 ) {
     // 1. Apply per-provider Landlock under BestEffort. Failure logs but
     // does not abort init — Landlock is defence-in-depth, not the primary
@@ -280,7 +461,9 @@ fn worker_thread_main(
     drop(init_tx);
 
     // 4. Service requests until the call channel closes (Drop of WasmWorker).
-    main_loop(plugin, watch_rx, &call_rx, &config, &label);
+    main_loop(
+        plugin, watch_rx, &call_rx, &config, &label, &control, &wake_rx,
+    );
 }
 
 /// Resolve the directory wasmtime uses for its module cache. Mirrors
@@ -373,7 +556,10 @@ fn main_loop(
     call_rx: &cb::Receiver<CallFn>,
     config: &crate::WasmProviderConfig,
     label: &str,
+    control: &Mutex<Control>,
+    wake_rx: &cb::Receiver<()>,
 ) {
+    let mut generation = 0;
     loop {
         // Two-step: select! borrows the receivers, the match arm has owned
         // access. Action carries the work out so we can mutate plugin /
@@ -383,8 +569,10 @@ fn main_loop(
             Watch(WatchEvent),
             CallClosed,
             WatchClosed,
+            Invalidate,
         }
-        let action = cb::select! {
+        let action = cb::select_biased! {
+            recv(wake_rx) -> msg => if msg.is_ok() { Action::Invalidate } else { Action::CallClosed },
             recv(call_rx) -> msg => match msg {
                 Ok(c) => Action::Call(c),
                 Err(_) => Action::CallClosed,
@@ -395,16 +583,35 @@ fn main_loop(
             },
         };
 
+        let (current, preserve) = {
+            let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
+            let preserve = c.preserve_for_lock;
+            c.preserve_for_lock = false;
+            (c.generation, preserve)
+        };
+        if current != generation {
+            if !preserve && recreate_in_place(&mut plugin, &mut watch_rx, config, label).is_err() {
+                return;
+            }
+            generation = current;
+        }
         match action {
+            Action::Invalidate => {}
             Action::Call(call) => {
                 let mut needs_recreate = false;
                 run_call(&mut plugin, call, &mut needs_recreate, label);
-                if needs_recreate {
-                    recreate_in_place(&mut plugin, &mut watch_rx, config, label);
+                if needs_recreate
+                    && recreate_in_place(&mut plugin, &mut watch_rx, config, label).is_err()
+                {
+                    return;
                 }
             }
             Action::Watch(first) => {
-                let _ = process_watch_burst(&mut plugin, first, &watch_rx, &config.id);
+                if process_watch_burst(&mut plugin, first, &watch_rx, &config.id).is_err()
+                    && recreate_in_place(&mut plugin, &mut watch_rx, config, label).is_err()
+                {
+                    return;
+                }
             }
             Action::CallClosed => {
                 debug!(worker = %label, "call channel closed, exiting");
@@ -413,9 +620,7 @@ fn main_loop(
             Action::WatchClosed => {
                 // Watch sender dropped — plugin doesn't use watches, or
                 // the host fns were rebuilt. Keep serving calls.
-                let (drained_tx, drained_rx) = cb::bounded::<WatchEvent>(0);
-                drop(drained_tx);
-                watch_rx = drained_rx;
+                watch_rx = cb::never();
             }
         }
     }
@@ -425,19 +630,9 @@ fn main_loop(
 /// call does not take the worker thread down. The closure signals trap
 /// detection by setting `*needs_recreate = true`.
 fn run_call(plugin: &mut Plugin, call: CallFn, needs_recreate: &mut bool, label: &str) {
-    let plugin_ptr = plugin as *mut Plugin;
-    let recreate_ptr = needs_recreate as *mut bool;
-    if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(move || {
-        // SAFETY: pointers are valid for the duration of catch_unwind; we
-        // own &mut Plugin and &mut bool from the caller's stack frame.
-        unsafe { call(&mut *plugin_ptr, &mut *recreate_ptr) }
-    })) {
-        let msg = panic
-            .downcast_ref::<&'static str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "(non-string panic)".into());
-        error!(worker = %label, panic = %msg, "wasm worker call panicked");
+    if std::panic::catch_unwind(AssertUnwindSafe(|| call(plugin, needs_recreate))).is_err() {
+        *needs_recreate = true;
+        error!(worker = %label, "wasm worker call panicked; discarding instance");
     }
 }
 
@@ -445,28 +640,23 @@ fn run_call(plugin: &mut Plugin, call: CallFn, needs_recreate: &mut bool, label:
 /// Plugin and the watch receiver (a fresh Plugin owns a fresh watch
 /// channel — the old one's sender is dropped when the old host fns drop).
 ///
-/// On rebuild failure the worker keeps the old (corrupted) Plugin and logs.
-/// The next call will fail again, the daemon's hot-reload path can rotate
-/// the provider if it cares to.
+/// A failed rebuild stops the worker. Never reuse a damaged instance.
 fn recreate_in_place(
     plugin: &mut Plugin,
     watch_rx: &mut cb::Receiver<WatchEvent>,
     config: &crate::WasmProviderConfig,
     label: &str,
-) {
-    info!(worker = %label, "recreating plugin after wasmtime trap");
-    match build_plugin(config) {
-        Ok((new_plugin, new_watch_rx)) => {
-            *plugin = new_plugin;
-            *watch_rx = new_watch_rx;
-            if let Err(e) = init_guest(plugin, config, "re-init") {
-                warn!(worker = %label, error = %e, "re-init after recreate failed");
-            }
-        }
-        Err(e) => {
-            warn!(worker = %label, error = %e, "plugin recreate failed");
-        }
-    }
+) -> Result<(), ()> {
+    info!(worker = %label, "recreating plugin after invalidation");
+    let (mut new_plugin, new_watch_rx) = build_plugin(config).map_err(|_| {
+        warn!(worker = %label, "plugin recreate failed; stopping worker");
+    })?;
+    init_guest(&mut new_plugin, config, "re-init").map_err(|_| {
+        warn!(worker = %label, "plugin re-init failed; stopping worker");
+    })?;
+    *plugin = new_plugin;
+    *watch_rx = new_watch_rx;
+    Ok(())
 }
 
 /// Drain consecutive watch events for the same paths within a 500ms
@@ -517,14 +707,347 @@ fn process_watch_burst(
             kind = %payload.kind,
             "host_watch: dispatching on_path_changed",
         );
-        if let Err(e) = plugin.call::<&[u8], &[u8]>("on_path_changed", &json) {
+        if plugin
+            .call::<&[u8], &[u8]>("on_path_changed", &json)
+            .is_err()
+        {
             debug!(
                 provider = %provider_id,
                 path = %payload.path,
-                error = %e,
                 "on_path_changed call failed",
             );
+            return Err(());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SimpleResponse;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn config() -> crate::WasmProviderConfig {
+        // State lives inside actual WASM memory; recreation must clear it.
+        let bytes = br#"(module
+            (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+            (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+            (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+            (global $secret (mut i32) (i32.const 0))
+            (func $reply (param $value i32) (local $p i64)
+                i64.const 1 call $alloc local.set $p
+                local.get $p local.get $value call $store
+                local.get $p i64.const 1 call $output)
+            (func (export "init") (result i32) (local $p i64)
+                i64.const 11 call $alloc local.set $p
+                local.get $p i32.const 123 call $store
+                local.get $p i64.const 1 i64.add i32.const 34 call $store
+                local.get $p i64.const 2 i64.add i32.const 111 call $store
+                local.get $p i64.const 3 i64.add i32.const 107 call $store
+                local.get $p i64.const 4 i64.add i32.const 34 call $store
+                local.get $p i64.const 5 i64.add i32.const 58 call $store
+                local.get $p i64.const 6 i64.add i32.const 116 call $store
+                local.get $p i64.const 7 i64.add i32.const 114 call $store
+                local.get $p i64.const 8 i64.add i32.const 117 call $store
+                local.get $p i64.const 9 i64.add i32.const 101 call $store
+                local.get $p i64.const 10 i64.add i32.const 125 call $store
+                local.get $p i64.const 11 call $output i32.const 0)
+            (func (export "set") (result i32)
+                i32.const 1 global.set $secret i32.const 0)
+            (func (export "read") (result i32)
+                global.get $secret call $reply i32.const 0)
+            (func (export "spin") (result i32)
+                i32.const 1 global.set $secret (loop $forever br $forever) i32.const 0)
+            (func (export "trap") (result i32)
+                i32.const 1 global.set $secret unreachable)
+        )"#
+        .to_vec();
+        crate::WasmProviderConfig {
+            id: "worker-security-test".into(),
+            name: "test".into(),
+            kind: "test".into(),
+            wasm_path: "synthetic.wat".into(),
+            wasm_bytes: Arc::new(bytes),
+            allowed_hosts: vec![],
+            allowed_paths: vec![],
+            allowed_files: vec![],
+            options: Default::default(),
+            offline_cache: false,
+            tls_mode: rosec_core::config::TlsMode::Bundled,
+            tls_mode_probe: rosec_core::config::TlsMode::Bundled,
+            unlock_timeout_secs: 30,
+        }
+    }
+    async fn invoke(worker: &WasmWorker, name: &'static str) -> Result<Vec<u8>, ProviderError> {
+        worker
+            .call(move |p| match p.call::<(), Vec<u8>>(name, ()) {
+                Ok(v) => (Ok(v), CallOutcome::Clean),
+                Err(_) => (Err(ProviderError::Locked), CallOutcome::PluginCallFailed),
+            })
+            .await
+    }
+    async fn locked(worker: &WasmWorker) {
+        assert_eq!(invoke(worker, "read").await.unwrap(), vec![0]);
+    }
+
+    #[test]
+    fn provider_registration_survives_restart_and_rejects_wrong_password() {
+        use rosec_core::{Provider, UnlockInput};
+        use zeroize::Zeroizing;
+        fn reply(name: &str, json: &str) -> String {
+            let mut wat = format!(
+                "(func ${name} (local $p i64) i64.const {} call $alloc local.set $p ",
+                json.len()
+            );
+            for (i, byte) in json.bytes().enumerate() {
+                wat.push_str(&format!(
+                    "local.get $p i64.const {i} i64.add i32.const {byte} call $store "
+                ));
+            }
+            wat.push_str(&format!(
+                "local.get $p i64.const {} call $output)",
+                json.len()
+            ));
+            wat
+        }
+        let mut cfg = config();
+        let mut wat = String::from_utf8((*cfg.wasm_bytes).clone()).unwrap();
+        wat = wat.replacen(
+            "(module",
+            "(module (import \"extism:host/env\" \"input_length\" (func $length (result i64)))",
+            1,
+        );
+        wat.pop();
+        wat.push_str(&reply("yes", r#"{"ok":true}"#));
+        wat.push_str(&reply(
+            "registration",
+            r#"{"ok":false,"error_kind":"registration_required"}"#,
+        ));
+        wat.push_str(&reply(
+            "locked",
+            r#"{"locked":true,"last_sync_epoch_secs":null}"#,
+        ));
+        wat.push_str(&reply(
+            "unlocked",
+            r#"{"locked":false,"last_sync_epoch_secs":null}"#,
+        ));
+        wat.push_str(
+            r#"
+            (func (export "unlock") (result i32)
+                call $length i64.const 100 i64.gt_u
+                if i32.const 1 global.set $secret call $yes
+                else i32.const 0 global.set $secret call $registration end i32.const 0)
+            (func (export "lock") (result i32)
+                i32.const 0 global.set $secret call $yes i32.const 0)
+            (func (export "status") (result i32)
+                global.get $secret if call $unlocked else call $locked end i32.const 0)
+        )"#,
+        );
+        cfg.wasm_bytes = Arc::new(wat.into_bytes());
+        let _env_guard = crate::TEST_ENV_MUTEX.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", temp.path());
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let provider = crate::WasmProvider::new(cfg.clone()).unwrap();
+            provider
+                .unlock(UnlockInput::WithRegistration {
+                    password: Zeroizing::new("local-passphrase".into()),
+                    registration_fields: [(
+                        "personal_access_token".into(),
+                        Zeroizing::new("synthetic-personal-access-token".into()),
+                    )]
+                    .into(),
+                })
+                .await
+                .unwrap();
+            assert!(!provider.status().await.unwrap().locked);
+            provider.lock().await.unwrap();
+            assert!(provider.status().await.unwrap().locked);
+            drop(provider);
+            let restarted = crate::WasmProvider::new(cfg).unwrap();
+            assert!(
+                restarted
+                    .unlock(UnlockInput::Password(Zeroizing::new("wrong".into())))
+                    .await
+                    .is_err()
+            );
+            assert!(restarted.status().await.unwrap().locked);
+            restarted
+                .unlock(UnlockInput::Password(Zeroizing::new(
+                    "local-passphrase".into(),
+                )))
+                .await
+                .unwrap();
+            assert!(!restarted.status().await.unwrap().locked);
+            restarted.lock().await.unwrap();
+        });
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("XDG_DATA_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("XDG_DATA_HOME");
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_timeout_discards_active_guest() {
+        let (worker, _) = WasmWorker::spawn(config()).unwrap();
+        let result = worker
+            .call_with_timeout(Duration::from_millis(50), |p| {
+                let result = p.call::<(), Vec<u8>>("spin", ());
+                (
+                    result.map_err(|_| ProviderError::Locked),
+                    CallOutcome::PluginCallFailed,
+                )
+            })
+            .await;
+        assert!(result.is_err());
+        tokio::time::timeout(Duration::from_secs(5), locked(&worker))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_lock_runs_guest_cleanup_before_discarding_instance() {
+        let mut cfg = config();
+        let mut wat = String::from_utf8((*cfg.wasm_bytes).clone())
+            .unwrap()
+            .replace("(func (export \"init\")", "(func $ok (export \"init\")");
+        wat.pop();
+        wat.push_str(
+            r#"(func (export "lock") (result i32)
+            global.get $secret i32.eqz if unreachable end call $ok) )"#,
+        );
+        cfg.wasm_bytes = Arc::new(wat.into_bytes());
+        let (worker, _) = WasmWorker::spawn(cfg).unwrap();
+        invoke(&worker, "set").await.unwrap();
+        assert!(worker.lock().await.unwrap().ok);
+        locked(&worker).await;
+    }
+
+    #[tokio::test]
+    async fn traps_and_panics_discard_guest_state() {
+        let (worker, _) = WasmWorker::spawn(config()).unwrap();
+        assert!(invoke(&worker, "trap").await.is_err());
+        locked(&worker).await;
+        let result: Result<(), _> = worker
+            .call(|p| {
+                p.call::<(), Vec<u8>>("set", ()).unwrap();
+                panic!("synthetic panic");
+            })
+            .await;
+        assert!(result.is_err());
+        locked(&worker).await;
+        // Deserialization failure also resets the instance.
+        invoke(&worker, "set").await.unwrap();
+        assert!(
+            worker
+                .call_json_no_input::<SimpleResponse>("read")
+                .await
+                .is_err()
+        );
+        locked(&worker).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_unlock_and_explicit_invalidation_cannot_leave_secrets() {
+        let (worker, _) = WasmWorker::spawn(config()).unwrap();
+        let worker = Arc::new(worker);
+        let started = Arc::new(AtomicBool::new(false));
+        let run = Arc::clone(&worker);
+        let signal = Arc::clone(&started);
+        let task = tokio::spawn(async move {
+            run.call(move |p| {
+                signal.store(true, Ordering::SeqCst);
+                let result = p.call::<(), Vec<u8>>("spin", ());
+                (
+                    result.map_err(|_| ProviderError::Locked),
+                    CallOutcome::PluginCallFailed,
+                )
+            })
+            .await
+        });
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        // Let execution enter the guest before dropping the waiting future.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(5), locked(&worker))
+            .await
+            .unwrap();
+        invoke(&worker, "set").await.unwrap();
+        let old_generation = worker.generation();
+        worker.invalidate();
+        let stale: Result<(), _> = worker
+            .call_for_generation(old_generation, |_| {
+                panic!("a pre-lock authentication retry must not execute");
+            })
+            .await;
+        assert!(matches!(stale, Err(ProviderError::Locked)));
+        locked(&worker).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_queue_is_nonblocking_and_abandoned_work_is_skipped() {
+        let (worker, _) = WasmWorker::spawn(config()).unwrap();
+        let worker = Arc::new(worker);
+        let (release_tx, release_rx) = cb::bounded(0);
+        let (started_tx, started_rx) = oneshot::channel();
+        let run = Arc::clone(&worker);
+        let active = tokio::spawn(async move {
+            run.call(move |_| {
+                let _ = started_tx.send(());
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                (Ok(()), CallOutcome::Clean)
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        let executed = Arc::new(AtomicBool::new(false));
+        let mut queued = Vec::new();
+        for _ in 0..CALL_CHANNEL_CAPACITY {
+            let run = Arc::clone(&worker);
+            let executed = Arc::clone(&executed);
+            queued.push(tokio::spawn(async move {
+                run.call(move |_| {
+                    executed.store(true, Ordering::SeqCst);
+                    (Ok(()), CallOutcome::Clean)
+                })
+                .await
+            }));
+        }
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                worker.call(|_| (Ok(()), CallOutcome::Clean))
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        for task in queued {
+            task.abort();
+            let _ = task.await;
+        }
+        release_tx.send(()).unwrap();
+        let _ = active.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !worker.tx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        locked(&worker).await;
+        assert!(!executed.load(Ordering::SeqCst));
+    }
 }

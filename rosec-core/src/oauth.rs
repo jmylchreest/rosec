@@ -109,15 +109,37 @@ pub fn credential_path(provider_id: &str) -> Option<PathBuf> {
 ///
 /// The returned `(client_id, EncryptedFields)` must be decrypted by the caller.
 pub fn load_encrypted(provider_id: &str) -> Option<(String, EncryptedFields)> {
-    let path = credential_path(provider_id)?;
-    let contents = std::fs::read_to_string(&path).ok()?;
-    match toml::from_str::<StoredCredential>(&contents) {
-        Ok(stored) => Some((stored.client_id, stored.encrypted)),
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "failed to parse OAuth credential file");
+    match load_encrypted_checked(provider_id) {
+        Ok(value) => value,
+        Err(_) => {
+            warn!("failed to load OAuth credential file");
             None
         }
     }
+}
+
+/// Distinguish absent credentials from corrupt/unreadable files. Parse errors
+/// never include file contents, and reads are bounded before TOML allocation.
+pub fn load_encrypted_checked(
+    provider_id: &str,
+) -> Result<Option<(String, EncryptedFields)>, String> {
+    use std::io::Read;
+    let path = credential_path(provider_id).ok_or("Cannot locate credential file")?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read credential file".into()),
+    };
+    let mut contents = Zeroizing::new(String::new());
+    file.take(1024 * 1024 + 1)
+        .read_to_string(&mut contents)
+        .map_err(|_| "Cannot read credential file")?;
+    if contents.len() > 1024 * 1024 {
+        return Err("Credential file too large".into());
+    }
+    let stored: StoredCredential =
+        toml::from_str(&contents).map_err(|_| "Invalid credential file")?;
+    Ok(Some((stored.client_id, stored.encrypted)))
 }
 
 /// Persist pre-encrypted credential fields for `provider_id` to disk with mode `0600`.
@@ -178,33 +200,15 @@ pub fn clear(provider_id: &str) -> Result<bool, String> {
 fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
-    let tmp_path = path.with_extension("toml.tmp");
-
-    {
-        // Open with mode 0600 at creation time to avoid a TOCTOU window
-        // where the file would be world-readable between open() and chmod().
-        #[cfg(unix)]
-        let mut f = {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)?
-        };
-        #[cfg(not(unix))]
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-
-        f.write_all(data)?;
-        f.flush()?;
-    }
-
-    std::fs::rename(&tmp_path, path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Missing credential directory"))?;
+    // Unpredictable, exclusively created mode-0600 file. A pre-existing .tmp
+    // symlink can neither redirect this write nor weaken its permissions.
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(data)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -272,6 +276,34 @@ mod tests {
     fn load_missing_returns_none() {
         with_tmp_home(|| {
             assert!(load_encrypted("nonexistent-provider").is_none());
+        });
+    }
+
+    #[test]
+    fn corrupt_and_oversize_files_are_errors_not_missing_credentials() {
+        with_tmp_home(|| {
+            save_encrypted("broken", "id", &make_encrypted()).unwrap();
+            let path = credential_path("broken").unwrap();
+            std::fs::write(&path, "synthetic-secret invalid TOML").unwrap();
+            let error = load_encrypted_checked("broken").unwrap_err();
+            assert!(!error.contains("synthetic-secret"));
+            std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+            assert!(load_encrypted_checked("broken").is_err());
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn predictable_temp_symlink_cannot_redirect_credential_write() {
+        with_tmp_home(|| {
+            let path = credential_path("symlink").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let unrelated = path.with_extension("unrelated");
+            std::fs::write(&unrelated, "untouched").unwrap();
+            std::os::unix::fs::symlink(&unrelated, path.with_extension("toml.tmp")).unwrap();
+            save_encrypted("symlink", "id", &make_encrypted()).unwrap();
+            assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "untouched");
+            assert!(load_encrypted_checked("symlink").unwrap().is_some());
         });
     }
 

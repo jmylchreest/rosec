@@ -164,8 +164,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             json!({"Session":{"SessionUID":"synthetic-uid","AccessToken":"synthetic-access","RefreshToken":"synthetic-refresh"}})
                         },
                     )
+                } else if path == "/core/v4/auth" {
+                    assert!(text.starts_with("DELETE "));
+                    (200, json!({"Code":1000}))
                 } else if current == 2 {
                     (401, json!({"Error":"synthetic revocation"}))
+                } else if current == 10 {
+                    (403, json!({"Error":"synthetic permission denial"}))
+                } else if current == 11 {
+                    (503, json!({"Error":"synthetic outage"}))
+                } else if path == "/auth/v4/refresh" {
+                    assert_eq!(current, 9);
+                    assert!(text.contains("synthetic-refresh"));
+                    assert!(text.contains("refresh_token"));
+                    mode.store(0, Ordering::SeqCst);
+                    (
+                        200,
+                        json!({"UID":"synthetic-uid", "AccessToken":"rotated-access", "RefreshToken":"rotated-refresh"}),
+                    )
+                } else if current == 9 {
+                    (401, json!({"Error":"synthetic expiry"}))
                 } else if path == "/pass/v1/share" {
                     (
                         200,
@@ -247,7 +265,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let descriptor = call(&mut p, "plugin_manifest", Value::Null)?;
     assert_eq!(descriptor["kind"], "protonpass");
     assert_eq!(descriptor["experimental"], true);
-    let auth = call(&mut p, "auth_fields", Value::Null)?;
+    assert_eq!(
+        call(&mut p, "auth_fields", Value::Null)?["fields"],
+        json!([])
+    );
+    let auth = call(&mut p, "registration_info", Value::Null)?;
+    assert_eq!(auth["has_registration"], true);
+    assert_eq!(
+        call(&mut p, "unlock", json!({"password":"test"}))?["error_kind"],
+        "registration_required"
+    );
     assert_eq!(auth["fields"][0]["id"], "personal_access_token");
     // Password-kind would make the host use the PAT as the local passphrase,
     // removing it from the additional fields passed to the guest.
@@ -440,6 +467,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?["ok"],
             true
         );
+        mode.store(9, Ordering::SeqCst);
+        let before = requests.load(Ordering::SeqCst);
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        assert_eq!(
+            requests.load(Ordering::SeqCst) - before,
+            5,
+            "one refresh and one retried share request"
+        );
+        for (failure, kind) in [(10, "auth_failed"), (11, "unavailable")] {
+            mode.store(failure, Ordering::SeqCst);
+            let before = requests.load(Ordering::SeqCst);
+            assert_eq!(call(&mut p, "sync", Value::Null)?["error_kind"], kind);
+            assert_eq!(
+                requests.load(Ordering::SeqCst) - before,
+                2,
+                "failure plus logout; no refresh retry"
+            );
+            assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+            mode.store(0, Ordering::SeqCst);
+            assert_eq!(
+                call(
+                    &mut p,
+                    "unlock",
+                    json!({"password":"test", "registration_fields":{"personal_access_token":pat.as_str()}})
+                )?["ok"],
+                true
+            );
+        }
         // A rejected re-authentication must not keep the prior session unlocked.
         assert_eq!(call(&mut p, "unlock", json!({"password":""}))?["ok"], false);
         assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);

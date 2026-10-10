@@ -90,9 +90,11 @@ flow).  File I/O in `unlock` is acceptable -- it's a network-gated function.
 But data-access functions called *after* unlock must operate on the in-memory
 cache built during unlock, not re-read files on every call.
 
-**Teardown (never gated, never triggers recreation):**
-`lock`.
-Must always succeed quickly.  Should not make network calls.
+**Teardown (never readiness-gated):** `lock` fences queued operations and cancels
+active execution. An idle guest receives `lock` before the host discards its instance.
+Clear local secrets first. A provider may attempt bounded, best-effort session
+revocation, but local lock must succeed without the network. Traps, cancellation
+and process termination can prevent remote cleanup.
 
 ## Error handling rules
 
@@ -401,6 +403,27 @@ The poisoned-but-recovered mutex in the old instance is never used again.
    also validate URLs defensively.  Prefer exact hostnames over
    wildcards — `*` matches `.` so `*.example.com` matches arbitrary
    subdomain depth (see "Security constraint" above).
+
+## Credential persistence and execution limits
+
+Registration fields are encrypted by the host with Argon2id (64 MiB, three passes,
+one lane), a random salt, installation key and provider-bound HKDF. New records
+use version 2; version 1 records migrate after successful decryption. Later unlocks
+load saved fields only after the guest returns `registration_required`. Wrong
+passwords or corrupt files preserve the record and fail authentication. Registration
+save failures leave the guest locked. A new PAT/token is an explicit registration,
+not a password-only unlock.
+
+Back up `rosec/machine-key` alongside encrypted credential records. Losing the key
+or passphrase requires re-registration. Older hosts cannot read version 2 records;
+keep a compatible encrypted backup before downgrading.
+
+The shared runtime requires Rust 1.96. Default guest calls retain a 180-second
+execution limit for slow KeePass KDFs; callers allow another five seconds. Proton
+uses 60/65 seconds and an 8 MiB response cap. Blocking HTTP requests have a
+10-second cap within the guest execution deadline. Cancellation or timeout
+invalidates pending calls and the entire authentication generation, including
+credential replay. Queue saturation returns `unavailable` without blocking Tokio.
 
 ## Offline cache
 

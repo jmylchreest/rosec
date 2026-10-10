@@ -65,12 +65,28 @@ responses are capped at 8 MiB in the guest. Duplicate IDs, malformed responses,
 authentication failures and exceeded limits clear the snapshot and lock it.
 A network outage therefore requires authentication again; there is no offline fallback.
 
-The local passphrase is only checked for nonemptiness by the guest. Host-wrapped
-credential restart/rotation/recovery flows are not yet validated. Additional
-production work includes full secret-buffer cleanup, shared runtime advisory
-remediation, protected metadata/offline cache, passkeys and SSH-agent support.
-The source tree's `rosec-protonpass/SECURITY-REVIEW.md` contains the findings and
-synthetic performance measurements. These limitations are not production guarantees.
+Register the PAT once with a separate local passphrase. The host encrypts it using
+Argon2id, a random salt and the installation key; later unlocks use the passphrase.
+Wrong passwords preserve the saved registration. Re-run `rosec provider auth` to
+replace the PAT/passphrase. Restore the installation key alongside encrypted
+credentials, or re-register if that key or passphrase is lost.
+
+Access-token expiry permits one refresh attempt. Permission denials do not retry.
+Normal lock attempts to revoke this API session and clears local state even if the
+network request fails. Cancellation/traps may prevent remote logout; lock does not
+revoke the registered PAT. Worker cancellation, timeout and malformed responses
+invalidate the guest before later requests can access its state.
+
+The host now uses Extism 1.41.0 / Wasmtime 49.0.2 and requires Rust 1.96 or newer.
+Both host and guest cap Proton responses at 8 MiB. Guest execution is capped at
+60 seconds, caller waits at 65 seconds, and individual HTTP operations at 10 seconds.
+Secret cleanup covers owned guest allocations and rosec transport buffers, but
+complete erasure of upstream library and compiler copies is not proven.
+
+Production work still includes protected metadata/offline cache, passkeys and
+SSH-agent support. The source tree's `rosec-protonpass/SECURITY-REVIEW.md` records
+tests, remaining risks and performance measurements. Session refresh/logout and
+restart changes have synthetic coverage; they have not been retested on a live account.
 
 ## Licence
 

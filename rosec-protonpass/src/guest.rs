@@ -22,6 +22,7 @@ struct State {
 struct Session {
     uid: Zeroizing<String>,
     access: Zeroizing<String>,
+    refresh: Zeroizing<String>,
     key: Zeroizing<Vec<u8>>,
 }
 
@@ -42,10 +43,72 @@ impl Drop for WipedResponse {
         }
     }
 }
+#[link(wasm_import_module = "extism:host/env")]
+unsafe extern "C" {
+    fn input_offset() -> u64;
+}
+fn wipe_input() {
+    // The plugin macro has already deserialized input into Rust-owned memory.
+    // Clear the host's source allocation without freeing its runtime-owned handle.
+    let offset = unsafe { input_offset() };
+    let length = unsafe { extism_pdk::extism::input_length() };
+    let zeros = [0u8; 4096];
+    for start in (0..length).step_by(zeros.len()) {
+        let len = (length - start).min(zeros.len() as u64);
+        extism_pdk::memory::internal::store(
+            MemoryHandle {
+                offset: offset + start,
+                length: len,
+            },
+            &zeros[..len as usize],
+        );
+    }
+}
+
 fn fail(kind: &str, message: &str) -> Json<Value> {
     Json(json!({"ok":false,"error_kind":kind,"error":message}))
 }
+fn error_kind(message: &str) -> &'static str {
+    match message {
+        "HTTP transport failed" | "Proton HTTP request failed" => "unavailable",
+        "Proton authorization rejected" | "Proton access token expired" => "auth_failed",
+        _ => "invalid_input",
+    }
+}
+// Refresh at most once after an expired access token. Permission failures (403)
+// are never refreshed or retried. Rotated credentials replace the old pair only
+// after the entire response validates.
 fn request(
+    s: &mut State,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<SensitiveJson, &'static str> {
+    let result = request_once(s, method, path, body);
+    if result.as_ref().err() != Some(&"Proton access token expired") || s.session.is_none() {
+        return result;
+    }
+    let session = s.session.as_ref().ok_or("locked")?;
+    let refresh_body = SensitiveJson(json!({"UID":session.uid.as_str(),
+        "RefreshToken":session.refresh.as_str(), "ResponseType":"token",
+        "GrantType":"refresh_token", "RedirectURI":"https://protonmail.ch"}));
+    let bytes =
+        Zeroizing::new(serde_json::to_vec(&*refresh_body).map_err(|_| "Invalid refresh request")?);
+    let mut response = request_once(s, "POST", "/auth/v4/refresh", Some(&bytes))?;
+    let uid = take_secret(&mut response, "UID")?;
+    let access = take_secret(&mut response, "AccessToken")?;
+    let refresh = take_secret(&mut response, "RefreshToken")?;
+    if uid.is_empty() || access.is_empty() || refresh.is_empty() {
+        return Err("Invalid refreshed session");
+    }
+    let session = s.session.as_mut().ok_or("locked")?;
+    session.uid = uid;
+    session.access = access;
+    session.refresh = refresh;
+    request_once(s, method, path, body)
+}
+
+fn request_once(
     s: &State,
     method: &str,
     path: &str,
@@ -67,7 +130,10 @@ fn request(
     let response = http::request::<&[u8]>(&req, body).map_err(|_| "HTTP transport failed")?;
     let code = response.status_code();
     let memory = WipedResponse(ManagedMemory::new(response.into_memory()));
-    if code == 401 || code == 403 {
+    if code == 401 {
+        return Err("Proton access token expired");
+    }
+    if code == 403 {
         return Err("Proton authorization rejected");
     }
     if !(200..300).contains(&code) {
@@ -110,8 +176,10 @@ fn take_secret(v: &mut Value, name: &str) -> Result<Zeroizing<String>, &'static 
     }
 }
 
-fn fetch_items(s: &State) -> Result<BTreeMap<String, Entry>, &'static str> {
-    let session = s.session.as_ref().ok_or("locked")?;
+fn fetch_items(s: &mut State) -> Result<BTreeMap<String, Entry>, &'static str> {
+    // Refresh may rotate the session during pagination; keep the guarded vault
+    // key independently owned while requests mutably update bearer credentials.
+    let key = s.session.as_ref().ok_or("locked")?.key.clone();
     let shares = request(s, "GET", "/pass/v1/share", None)?;
     let mut result = BTreeMap::new();
     let shares = array(&shares, "Shares")?;
@@ -139,11 +207,7 @@ fn fetch_items(s: &State) -> Result<BTreeMap<String, Entry>, &'static str> {
             }
             for row in rows {
                 let rotation = row["KeyRotation"].as_u64().ok_or("Missing key rotation")?;
-                let key = crypto::decrypt(
-                    &decode(field(row, "Key")?)?,
-                    &session.key,
-                    crypto::SHARE_KEY,
-                )?;
+                let key = crypto::decrypt(&decode(field(row, "Key")?)?, &key, crypto::SHARE_KEY)?;
                 if key.len() != 32 {
                     return Err("Invalid share key length");
                 }
@@ -262,14 +326,14 @@ pub fn status(_: ()) -> FnResult<Json<Value>> {
 }
 #[plugin_fn]
 pub fn unlock(Json(input): Json<Value>) -> FnResult<Json<Value>> {
+    wipe_input();
     let mut input = SensitiveJson(input);
     let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_mut() else {
         return Ok(fail("invalid_input", "Not initialized"));
     };
     // Every re-authentication attempt invalidates the previous snapshot first.
-    s.session = None;
-    s.items.clear();
+    clear_session(s);
     // The daemon currently routes additional interactive auth fields through
     // WithRegistration; the direct harness uses WithAuth. Accept both envelopes.
     let token = if input["auth_fields"]["personal_access_token"].is_string() {
@@ -288,6 +352,12 @@ pub fn unlock(Json(input): Json<Value>) -> FnResult<Json<Value>> {
     let password = take_secret(&mut input, "password");
     if !password.as_ref().is_ok_and(|p| !p.is_empty()) {
         return Ok(fail("auth_failed", "Local passphrase required"));
+    }
+    if token.is_err() {
+        return Ok(fail(
+            "registration_required",
+            "Register a viewer personal access token",
+        ));
     }
     let result = (|| {
         let raw = token?;
@@ -317,29 +387,48 @@ pub fn unlock(Json(input): Json<Value>) -> FnResult<Json<Value>> {
             response.get_mut("Session").ok_or("Missing session")?,
             "AccessToken",
         )?;
-        let _refresh = take_secret(
+        let refresh = take_secret(
             response.get_mut("Session").ok_or("Missing session")?,
             "RefreshToken",
         )?;
-        s.session = Some(Session { uid, access, key });
+        if uid.is_empty() || access.is_empty() || refresh.is_empty() {
+            return Err("Invalid session");
+        }
+        s.session = Some(Session {
+            uid,
+            access,
+            refresh,
+            key,
+        });
         s.items = fetch_items(s)?;
         Ok::<(), &'static str>(())
     })();
     match result {
         Ok(()) => Ok(Json(json!({"ok":true}))),
         Err(e) => {
-            s.session = None;
-            s.items.clear();
+            clear_session(s);
             Ok(fail("auth_failed", e))
         }
+    }
+}
+fn clear_session(s: &mut State) {
+    s.items.clear();
+    if let Some(session) = s.session.take() {
+        let retired = State {
+            api: s.api.clone(),
+            session: Some(session),
+            items: BTreeMap::new(),
+        };
+        // Best effort: local lock cannot depend on network availability. Only
+        // revoke this API session; never revoke the user's PAT or other sessions.
+        let _ = request_once(&retired, "DELETE", "/core/v4/auth", None);
     }
 }
 #[plugin_fn]
 pub fn lock(_: ()) -> FnResult<Json<Value>> {
     let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     if let Some(s) = guard.as_mut() {
-        s.session = None;
-        s.items.clear();
+        clear_session(s);
     }
     Ok(Json(json!({"ok":true})))
 }
@@ -349,15 +438,17 @@ pub fn sync(_: ()) -> FnResult<Json<Value>> {
     let Some(s) = guard.as_mut().filter(|s| s.session.is_some()) else {
         return Ok(fail("locked", "locked"));
     };
+    // Drop the old plaintext snapshot before constructing its replacement. The
+    // provider serializes operations, so retaining both buys no concurrent reads.
+    s.items.clear();
     match fetch_items(s) {
         Ok(items) => {
             s.items = items;
             Ok(Json(json!({"ok":true})))
         }
         Err(e) => {
-            s.session = None;
-            s.items.clear();
-            Ok(fail("auth_failed", e))
+            clear_session(s);
+            Ok(fail(error_kind(e), e))
         }
     }
 }
@@ -446,7 +537,13 @@ pub fn plugin_manifest(_: String) -> FnResult<Json<Value>> {
 }
 #[plugin_fn]
 pub fn auth_fields(_: String) -> FnResult<Json<Value>> {
-    Ok(Json(
-        json!({"fields":[{"id":"personal_access_token","label":"Personal access token","placeholder":"","required":true,"kind":"secret"}]}),
-    ))
+    Ok(Json(json!({"fields":[]})))
+}
+#[plugin_fn]
+pub fn registration_info(_: String) -> FnResult<Json<Value>> {
+    Ok(Json(json!({
+        "has_registration": true,
+        "instructions": "Create a viewer personal access token in Proton Pass CLI. Choose a local passphrase to encrypt it on this installation. Re-register to replace the token or local passphrase.",
+        "fields": [{"id":"personal_access_token","label":"Personal access token","placeholder":"","required":true,"kind":"secret"}]
+    })))
 }

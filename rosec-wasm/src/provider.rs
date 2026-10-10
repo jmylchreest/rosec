@@ -28,12 +28,8 @@ use crate::protocol::{
     WasmFido2CredentialMeta, WasmSshKeyMeta,
 };
 
-/// Hard wall-clock cap on a single guest function call.  Set high enough to
-/// cover slow paths in WASM-compiled crypto (Argon2 KDF in keepassxc-file
-/// can take 30–60 s for default KeePassXC params, and significantly longer
-/// for heavily-tuned databases).  Too short causes spurious traps mid-KDF;
-/// too long lets a misbehaving plugin pin a host thread.  3 minutes is
-/// generous for legitimate slow paths and still bounded.
+/// Default guest execution budget, including slow KeePass KDFs. The worker
+/// allows five more seconds for timeout propagation. Proton uses a tighter cap.
 pub(crate) const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Configuration for constructing a `WasmProvider`.
@@ -317,7 +313,7 @@ impl WasmProvider {
     ///
     /// Called when readiness probes fail and offline caching is enabled
     /// (both `Capability::OfflineCache` and `config.offline_cache`).
-    async fn unlock_from_cache(&self) -> Result<(), ProviderError> {
+    async fn unlock_from_cache(&self, generation: u64) -> Result<(), ProviderError> {
         use crate::protocol::{RestoreCacheRequest, SimpleResponse};
 
         // Read and decrypt the cache file while holding the cache_key lock.
@@ -355,8 +351,10 @@ impl WasmProvider {
         // owned source string before the closure returns.
         let resp: SimpleResponse = self
             .worker
-            .call(move |plugin| {
-                let mut req = RestoreCacheRequest { blob_b64 };
+            .call_for_generation(generation, move |plugin| {
+                let mut req = RestoreCacheRequest {
+                    blob_b64: Zeroizing::new(blob_b64),
+                };
                 let out =
                     call_guest_json_sensitive::<_, SimpleResponse>(plugin, "restore_cache", &req);
                 req.blob_b64.zeroize();
@@ -367,6 +365,8 @@ impl WasmProvider {
         if !resp.ok {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
+
+        self.worker.check_generation(generation)?;
 
         // Offline unlock succeeded — mark as cached (data unconfirmed).
         self.cached
@@ -677,6 +677,29 @@ impl Provider for WasmProvider {
     }
 
     async fn unlock(&self, input: UnlockInput) -> Result<(), ProviderError> {
+        struct UnlockGuard<'a> {
+            provider: &'a WasmProvider,
+            done: bool,
+        }
+        impl Drop for UnlockGuard<'_> {
+            fn drop(&mut self) {
+                if !self.done {
+                    self.provider.stop_notifications();
+                    *self
+                        .provider
+                        .cache_key
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    self.provider.worker.invalidate();
+                }
+            }
+        }
+        let generation = self.worker.generation();
+        let mut unlock_guard = UnlockGuard {
+            provider: self,
+            done: false,
+        };
+
         // Extract the password (needed for credential persistence key derivation
         // and cache key derivation).
         let password_ref: &Zeroizing<String> = match &input {
@@ -711,17 +734,22 @@ impl Provider for WasmProvider {
             // decrypt the cache file.  The key is only stored on success
             // (unlock_from_cache will read it from self.cache_key).
             self.derive_and_store_cache_key(password_ref.as_str());
-            return self.unlock_from_cache().await.map_err(|cache_err| {
-                // Surface both the original probe failure and the cache
-                // failure so the user gets actionable diagnostic context.
-                ProviderError::Unavailable(format!(
-                    "readiness probe failed: {probe_err}; \
+            let result = self
+                .unlock_from_cache(generation)
+                .await
+                .map_err(|cache_err| {
+                    // Surface both the original probe failure and the cache
+                    // failure so the user gets actionable diagnostic context.
+                    ProviderError::Unavailable(format!(
+                        "readiness probe failed: {probe_err}; \
                      offline cache also unavailable: {cache_err}"
-                ))
-            });
+                    ))
+                });
+            unlock_guard.done = result.is_ok();
+            return result;
         }
 
-        let mut req = match &input {
+        let req = match &input {
             UnlockInput::Password(pw) => UnlockRequest {
                 password: pw.as_str().to_owned(),
                 registration_fields: None,
@@ -749,10 +777,10 @@ impl Provider for WasmProvider {
 
         // Argon2 unlock can run for tens of seconds; dispatching to the worker
         // thread keeps the daemon's tokio runtime responsive throughout.
-        let req_for_call = req.clone();
+        let req_for_call = req;
         let result: Result<SimpleResponse, ProviderError> = self
             .worker
-            .call(move |plugin| {
+            .call_for_generation(generation, move |plugin| {
                 call_guest_json_sensitive::<_, SimpleResponse>(plugin, "unlock", &req_for_call)
             })
             .await;
@@ -766,7 +794,14 @@ impl Provider for WasmProvider {
                     .as_ref()
                     .is_some_and(|k| matches!(k, ErrorKind::RegistrationRequired));
                 if is_reg_required && !has_registration {
-                    match crate::wasm_cred::load(&self.config.id, password_ref.as_str()) {
+                    let provider_id = self.config.id.clone();
+                    let password = Zeroizing::new(password_ref.as_str().to_owned());
+                    let stored = tokio::task::spawn_blocking(move || {
+                        crate::wasm_cred::load(&provider_id, password.as_str())
+                    })
+                    .await
+                    .map_err(|_| ProviderError::Unavailable("Credential loading failed".into()))?;
+                    match stored {
                         Ok(Some(stored_fields)) => {
                             debug!(
                                 provider = %self.config.id,
@@ -782,7 +817,7 @@ impl Provider for WasmProvider {
                             };
 
                             self.worker
-                                .call(move |plugin| {
+                                .call_for_generation(generation, move |plugin| {
                                     let mut retry_req = retry_req;
                                     let out = call_guest_json_sensitive::<_, SimpleResponse>(
                                         plugin, "unlock", &retry_req,
@@ -829,20 +864,8 @@ impl Provider for WasmProvider {
             _ => result,
         };
 
-        // Zeroize the original request fields.
-        req.password.zeroize();
-        if let Some(ref mut fields) = req.registration_fields {
-            for v in fields.values_mut() {
-                v.zeroize();
-            }
-        }
-        if let Some(ref mut fields) = req.auth_fields {
-            for v in fields.values_mut() {
-                v.zeroize();
-            }
-        }
-
         let resp = result?;
+        self.worker.check_generation(generation)?;
         if resp.ok {
             // If registration fields were provided, persist them for next time.
             if has_registration
@@ -851,11 +874,16 @@ impl Provider for WasmProvider {
                     ..
                 } = &input
             {
-                match crate::wasm_cred::save(
-                    &self.config.id,
-                    password_ref.as_str(),
-                    registration_fields,
-                ) {
+                let provider_id = self.config.id.clone();
+                let password = Zeroizing::new(password_ref.as_str().to_owned());
+                // The blocking KDF task must own its guarded fields.
+                let fields = registration_fields.clone();
+                let saved = tokio::task::spawn_blocking(move || {
+                    crate::wasm_cred::save(&provider_id, password.as_str(), &fields)
+                })
+                .await
+                .map_err(|_| ProviderError::Unavailable("Credential saving failed".into()))?;
+                match saved {
                     Ok(()) => {
                         debug!(
                             provider = %self.config.id,
@@ -863,10 +891,10 @@ impl Provider for WasmProvider {
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            provider = %self.config.id,
+                        self.worker.invalidate();
+                        return Err(ProviderError::Unavailable(format!(
                             "failed to save registration credentials: {e}"
-                        );
+                        )));
                     }
                 }
             }
@@ -887,10 +915,12 @@ impl Provider for WasmProvider {
                 self.try_export_cache().await;
             }
 
+            self.worker.check_generation(generation)?;
             // Start real-time notifications (if the guest supports it).
             // Must be called after unlock so the guest has a valid token.
             self.start_notifications();
 
+            unlock_guard.done = true;
             self.fire_callback(|cbs| {
                 if let Some(ref cb) = cbs.on_unlocked {
                     cb();
@@ -902,6 +932,7 @@ impl Provider for WasmProvider {
             .as_ref()
             .is_some_and(|k| matches!(k, ErrorKind::TwoFactorRequired))
         {
+            unlock_guard.done = true;
             Err(map_guest_2fa_error(resp.two_factor_methods))
         } else {
             Err(map_guest_error(resp.error, resp.error_kind))
@@ -915,8 +946,10 @@ impl Provider for WasmProvider {
     async fn lock(&self) -> Result<(), ProviderError> {
         // Stop notifications first (drops WebSocket before clearing auth).
         self.stop_notifications();
+        // Clear host-held key material even if guest cleanup fails or times out.
+        *self.cache_key.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
-        let resp: SimpleResponse = self.worker.call_json_no_input("lock").await?;
+        let resp: SimpleResponse = self.worker.lock().await?;
         if resp.ok {
             // Zeroize cache key and reset cache state.
             *self.cache_key.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1069,7 +1102,7 @@ impl Provider for WasmProvider {
         }
         let mut b64 = resp.value_b64.ok_or(ProviderError::NotFound)?;
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&b64)
+            .decode(b64.as_bytes())
             .map_err(|e| ProviderError::Other(anyhow::anyhow!("invalid base64 from guest: {e}")));
         // Zeroize the base64 string — it contained the secret in encoded form.
         b64.zeroize();
@@ -1132,9 +1165,7 @@ impl Provider for WasmProvider {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
         let pem = resp.pem.ok_or(ProviderError::NotFound)?;
-        Ok(SshPrivateKeyMaterial {
-            pem: Zeroizing::new(pem),
-        })
+        Ok(SshPrivateKeyMaterial { pem })
     }
 
     async fn list_fido2_credentials(&self) -> Result<Vec<Fido2CredentialMeta>, ProviderError> {
@@ -1197,9 +1228,7 @@ impl Provider for WasmProvider {
             return Err(map_guest_error(resp.error, resp.error_kind));
         }
         let pem = resp.pem.ok_or(ProviderError::NotFound)?;
-        Ok(Fido2KeyMaterial {
-            pem: Zeroizing::new(pem),
-        })
+        Ok(Fido2KeyMaterial { pem })
     }
 
     /// Check whether the remote has changed since the last sync.
@@ -1615,25 +1644,36 @@ fn dispatch_and_deserialize<O: DeserializeOwned>(
 ) -> GuestCallResult<O> {
     let output_bytes: &[u8] = match plugin.call(func, input) {
         Ok(b) => b,
-        Err(e) => {
+        Err(_) => {
             return (
                 Err(ProviderError::Other(anyhow::anyhow!(
-                    "WASM call to {func} failed: {e}"
+                    "WASM call to {func} failed"
                 ))),
                 CallOutcome::PluginCallFailed,
             );
         }
     };
 
-    match serde_json::from_slice(output_bytes) {
+    let result = match serde_json::from_slice(output_bytes) {
         Ok(val) => (Ok(val), CallOutcome::Clean),
-        Err(e) => (
+        Err(_) => (
             Err(ProviderError::Other(anyhow::anyhow!(
-                "failed to deserialize output from {func}: {e}"
+                "invalid JSON output from {func}"
             ))),
-            CallOutcome::Clean,
+            CallOutcome::PluginCallFailed,
         ),
+    };
+    // The C API exposes Extism's owned output allocation. No borrowed output
+    // survives deserialization (O: DeserializeOwned), and exclusive Plugin access
+    // prevents a concurrent call from resetting it while we wipe it.
+    unsafe {
+        let len = extism::sdk::extism_plugin_output_length(plugin) as usize;
+        let ptr = extism::sdk::extism_plugin_output_data(plugin).cast_mut();
+        if len > 0 && !ptr.is_null() {
+            std::slice::from_raw_parts_mut(ptr, len).zeroize();
+        }
     }
+    result
 }
 
 /// Call a guest function with JSON input, deserialize JSON output.

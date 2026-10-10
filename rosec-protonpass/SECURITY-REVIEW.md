@@ -7,10 +7,31 @@ audit or a claim of production readiness. The live account was not accessed.
 
 ## Result
 
-The spike is suitable for further isolated development. **Do not release it yet.**
-The concrete plugin issues below were fixed. Shared host advisories, complete
-credential lifecycle, remaining secret copies and the agreed first-release
-retrieval features still need work. No write/password-change forwarding was added.
+The security follow-up fixes the identified host lifecycle, credential persistence,
+owned-memory cleanup and resource-boundary defects. **The spike is still not a
+release candidate:** the agreed retrieval features and distribution review remain
+incomplete. Erasure of every upstream-library/compiler copy is not proven. No
+account credentials were accessed during these changes.
+
+## Security follow-up (2026-10-10)
+
+| Finding | Resolution and evidence |
+|---|---|
+| Four Wasmtime advisories and old WASI dependencies | Both lockfiles use Extism 1.41.0 / Wasmtime 49.0.2. Removed the obsolete 0222 exception. The standalone plugin audit has no suppressions or findings. Workspace audit passes its existing policy; unrelated `rsa`, `quick-xml` and `ttf-parser` exceptions remain. Upgraded `rqrr` to 0.11 / `lru` 0.18.5 to remove 0253. Workspace MSRV is now 1.96. |
+| Timed-out/cancelled unlock could finish later | Worker call guards cancel execution and invalidate a generation. Closed/stale queued calls are skipped. The same generation fences the whole authentication flow, including credential KDF/replay and offline restore. Later calls require a fresh instance. Actual WASM tests cover dropped futures, caller timeout, traps, malformed output, panic, explicit invalidation and queue saturation. |
+| Panic or failed reinitialization retained a damaged instance | Panics force recreation; failed rebuild/init stops the worker. Closed watch channels no longer spin. Guest-call errors do not include raw guest error text. |
+| Lock waited behind active work and retained host cache keys on error | Lock fences queued calls and cancels active execution; idle guests may perform session cleanup before unconditional disposal. Host cache keys clear before waiting. Tests verify idle cleanup, cancellation and locked state after restart. |
+| Password/registration lifecycle incomplete | PAT moved to registration metadata. Password-only unlock returns `registration_required`, activating host credential replay. Host tests cover register/lock/restart/correct and wrong password; credential tests cover token/passphrase replacement, machine/provider binding and v1 migration. Persistence failure invalidates the unlocked instance. |
+| Weak password-only credential wrapping and unsafe persistence edges | New writes use Argon2id, 64 MiB/3 passes/1 lane, 16-byte random salt, installation secret and provider-bound HKDF. KDF scratch memory is guarded and work runs off Tokio threads. Atomic mode-0600 writes avoid predictable temporary paths. Machine-key creation cannot overwrite a concurrent winner. Corrupt/oversized credential files fail with redacted errors. |
+| Partial parser allocations, secret replies and request copies | Guest allocator wipes on deallocation/reallocation, covering partially parsed/unknown fields and serialization temporaries. AES/GHASH/CTR/POLYVAL cleanup enabled. Unlock requests own drop guards; secret result fields deserialize into guarded strings. Host scrubs output memory, HTTP request/body buffers and owned response buffers. Allocation regression checks memory before release. |
+| Session expiry and cleanup absent | One refresh attempt after 401 rotates UID/access/refresh atomically; 403 never retries. Normal lock/re-authentication best-effort revokes only this session. Fixture covers successful refresh, revoked refresh, permission denial, outage and cleanup. Abrupt disposal/network failure cannot guarantee server logout. |
+| Snapshot duplication and split resource limits | Sync clears the previous snapshot before replacement; transport outages report unavailable while remaining locked. Host enforces Proton's 8 MiB response limit, 256 MiB memory, 60-second execution/65-second caller deadline and 10-second HTTP cap. Other guests retain their 180-second execution budget for slow KeePass KDFs, with a 185-second caller limit. Real HTTP override tests check size, execution deadline and redacted denial errors. |
+
+The refresh/revocation protocol was checked against Proton's published
+[Go API refresh implementation](https://github.com/ProtonMail/go-proton-api/blob/master/manager_auth.go)
+and [WebClients authentication routes](https://github.com/ProtonMail/WebClients/blob/main/packages/shared/lib/api/auth.ts).
+Those upstream sources establish request shapes, not proof of live PAT-session compatibility.
+The new lifecycle tests use synthetic data only.
 
 ## Fixed in this pass
 
@@ -27,73 +48,33 @@ retrieval features still need work. No write/password-change forwarding was adde
 
 ## Remaining findings and release gates
 
-1. **High: the shared host dependency audit is not clean.** The lockfile includes
-   Extism 1.30.0 / Wasmtime 43.0.2 for the native test host, matching the rosec host.
-   An unfiltered RustSec audit reports four Wasmtime advisories:
-   [RUSTSEC-2026-0222](https://rustsec.org/advisories/RUSTSEC-2026-0222.html),
-   [RUSTSEC-2026-0269](https://rustsec.org/advisories/RUSTSEC-2026-0269.html),
-   [RUSTSEC-2026-0316](https://rustsec.org/advisories/RUSTSEC-2026-0316.html), and
-   [RUSTSEC-2026-0327](https://rustsec.org/advisories/RUSTSEC-2026-0327.html).
-   The normal repo audit suppresses 0222 through an existing exception; no new
-   exceptions were added. Informational findings cover unmaintained `bitmaps`,
-   `im-rc`, `sized-chunks`, plus `sized-chunks` panic-safety unsoundness (0255).
-   These are absent from the guest's normal WASI dependency tree.
-
-   Reachability is narrower than a general-purpose component host: Extism 1.30.0
-   uses `wasmtime::Module`, this guest uses preview1, and its policy has no filesystem
-   preopens. Those observations reduce applicability of component/async and
-   filesystem advisories; they do not prove the whole host safe. The cross-engine
-   advisory is already tracked by the repository's exception referring to issue 45.
-   Upgrade and regression-test the shared host instead of independently changing
-   only this probe's host version. Upstream Extism's main branch now targets
-   Wasmtime 48; the critical async-component advisory lists 48.0.4/49.0.2 as patched.
-   A release/version migration is outside this plugin-only change.
-
-2. **Critical production conformance gap (`security-imperative`): secret cleanup
-   is not complete.** Successfully parsed owned JSON and known protobuf fields now
-   have cleanup guards. Parser failures can still free partially parsed values
-   before those guards exist. Generated protobuf unknown fields, crypto key
-   schedules, Extism request/input/output buffers, serialized secret responses,
-   HTTP header copies and host transport buffers are not all proven to be wiped.
-   Do not describe lock as erasing every historical memory copy. Vendored generated
-   code remains unchanged, so its unchecked generated paths were not silently
-   rewritten during this pass.
-
-3. **High: local password/credential lifecycle is not production authentication.**
-   The guest accepts any nonempty local password when a valid PAT is supplied.
-   The daemon currently forwards additional prompt fields as registration fields;
-   both registration/auth envelopes are supported. Host credential wrapping exists,
-   but restart, wrong-password, recovery and rotation behavior for this provider
-   remains unverified. Session refresh and remote session logout/revocation are
-   not implemented by the guest. Manual revocation of test PATs remains necessary.
-
-4. **Medium: full sync holds guest state while fetching and can replace a large
-   snapshot.** There is no incremental event cursor or concurrency. An outage,
-   unsupported folder/share/format or resource limit currently discards the old
-   snapshot and locks. Distinguish transport outages from confirmed revocation
-   before adding an offline cache. Old and new snapshots can coexist during a
-   successful sync. The 32 MiB plaintext limit is not a heap limit because JSON,
-   protobuf, maps and serialized output add overhead.
-
-5. **Medium: resource limits span guest and host.** The guest's 8 MiB response check
-   now precedes its Rust copy, but the host has already buffered the response.
-   `rosec-wasm::host_http` caps that at 50 MiB and disables redirects; the worker
-   caps guest memory at 4,096 WASM pages (256 MiB). Its host-call timeout is 60 s,
-   while its guest timeout is 180 s. A timeout/trap and in-flight lock cancellation
-   still need lifecycle testing with the real daemon. The synthetic probe uses
-   Extism's default transport and a 30 s call timeout, not the rosec HTTP override.
-
-6. **First-release scope remains incomplete (`protonpass-scope`).** SSH-agent
-   enumeration/signing, existing passkey use, offline cache, protected metadata,
-   folders and full cross-provider attribute normalization remain required work.
-   Extra TOTP fields are stored but are not additional frontend entries. None of
-   these capabilities are falsely advertised. The eight-type CLI demonstration
-   proves mapped reading, not completion of the first-release scope.
-
-7. **Distribution review remains open.** GPL source/provenance is present and the
-   vendored schema/generated-source hashes match UPSTREAM.txt. This review did not
-   provide legal clearance for combined host/plugin distribution or complete a
-   corresponding-source/third-party-notice audit.
+1. **Residual memory-assurance gap (`security-imperative`).** Owned buffers now have
+   cleanup, including guest parser failures, crypto state and host reply transport.
+   Upstream HTTP/TLS/header/parser internals and compiler-generated stack/register
+   copies are not all under rosec's control. Process memory, swap and crash-dump
+   inspection were not performed. Do not claim lock erases every historical copy.
+   A strict interpretation requiring that proof remains unfulfilled.
+2. **Live lifecycle validation.** Synthetic tests cover password replay/recovery,
+   refresh and logout, but those changes have not been tested against the live
+   Proton account. Network failure or a trap may prevent remote session revocation;
+   locally discarded tokens are not persisted. A retained PAT is an intentional
+   credential for future unlock, and must be revoked separately in Proton when
+   decommissioning the provider. Remote revocation is observed on the next API call.
+3. **Availability limits.** Full sync remains serial and fails closed on any error.
+   Large/slow vaults can hit the documented memory/time/item limits. HTTP cancellation
+   can wait for its bounded blocking operation. No incremental cursor or offline
+   cache was introduced by this security work. Limits are not a throughput guarantee.
+4. **First-release scope (`protonpass-scope`).** SSH-agent enumeration/signing,
+   existing passkey use, offline cache, protected metadata, folders and canonical
+   attribute normalization remain required. Extra TOTP fields are not separately
+   indexed frontend entries. These unsupported capabilities are not advertised.
+5. **Distribution.** GPL provenance/source is present; combined distribution,
+   corresponding-source and third-party notices still need review. There is no AUR
+   package and this plugin remains outside the release pipeline.
+6. **Existing workspace advisory exceptions.** The unfiltered workspace audit still
+   reports `rsa` 2023-0071, `quick-xml` 2026-0194/0195 and unmaintained `ttf-parser`
+   2026-0192. They are outside the Proton/Extism dependency tree and retain their
+   existing documented exceptions. No new exception was added by this follow-up.
 
 ## Performance evidence
 
@@ -118,7 +99,18 @@ No per-item HTTP requests occur. Peak RSS is Linux `wait4` usage for the entire
 host/fixture process, not isolated guest memory. There is no baseline memory
 measurement, so no memory improvement is claimed. Reproduce with README commands.
 
+The security follow-up (Extism 1.41, wiping allocator, same synthetic fixture)
+measured **30.369 µs p50 / 34.549 µs p95**, with **68 ms** full sync and **12 requests**.
+This single follow-up run detects no regression; it is not a controlled attribution
+of the improvement to any one change and is not a live-network benchmark.
+
 ## Validation and audit method
+
+Follow-up checks: 108 core tests, 101 WASM-host tests and nine standalone guest tests,
+actual compiled fixture with refresh/logout/outages, production endpoint restrictions,
+HTTP override tests, native/WASI Clippy, full workspace/all-targets check on Rust
+1.96, formatting and Docusaurus production build. No live Proton account was used.
+
 
 - Native tests run with default features and with `test-http` enabled; guest
   release builds run with and without that feature.
@@ -132,7 +124,7 @@ measurement, so no memory improvement is claimed. Reproduce with README commands
   `7eebec69c352c7191b1f13eb95dd510eeca5d1de` (updated 2026-10-09).
   A second run from `/tmp` used the absolute lockfile path to exclude the repo's
   `.cargo/audit.toml` suppressions. The current database was fetched before both.
-  The audited lockfile has 342 packages including native dev dependencies.
+  The follow-up plugin lockfile has 326 packages including native dev dependencies.
 - `cargo tree --target wasm32-wasip1 --edges normal` distinguishes actual guest
   dependencies from native harness dependencies. No current RustSec finding from
   this audit matched that guest tree; this is not a general safety guarantee.
@@ -162,9 +154,9 @@ scope/evidence. “Pending” means this spike must not be treated as a release.
 - `private-socket`: Conforms to existing interfaces. The development guide uses `--socket`, `--no-migrate` and `ROSEC_SOCKET`; no bus implementation changed.
 - `protonpass-scope`: Read-only boundary conforms, verified by zero-request mutation tests. Required retrieval features remain pending as listed above; the first release is not complete.
 - `provider-rename`: Configuration and docs use `[[provider]]` and `rosec provider`; no legacy backend interface added.
-- `rust-edition`: Cargo.toml uses edition 2024. Validation uses the installed compiler; this pass does not establish an MSRV test on Rust 1.93.
-- `security-imperative`: Partial, with a critical production gap. Cleanup guards and fail-closed tests improve the boundary, but the residual copies listed above prevent full conformance.
-- `sm-passphrase-unlock`: Bitwarden SM is outside the changed paths. Its passphrase-bound lifecycle is relevant guidance; Proton's nonempty-only guest check remains an explicit production blocker.
+- `rust-edition`: Cargo.toml uses edition 2024. Validation uses the installed compiler; the patched host requires Rust 1.96. The old recorded 1.93 minimum is stale relative to this security dependency upgrade.
+- `security-imperative`: Owned-buffer and lifecycle fixes checked by allocator, credential, HTTP and actual-WASM tests. Strict full-memory-erasure conformance remains unproven for the upstream/compiler copies listed above.
+- `sm-passphrase-unlock`: Shared registration wrapping now includes the installation secret and passphrase, with Argon2id strengthening; no auto-unlock path added. Host tests prove wrong-password rejection and replay after restart. Explicit PAT registration chooses the local passphrase.
 - `trait-simplification`: Guest exports separate metadata/secret-attribute methods; no removed host trait methods were reintroduced.
 - `vault-architecture`: Local-vault storage is untouched. Its old backend/CLI naming conflicts with the newer `provider-rename` decision, so new docs follow the latter.
-- `wasm-providers`: Conforms to the Extism/JSON/allowlisted-HTTP architecture. The standalone guest uses WASI; host callbacks and runtime APIs were not replaced.
+- `wasm-providers`: Conforms to the Extism/JSON/allowlisted-HTTP architecture. The standalone guest uses WASI; HTTP overrides, cancellation and output cleanup were regression-tested against Extism 1.41.

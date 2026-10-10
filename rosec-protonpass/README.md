@@ -12,7 +12,7 @@ explains capabilities, authentication and field mappings.
 ## Build and test
 
 Run these commands from the repository root. Rust with the `wasm32-wasip1` target
-is required. The fixture feature is off by default and must not be distributed.
+and Rust 1.96 or newer for the native host are required. The fixture feature is off by default and must not be distributed.
 
 ```sh
 # Production endpoint restrictions; distinct output avoids confusing test builds.
@@ -73,13 +73,22 @@ offline_cache = false
 Authenticate with `rosec provider auth proton-demo` from a terminal, then use
 `rosec sync`, `rosec search`, `rosec inspect --all-attrs ID`, `rosec get ID` and
 `rosec totp get --stdout ID`. `rosec get --attr NAME` reads public attributes;
-use `inspect --all-attrs` for named sensitive fields. The PAT is a secret-kind
-additional auth field; the local password remains a separate prompt field.
+use `inspect --all-attrs` for named sensitive fields.
 
-The guest only requires a nonempty local passphrase. It does not independently
-validate that passphrase. The host can wrap registration credentials, but this
-provider's restart, wrong-password, rotation and recovery behavior is not yet
-validated. Do not deploy it as a normal credential store on that basis.
+The PAT is a secret-kind **registration** field, separate from the local passphrase.
+The host stores it with Argon2id (64 MiB, three passes), a random salt, installation
+key and provider binding. Subsequent unlocks need only that local passphrase;
+a wrong passphrase cannot decrypt the saved PAT and does not delete it. Legacy
+host credential records migrate after successful decryption. Keep the installation's
+`rosec/machine-key` with its encrypted credential backups; losing either the local
+passphrase or installation key requires re-registering a PAT. `rosec provider auth`
+replaces the registration, so possession of a valid PAT lets you choose a new local
+passphrase. It does not change the Proton account password.
+
+Host tests cover restart, wrong-password rejection, replacement and legacy migration.
+The guest itself accepts a nonempty local passphrase with an explicitly supplied PAT;
+the host is responsible for local credential protection. These tests are synthetic,
+and the new restart/refresh/logout flows have not been revalidated against Proton.
 
 Revoke the PAT, log out of temporary CLI sessions, stop the isolated daemon and
 remove its temporary data after testing. Keep signature verification enabled in
@@ -97,14 +106,29 @@ This pass used synthetic fixtures and did not access the user's Proton account.
   100 item pages per share, 10,000 active items and 32 MiB of decrypted content.
   Each encoded encrypted field is limited to 2 MiB and each item protobuf to 1 MiB.
   Responses over 8 MiB are rejected before an additional guest copy. The host
-  has its own 50 MiB HTTP limit and 256 MiB guest memory limit.
+  enforces the same 8 MiB limit for Proton and a 256 MiB guest memory limit.
+  Guest execution is capped at 60 seconds; callers wait at most 65 seconds. Each
+  blocking HTTP operation has a 10-second maximum within that execution budget.
 - Exceeding a limit rejects the entire sync. Any sync failure clears the snapshot
   and locks; the guest never presents a partially updated vault as complete.
-- Stored secrets, parsed session JSON and known protobuf secret fields are scrubbed
-  on drop. HTTP response memory is scrubbed before release. Parser failure paths,
-  generated unknown fields and host/PDK serialization copies still need review.
-- Full sync is serial. It fetches keys and all item pages each time; there is no
-  event cursor, refresh-token lifecycle, offline cache or background notification.
+- Rust guest allocations are wiped before free/reallocation, including parser
+  failure paths and unknown protobuf fields. AES-GCM cleanup features are enabled.
+  Authentication input, HTTP buffers owned by rosec and guest result memory are
+  scrubbed. This does not prove erasure of upstream HTTP/TLS/parser internals,
+  compiler temporaries, stack/register copies, swap or crash dumps.
+- Cancellation, timeout, trap and lock invalidate pending calls and discard the
+  guest instance before later work can access its state. Failed recreation stops
+  the worker. A saturated queue returns `unavailable` without blocking Tokio.
+- Full sync drops the old snapshot before constructing a replacement. Network
+  failures report `unavailable`; permission/revocation failures report `auth_failed`.
+  Both leave the provider locked. There is no offline fallback.
+- An expired access token gets one refresh attempt; 403 permission denials do not.
+  Normal lock/re-authentication attempts to revoke only this API session before
+  discarding its tokens. Network failure, timeout or active-call cancellation can
+  prevent remote logout; local lock still completes or invalidates the instance.
+  The PAT remains registered for later unlock and is not remotely revoked by lock.
+- Full sync is serial. There is no incremental event cursor, offline cache or
+  background notification. Revocation is detected on the next API call, not pushed.
 
 ## Licensing
 
