@@ -572,30 +572,27 @@ impl WasmProvider {
     /// Derive the cache key from `password` + machine key + provider ID and
     /// store it in `self.cache_key`.
     ///
-    /// Best-effort: logs a warning on failure (machine key missing, HKDF error)
+    /// Best-effort: logs a warning on failure (machine key missing, Argon2 error)
     /// but does not propagate — callers that need the key (e.g.
     /// `unlock_from_cache`) will detect `None` and return a proper error.
-    fn derive_and_store_cache_key(&self, password: &str) {
-        let machine_key = match rosec_core::machine_key::load_or_create() {
-            Ok(mk) => mk,
-            Err(e) => {
-                warn!(
-                    provider = %self.config.id,
-                    "cannot load machine key for cache key derivation: {e}"
-                );
-                return;
+    async fn derive_and_store_cache_key(&self, password: &str, generation: u64) {
+        let password = Zeroizing::new(password.to_owned());
+        let id = self.config.id.to_owned();
+        let key = tokio::task::spawn_blocking(move || {
+            let machine_key = rosec_core::machine_key::load_or_create()
+                .map_err(|_| ProviderError::Unavailable("Cannot load cache machine key".into()))?;
+            crate::cache::derive_cache_key(&machine_key, &password, &id)
+        })
+        .await;
+        match key {
+            Ok(Ok(key)) => {
+                let mut guard = self.cache_key.lock().unwrap_or_else(|e| e.into_inner());
+                if self.worker.check_generation(generation).is_ok() {
+                    *guard = Some(key);
+                }
             }
-        };
-
-        match crate::cache::derive_cache_key(&machine_key, password, &self.config.id) {
-            Ok(key) => {
-                *self.cache_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
-            }
-            Err(e) => {
-                warn!(
-                    provider = %self.config.id,
-                    "cache key derivation failed: {e}"
-                );
+            _ => {
+                warn!(provider = %self.config.id, "cache key derivation failed");
             }
         }
     }
@@ -733,7 +730,8 @@ impl Provider for WasmProvider {
             // Offline unlock path — derive the cache key now so we can
             // decrypt the cache file.  The key is only stored on success
             // (unlock_from_cache will read it from self.cache_key).
-            self.derive_and_store_cache_key(password_ref.as_str());
+            self.derive_and_store_cache_key(password_ref.as_str(), generation)
+                .await;
             let result = self
                 .unlock_from_cache(generation)
                 .await
@@ -911,7 +909,8 @@ impl Provider for WasmProvider {
             // Export and persist cache for offline use.
             if has_offline_cache {
                 info!(provider = %self.config.id, "deriving cache key for offline cache");
-                self.derive_and_store_cache_key(password_ref.as_str());
+                self.derive_and_store_cache_key(password_ref.as_str(), generation)
+                    .await;
                 self.try_export_cache().await;
             }
 

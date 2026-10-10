@@ -41,7 +41,7 @@ fn derive_legacy_key(password: &str, provider_id: &str) -> Result<StorageKey, St
 const FIELDS_V2_PREFIX: &str = "__fields_v2__:";
 // All callers run on blocking threads. Bound aggregate Argon2 scratch memory
 // when several providers are unlocked concurrently.
-static KDF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static KDF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn derive_key(password: &str, provider_id: &str, salt: &[u8]) -> Result<StorageKey, String> {
     let _kdf_guard = KDF_LOCK.lock().map_err(|_| "Credential KDF unavailable")?;

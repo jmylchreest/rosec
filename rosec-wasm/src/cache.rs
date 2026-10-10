@@ -7,10 +7,9 @@
 //! # Key derivation
 //!
 //! ```text
-//! cache_key = HKDF-SHA256(
-//!     ikm  = machine_key || password,
-//!     salt = b"rosec-provider-cache-v1",
-//!     info = provider_id,
+//! cache_key = Argon2id(64 MiB, 3 passes, 1 lane,
+//!     password = password, secret = machine_key,
+//!     salt = SHA256(b"rosec-provider-cache-v2" || provider_id),
 //!     len  = 64          // 32 enc + 32 mac
 //! )
 //! ```
@@ -18,7 +17,7 @@
 //! # File format (binary)
 //!
 //! ```text
-//! version: u8 = 1
+//! version: u8 = 2
 //! timestamp: i64 (unix epoch seconds, BE)
 //! iv: [u8; 16]
 //! ciphertext_len: u32 (BE)
@@ -31,10 +30,10 @@
 //! - Encrypt-then-MAC: HMAC covers version, timestamp, IV, and ciphertext.
 //! - Fresh random IV on every write.
 //! - Machine-bound: different `machine_key` → different `cache_key` → HMAC failure.
-//! - Password-bound: wrong password → wrong HKDF output → HMAC failure.
+//! - Password-bound: wrong password → wrong Argon2 output → HMAC failure.
 //! - Cache key is zeroized on drop via [`Zeroizing`].
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -45,7 +44,7 @@ use cbc::{Decryptor, Encryptor};
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use rosec_core::ProviderError;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -57,17 +56,18 @@ type Aes256CbcEnc = Encryptor<Aes256>;
 pub type CacheContents = (Zeroizing<Vec<u8>>, SystemTime);
 
 /// Current cache file format version.
-const CACHE_VERSION: u8 = 1;
+const CACHE_VERSION: u8 = 2;
+const MAX_CACHE_BYTES: usize = 50 * 1024 * 1024;
 
-/// HKDF salt — domain-separates cache keys from WASM credential keys.
-const HKDF_SALT: &[u8] = b"rosec-provider-cache-v1";
+/// Domain-separates cache keys from WASM credential keys.
+const KDF_DOMAIN: &[u8] = b"rosec-provider-cache-v2";
 
 /// Default maximum cache age (10 days).
 pub const DEFAULT_MAX_CACHE_AGE: Duration = Duration::from_secs(10 * 24 * 60 * 60);
 
 /// A 64-byte cache key: 32 bytes encryption + 32 bytes MAC.
 ///
-/// Derived from `machine_key || password` via HKDF, scoped to a single
+/// Derived from password and machine secret via Argon2id, scoped to a single
 /// provider ID.  Held in memory while the provider is unlocked, zeroized
 /// on lock.
 pub struct CacheKey {
@@ -103,15 +103,26 @@ pub fn derive_cache_key(
     password: &str,
     provider_id: &str,
 ) -> Result<CacheKey, ProviderError> {
-    let mut ikm = Zeroizing::new(Vec::with_capacity(machine_key.len() + password.len()));
-    ikm.extend_from_slice(machine_key);
-    ikm.extend_from_slice(password.as_bytes());
-
-    let (_, hkdf) = hkdf::Hkdf::<Sha256>::extract(Some(HKDF_SALT), &ikm);
-
+    let _guard = crate::wasm_cred::KDF_LOCK
+        .lock()
+        .map_err(|_| ProviderError::Unavailable("Cache KDF unavailable".into()))?;
+    let params = argon2::Params::new(64 * 1024, 3, 1, Some(64))
+        .map_err(|_| ProviderError::Unavailable("Invalid cache KDF".into()))?;
+    let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
+    let argon = argon2::Argon2::new_with_secret(
+        machine_key,
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params,
+    )
+    .map_err(|_| ProviderError::Unavailable("Invalid cache KDF".into()))?;
+    // The random installation key is Argon2's secret; a stable domain/provider
+    // salt allows derivation before opening the cache, without storing a password.
+    let salt = Sha256::digest([KDF_DOMAIN, provider_id.as_bytes()].concat());
     let mut key_bytes = Zeroizing::new([0u8; 64]);
-    hkdf.expand(provider_id.as_bytes(), key_bytes.as_mut())
-        .map_err(|e| ProviderError::Other(anyhow::anyhow!("HKDF expand for cache key: {e}")))?;
+    argon
+        .hash_password_into_with_memory(password.as_bytes(), &salt, key_bytes.as_mut(), &mut memory)
+        .map_err(|_| ProviderError::Unavailable("Cache key derivation failed".into()))?;
 
     Ok(CacheKey { data: key_bytes })
 }
@@ -124,6 +135,9 @@ pub fn write_cache_file(
     key: &CacheKey,
     plaintext: &[u8],
 ) -> Result<SystemTime, ProviderError> {
+    if plaintext.len() > MAX_CACHE_BYTES - 128 {
+        return Err(ProviderError::Unavailable("Cache too large".into()));
+    }
     let path = cache_file_path(provider_id)?;
 
     if let Some(parent) = path.parent() {
@@ -158,36 +172,22 @@ pub fn write_cache_file(
 
     let mac = compute_mac(key.mac_key(), CACHE_VERSION, timestamp, &iv, ciphertext)?;
 
-    // Write to a temporary file then rename for atomicity.
-    let tmp_path = path.with_extension("tmp");
-    {
-        let file = open_secret_file(&tmp_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        writer
-            .write_all(&[CACHE_VERSION])
-            .and_then(|()| writer.write_all(&timestamp.to_be_bytes()))
-            .and_then(|()| writer.write_all(&iv))
-            .and_then(|()| writer.write_all(&ct_len.to_be_bytes()))
-            .and_then(|()| writer.write_all(ciphertext))
-            .and_then(|()| writer.write_all(&mac))
-            .and_then(|()| writer.flush())
-            .map_err(|e| {
-                ProviderError::Other(anyhow::anyhow!(
-                    "failed to write cache file {}: {e}",
-                    tmp_path.display()
-                ))
-            })?;
-    }
-
-    std::fs::rename(&tmp_path, &path).map_err(|e| {
-        // Clean up temp file on rename failure.
-        let _ = std::fs::remove_file(&tmp_path);
-        ProviderError::Other(anyhow::anyhow!(
-            "failed to rename cache file {} -> {}: {e}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })?;
+    // Unpredictable same-directory temporary file, mode 0600, atomic replace.
+    let parent = path
+        .parent()
+        .ok_or_else(|| ProviderError::Unavailable("Invalid cache path".into()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| ProviderError::Unavailable("Cannot create cache file".into()))?;
+    tmp.write_all(&[CACHE_VERSION])
+        .and_then(|()| tmp.write_all(&timestamp.to_be_bytes()))
+        .and_then(|()| tmp.write_all(&iv))
+        .and_then(|()| tmp.write_all(&ct_len.to_be_bytes()))
+        .and_then(|()| tmp.write_all(ciphertext))
+        .and_then(|()| tmp.write_all(&mac))
+        .and_then(|()| tmp.as_file().sync_all())
+        .map_err(|_| ProviderError::Unavailable("Cannot write cache file".into()))?;
+    tmp.persist(&path)
+        .map_err(|_| ProviderError::Unavailable("Cannot persist cache file".into()))?;
 
     info!(
         provider = %provider_id,
@@ -221,12 +221,15 @@ pub fn read_cache_file(
         return Ok(None);
     }
 
-    let raw = std::fs::read(&path).map_err(|e| {
-        ProviderError::Other(anyhow::anyhow!(
-            "failed to read cache file {}: {e}",
-            path.display()
-        ))
-    })?;
+    let file = std::fs::File::open(&path)
+        .map_err(|_| ProviderError::Unavailable("Cannot read cache file".into()))?;
+    let mut raw = Vec::new();
+    file.take((MAX_CACHE_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(|_| ProviderError::Unavailable("Cannot read cache file".into()))?;
+    if raw.len() > MAX_CACHE_BYTES {
+        return Err(ProviderError::Unavailable("Cache too large".into()));
+    }
 
     // Minimum size: version(1) + timestamp(8) + iv(16) + ct_len(4) + mac(32) = 61
     if raw.len() < 61 {
@@ -268,7 +271,14 @@ pub fn read_cache_file(
         return Err(ProviderError::AuthFailed);
     }
 
-    let cache_time = UNIX_EPOCH + Duration::from_secs(timestamp as u64);
+    let seconds = u64::try_from(timestamp)
+        .map_err(|_| ProviderError::Unavailable("Invalid cache timestamp".into()))?;
+    let cache_time = UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds))
+        .ok_or_else(|| ProviderError::Unavailable("Invalid cache timestamp".into()))?;
+    if cache_time > SystemTime::now() + Duration::from_secs(300) {
+        return Err(ProviderError::Unavailable("Invalid cache timestamp".into()));
+    }
     if max_age > Duration::ZERO {
         let age = SystemTime::now()
             .duration_since(cache_time)
@@ -330,6 +340,15 @@ pub fn delete_cache_file(provider_id: &str) -> Result<bool, ProviderError> {
 
 /// Return the path to the cache file for a provider.
 fn cache_file_path(provider_id: &str) -> Result<PathBuf, ProviderError> {
+    if provider_id.is_empty()
+        || !provider_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err(ProviderError::InvalidInput(
+            "Invalid cache provider ID".into(),
+        ));
+    }
     let base = if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         PathBuf::from(xdg)
     } else if let Some(home) = std::env::var_os("HOME") {
@@ -374,38 +393,52 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Open a file for writing with mode 0600.
-fn open_secret_file(path: &std::path::Path) -> Result<std::fs::File, ProviderError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| {
-                ProviderError::Other(anyhow::anyhow!(
-                    "failed to create cache file {}: {e}",
-                    path.display()
-                ))
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::File::create(path).map_err(|e| {
-            ProviderError::Other(anyhow::anyhow!(
-                "failed to create cache file {}: {e}",
-                path.display()
-            ))
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_paths_reject_traversal() {
+        for id in ["", "../outside", "a/b", "/tmp/outside", "a\\b"] {
+            assert!(cache_file_path(id).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_write_does_not_follow_predictable_temp_symlink() {
+        with_tmp_home(|| {
+            let path = cache_file_path("symlink").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let victim = path.with_extension("victim");
+            std::fs::write(&victim, b"untouched").unwrap();
+            std::os::unix::fs::symlink(&victim, path.with_extension("tmp")).unwrap();
+            let key = CacheKey {
+                data: Zeroizing::new([5; 64]),
+            };
+            write_cache_file("symlink", &key, b"secret").unwrap();
+            assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        });
+    }
+
+    #[test]
+    fn oversized_cache_is_rejected_before_decryption() {
+        with_tmp_home(|| {
+            let path = cache_file_path("oversized").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len((MAX_CACHE_BYTES + 1) as u64).unwrap();
+            let key = CacheKey {
+                data: Zeroizing::new([5; 64]),
+            };
+            assert!(read_cache_file("oversized", &key, DEFAULT_MAX_CACHE_AGE).is_err());
+        });
+    }
 
     fn with_tmp_home(f: impl FnOnce()) {
         use std::sync::atomic::{AtomicU64, Ordering};

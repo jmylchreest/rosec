@@ -1,17 +1,36 @@
 # Proton Pass security and performance review
 
-Reviewed 2026-10-10, starting at `2f3648c`. Scope: the standalone
-`rosec-protonpass` guest, its tests/probe, selected host integration boundaries and
-provider documentation. This is a source review with targeted tests, not a formal
-audit or a claim of production readiness. The live account was not accessed.
+Reviewed 2026-10-10. Scope: the standalone `rosec-protonpass` guest, host
+credential/cache/lifecycle boundaries, release packaging and provider documentation.
+This is an internal source review with regression and isolated live tests, not an
+independent audit or a guarantee of complete memory erasure.
 
 ## Result
 
-The security follow-up fixes the identified host lifecycle, credential persistence,
-owned-memory cleanup and resource-boundary defects. **The spike is still not a
-release candidate:** the agreed retrieval features and distribution review remain
-incomplete. Erasure of every upstream-library/compiler copy is not proven. No
-account credentials were accessed during these changes.
+The identified lifecycle, credential storage, resource-boundary and cache defects
+are fixed. The agreed read-only retrieval features are implemented: sync, primary
+and additional TOTP fields, SSH, existing ES256/Ed25519 passkeys, protected metadata,
+nested folders and offline cache. Writes and password changes remain unsupported.
+
+The latest live run passed reads of all eight native demo item types, an additional
+TOTP entry, independently verified TOTP and SSH signing, session refresh, lock,
+daemon restart, wrong-passphrase rejection and saved-PAT replay. Testing used a
+short-lived viewer PAT scoped to a dedicated synthetic vault. The PAT was revoked
+and the CLI session logged out. No account credentials or live secret values are
+included in this report or committed fixtures.
+
+Final packaging/rebuild validation is in progress; see RELEASE-VALIDATION.md for
+its completion record. Remaining operational and assurance boundaries are below.
+
+## Release follow-up (2026-10-10)
+
+| Finding or change | Resolution and evidence |
+|---|---|
+| Offline cache used a fast password KDF and predictable temporary filename | Cache v2 uses Argon2id (64 MiB, three passes, one lane), the installation secret and provider/domain binding. A shared KDF mutex bounds memory; derivation runs off Tokio workers and cannot repopulate keys after lock. Atomic mode-0600 temporary files, bounded reads and authenticated timestamp checks are covered by tests. Older cache files require an online unlock to regenerate. |
+| Real worker ignored explicitly allowed network ports | Worker and policy translation now share port derivation. The actual-host fixture passes registration, recreation, wrong password, encrypted offline fallback and locked-read denial on an explicitly allowed loopback port. Production Proton policy still allows only its API hostname. |
+| PAT refresh returned HTTP 403 live | Refresh sends session credentials and random State in the request body without stale bearer/UID headers. A test-only export exercises refresh against Proton; refresh followed by sync passed. Production builds exclude that export. |
+| New parser and retrieval surfaces | Bounded folder hierarchy resolution rejects cycles, duplicates, missing parents and failed AEAD. Passkeys validate credential/RP identity, public/private key agreement, supported algorithms and zero/absent counters; malformed and nonzero counters fail. Native ES256/Ed25519 signing is independently verified. Compiled-WASM fixtures exercise folder, SSH, passkey and cache exports. |
+| Release distribution and setup | Dedicated signed-provider packaging, AUR template, GPL provenance, third-party notices and vendored corresponding-source generator are present. The provider guide covers web/CLI PAT creation, grants, local registration, renewal and revocation. |
 
 ## Security follow-up (2026-10-10)
 
@@ -30,8 +49,8 @@ account credentials were accessed during these changes.
 The refresh/revocation protocol was checked against Proton's published
 [Go API refresh implementation](https://github.com/ProtonMail/go-proton-api/blob/master/manager_auth.go)
 and [WebClients authentication routes](https://github.com/ProtonMail/WebClients/blob/main/packages/shared/lib/api/auth.ts).
-Those upstream sources establish request shapes, not proof of live PAT-session compatibility.
-The new lifecycle tests use synthetic data only.
+Live PAT-session refresh and subsequent sync now pass. Remote logout remains
+best-effort: tests do not prove server cleanup after cancellation or network failure.
 
 ## Fixed in this pass
 
@@ -46,35 +65,34 @@ The new lifecycle tests use synthetic data only.
 | Repeated item lookups scanned the full item vector. | A `BTreeMap` replaces linear lookup with logarithmic lookup. It also gives deterministic enumeration order. Measurements below include the hardening overhead. |
 | Deployment and limitations were difficult to find. | Added the provider guide/sidebar link, canonical Markdown README and a least-privilege policy sidecar; retained the earlier live transcript. |
 
-## Remaining findings and release gates
+## Operational limits and residual assurance
 
-1. **Residual memory-assurance gap (`security-imperative`).** Owned buffers now have
-   cleanup, including guest parser failures, crypto state and host reply transport.
-   Upstream HTTP/TLS/header/parser internals and compiler-generated stack/register
-   copies are not all under rosec's control. Process memory, swap and crash-dump
-   inspection were not performed. Do not claim lock erases every historical copy.
-   A strict interpretation requiring that proof remains unfulfilled.
-2. **Live lifecycle validation.** Synthetic tests cover password replay/recovery,
-   refresh and logout, but those changes have not been tested against the live
-   Proton account. Network failure or a trap may prevent remote session revocation;
-   locally discarded tokens are not persisted. A retained PAT is an intentional
-   credential for future unlock, and must be revoked separately in Proton when
-   decommissioning the provider. Remote revocation is observed on the next API call.
-3. **Availability limits.** Full sync remains serial and fails closed on any error.
-   Large/slow vaults can hit the documented memory/time/item limits. HTTP cancellation
-   can wait for its bounded blocking operation. No incremental cursor or offline
-   cache was introduced by this security work. Limits are not a throughput guarantee.
-4. **First-release scope (`protonpass-scope`).** SSH-agent enumeration/signing,
-   existing passkey use, offline cache, protected metadata, folders and canonical
-   attribute normalization remain required. Extra TOTP fields are not separately
-   indexed frontend entries. These unsupported capabilities are not advertised.
-5. **Distribution.** GPL provenance/source is present; combined distribution,
-   corresponding-source and third-party notices still need review. There is no AUR
-   package and this plugin remains outside the release pipeline.
-6. **Existing workspace advisory exceptions.** The unfiltered workspace audit still
-   reports `rsa` 2023-0071, `quick-xml` 2026-0194/0195 and unmaintained `ttf-parser`
-   2026-0192. They are outside the Proton/Extism dependency tree and retain their
-   existing documented exceptions. No new exception was added by this follow-up.
+1. **Memory assurance.** Owned secret buffers, guest heap deallocation and lifecycle
+   paths have cleanup tests. Upstream HTTP/TLS/parser internals, compiler-created
+   copies, stack/register contents, swap and crash dumps are not exhaustively
+   verified. This assessment does not claim complete erasure of every copy.
+2. **Revocation and offline access.** Lock clears local state and attempts session
+   revocation; network failure or abrupt disposal can prevent remote logout. The
+   registered PAT intentionally survives lock. Remote revocation is checked on
+   API calls, not pushed, and cannot invalidate an already downloaded offline cache.
+3. **Availability.** Full sync is serial and fails closed on errors or documented
+   resource limits. There is no incremental cursor or notification channel. Large
+   or slow vaults may exceed limits. Blocking HTTP cancellation is bounded by its
+   transport timeout. Cached snapshots are unconfirmed and age-limited.
+4. **Compatibility coverage.** Live tests cover eight native item types and auth/
+   SSH/TOTP lifecycle. Folder hierarchy and existing passkeys are tested with
+   synthetic protocol fixtures; no browser/UHID login using a real Proton-stored
+   passkey was performed. Only ES256/Ed25519 synced passkeys with absent/zero
+   counters are supported; new passkey persistence and PRF/hmac-secret extensions
+   are not exposed. Group shares and non-vault shares remain unsupported.
+5. **Workspace advisory exceptions.** The standalone Proton lockfile passes audit
+   without suppressions. The workspace retains existing exceptions for `rsa`
+   2023-0071, `quick-xml` 2026-0194/0195 and unmaintained `ttf-parser` 2026-0192;
+   they are outside the Proton guest dependency closure. No new exception was added.
+6. **Test cleanup history.** The final live run confirmed temporary PAT revocation
+   and CLI logout. An earlier interrupted run revoked its PAT but could not confirm
+   remote CLI logout; its isolated local session was removed. No unrelated account
+   sessions were revoked.
 
 ## Performance evidence
 
@@ -106,53 +124,41 @@ of the improvement to any one change and is not a live-network benchmark.
 
 ## Validation and audit method
 
-Follow-up checks: 108 core tests, 101 WASM-host tests and nine standalone guest tests,
-actual compiled fixture with refresh/logout/outages, production endpoint restrictions,
-HTTP override tests, native/WASI Clippy, full workspace/all-targets check on Rust
-1.96, formatting and Docusaurus production build. No live Proton account was used.
+The final validation commands and results are recorded in RELEASE-VALIDATION.md.
+Coverage includes full workspace tests (108 core and 104 WASM-host tests), 15
+standalone guest tests, compiled production/fixture WASM, real-host offline/restart
+flows, isolated live Proton tests, Clippy, MSRV and documentation builds.
 
-
-- Native tests run with default features and with `test-http` enabled; guest
-  release builds run with and without that feature.
-- The Extism fixture tests cover TOTP, authenticated decryption/tampering, secret
-  metadata separation, changes/deletions, mutation stubs, malformed input,
-  rejected reauthentication/reinitialization, duplicate IDs, oversized pages/share
-  counts, revocation and locking. These are synthetic regression tests.
-- Guest and native Clippy use `-D warnings`; formatting and repository commit hooks
-  run separately. The Docusaurus docs build checks rendered content and links.
-- `cargo audit` used RustSec database commit
-  `7eebec69c352c7191b1f13eb95dd510eeca5d1de` (updated 2026-10-09).
-  A second run from `/tmp` used the absolute lockfile path to exclude the repo's
-  `.cargo/audit.toml` suppressions. The current database was fetched before both.
-  The follow-up plugin lockfile has 326 packages including native dev dependencies.
-- `cargo tree --target wasm32-wasip1 --edges normal` distinguishes actual guest
-  dependencies from native harness dependencies. No current RustSec finding from
-  this audit matched that guest tree; this is not a general safety guarantee.
+RustSec database commit: `7eebec69c352c7191b1f13eb95dd510eeca5d1de` (2026-10-09),
+refreshed on 2026-10-10. The standalone lockfile contains 396 packages including
+native test dependencies and passes without suppressions when audited from `/tmp`.
+`cargo tree --target wasm32-wasip1 --edges normal,build` identifies the production
+closure separately for the dependency/licence inventory.
 
 ## Decision conformance
 
 Decisions loaded: **25**, using the live `.aide/bin/aide decision list/get` CLI
 because the decision MCP tools were unavailable. Each line names the checked
-scope/evidence. “Pending” means this spike must not be treated as a release.
+scope/evidence. Operational boundaries above remain part of this assessment.
 
 - `attribute-model`: Conforms for mapped reads. `mapping.rs`, mapping tests and the fixture metadata check keep notes/custom fields/identity/card values out of public attributes.
-- `attribute-naming`: Mostly conforms. `mapping.rs` uses unprefixed fields and `custom.*`; card/identity canonical normalization remains pending. The recorded `type` name is stale relative to current `rosec:type` in existing providers and the CLI alias.
+- `attribute-naming`: Conforms. `mapping.rs` uses canonical unprefixed card/identity fields and `custom.*`, with mapping regression tests. The recorded `type` name is stale relative to current `rosec:type` in existing providers and the CLI alias.
 - `avoid-clone`: Checked production mapping/guest code. Secrets move into guarded storage; the public first-URL clone and index ID copy maintain independent ownership. Fixture clones contain only synthetic data.
 - `bitwarden-sm-crate`: Not applicable. Changed paths do not include Bitwarden SM or its dependencies.
-- `capability-enum`: Conforms. `guest::capabilities` and probe assertions expose Sync/Totp only; all mutation exports remain `not_supported`.
+- `capability-enum`: Conforms. `guest::capabilities` and probe assertions expose Sync/Totp/Ssh/Fido2/OfflineCache; all mutation exports remain `not_supported`.
 - `clippy-zero-warnings`: Checked by native and WASI Clippy with `-D warnings`.
 - `identity-fields`: The Bitwarden-specific scope is unchanged. Applied its PII rule to Proton: `mapping.rs` maps identity string values to sensitive storage, verified by tests.
 - `jmylchreest-writing-change-notes`: Reviewed the hardening change description and commit body for concrete behavior, validation and limitations.
 - `jmylchreest-writing-comments`: New comments explain invalidation order, secret lifetime, test endpoint restrictions and copying boundaries.
 - `jmylchreest-writing-concision`: README/provider guide give commands and limits; detailed findings are kept in this report.
 - `jmylchreest-writing-sentences`: Authored prose was checked for complete sentences and no em dashes.
-- `jmylchreest-writing-tone`: Documentation leads with experimental status and measured results without claiming production assurance.
+- `jmylchreest-writing-tone`: Documentation states tested behavior and residual boundaries without claiming an independent audit.
 - `key-wrapping`: Not applicable. Local-vault key wrapping is unchanged; this guest implements no key-wrapping capability.
 - `no-ai-coauthor`: Commit metadata must contain no co-author or assistant attribution; checked at commit creation.
 - `no-naked-unwrap`: Handwritten guest/library production paths were searched. Test code uses assertions; generated upstream protobuf still contains generated unwrap paths and requires separate treatment under this rule.
-- `offline-cache`: Pending first-release capability, not falsely advertised. No plaintext cache export or persistence was added; README requires `offline_cache=false` for tests.
+- `offline-cache`: Implemented. Guest exports are host-encrypted using Argon2id-derived keys; no PAT/session tokens in snapshots. Actual-host tests cover restart, offline restore and wrong-password rejection.
 - `private-socket`: Conforms to existing interfaces. The development guide uses `--socket`, `--no-migrate` and `ROSEC_SOCKET`; no bus implementation changed.
-- `protonpass-scope`: Read-only boundary conforms, verified by zero-request mutation tests. Required retrieval features remain pending as listed above; the first release is not complete.
+- `protonpass-scope`: Read-only boundary conforms, verified by zero-request mutation tests. Required retrieval features are implemented with the documented compatibility limits and test coverage above.
 - `provider-rename`: Configuration and docs use `[[provider]]` and `rosec provider`; no legacy backend interface added.
 - `rust-edition`: Cargo.toml uses edition 2024. Validation uses the installed compiler; the patched host requires Rust 1.96. The old recorded 1.93 minimum is stale relative to this security dependency upgrade.
 - `security-imperative`: Owned-buffer and lifecycle fixes checked by allocator, credential, HTTP and actual-WASM tests. Strict full-memory-erasure conformance remains unproven for the upstream/compiler copies listed above.

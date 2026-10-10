@@ -24,6 +24,7 @@ impl Drop for SensitiveJson {
 fn scrub(value: &mut Value) {
     match value {
         Value::String(s) => s.zeroize(),
+        Value::Number(n) => *n = 0.into(),
         Value::Array(values) => values.iter_mut().for_each(scrub),
         Value::Object(values) => {
             for (mut key, mut value) in std::mem::take(values) {

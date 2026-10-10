@@ -12,15 +12,19 @@ Commit: 25b673b98ed84982e74a1fbcdf036ebd7957950f
 Vendored without modification:
   proton-pass-types/proto/item_v1.proto -> src/upstream/item_v1.proto
   proton-pass-types/src/protos/item/item_v1.rs -> src/upstream/item_v1.rs
+  proton-pass-types/src/protos/folder/folder_v1.rs -> src/upstream/folder_v1.rs
+  proton-pass-types/proto/folder_v1.proto -> src/upstream/folder_v1.proto
   LICENSE -> LICENSE
 
 SHA256:
   item_v1.proto 2e05fbd21bd296eab23f3d3f1e56fc76a86b310778a881415a332cb42bdc7d91
   item_v1.rs    86d41914290d9d54cb54bd94b81ecd237794aa79eed98387e8f9cd24ad8082ac
+  folder_v1.proto b30397ea4d5ca6eff9a704c69e8e90eb8963b021957b92b0cb88eb2cf57fb8df
+  folder_v1.rs 308e24e4e0fd249ab8a6201995250befa919f57a374f39bbdd9dd95391737d73
 
 The generated Rust is checked in by upstream. It is deliberately not reformatted.
 protobuf 3.7.2 is pinned to its generator version. The proto is included for source
-provenance and regeneration; building this spike needs no proprietary generator.
+provenance and regeneration; building this provider needs no proprietary generator.
 
 https://github.com/protonpass/pass-cli
 Tag: 2.4.2
@@ -45,17 +49,26 @@ Adapted protocol handling in src/guest.rs:
   pass/src/item/list.rs
   pass/src/item/open.rs
   Changes: synchronous Extism transport, read-only bounded full sync, only direct
-  vault shares/root items, indexed bounded snapshots and guarded session JSON,
+  vault shares and nested folder items, indexed bounded snapshots and guarded session JSON,
   HTTP-buffer wiping, fail-closed authentication and test-only loopback HTTP,
   no native/browser runtime or muon dependency, no debug
-  logging of API bodies. Unsupported data fails explicitly. See README.txt.
+  logging of API bodies. Unsupported data fails explicitly. See README.md.
 
 All test credentials, keys and item contents are newly authored synthetic data.
 No account credentials, personal vault contents, or live API responses are fixtures.
 
+Adapted into src/passkey.rs:
+  proton-pass-common/src/passkey/passkey_handling.rs (versioned envelope)
+  proton-pass-common/src/passkey/protonpasskey.rs (MessagePack field names)
+  Changes: bounded read-only parser, ES256/Ed25519 PKCS#8 conversion, validation
+  of RP/credential identity and public/private key consistency, guarded memory.
+
+Adapted into src/folders.rs and src/guest.rs:
+  pass/src/folder/list.rs and pass/src/folder/open.rs (folder key hierarchy)
+  Changes: bounded non-recursive resolution, cycle/duplicate checks, no caching
+  of folder keys after sync.
+
 Distribution
 ============
-This spike is not included in rosec release packaging. A distributed binary must
-be accompanied by GPL-compliant corresponding source/build materials and applicable
-third-party notices. Cargo.lock records the dependency versions. Host/plugin combined
-distribution review remains required; WASM alone does not establish a licence boundary.
+See DISTRIBUTION.md. Releases include GPL text, upstream provenance, dependency
+notices and a corresponding-source archive with locked vendored dependencies.

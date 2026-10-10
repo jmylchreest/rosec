@@ -2,13 +2,17 @@
 use crate::sensitive::SensitiveItem;
 use crate::upstream::item_v1;
 use protobuf::Message;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
+#[derive(Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
     pub label: String,
     pub public: BTreeMap<String, String>,
     pub secrets: BTreeMap<String, Zeroizing<String>>,
+    pub passkeys: Vec<crate::passkey::Credential>,
+    pub totp_fields: Vec<String>,
 }
 pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
     if bytes.len() > 1024 * 1024 {
@@ -21,6 +25,8 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
         label: String::new(),
         public: BTreeMap::new(),
         secrets: BTreeMap::new(),
+        passkeys: Vec::new(),
+        totp_fields: Vec::new(),
     };
     if let Some(metadata) = item.metadata.as_mut() {
         e.label = std::mem::take(&mut metadata.name);
@@ -61,9 +67,8 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
             }
             e.public
                 .insert("email".into(), std::mem::take(&mut login.item_email));
-            // The spike does not expose passkeys yet; scrub their private payloads.
-            for p in &mut login.passkeys {
-                p.content.zeroize();
+            for p in &login.passkeys {
+                e.passkeys.push(crate::passkey::decode(p)?);
             }
         }
         item_v1::content::Content::Note(_) => {
@@ -166,6 +171,36 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
         }
     }
     map_fields(&mut e, "custom", &mut item.extra_fields)?;
+    // Keep the established attributes consistent across providers. Proton-only
+    // fields remain available under their original names.
+    for (source, canonical) in [
+        ("cardholder_name", "cardholder"),
+        ("verification_number", "code"),
+        ("social_security_number", "ssn"),
+        ("phone_number", "phone"),
+        ("street_address", "address1"),
+        ("zip_or_postal_code", "postal_code"),
+        ("state_or_province", "state"),
+        ("country_or_region", "country"),
+    ] {
+        if let Some(value) = e.secrets.remove(source) {
+            e.secrets.insert(canonical.into(), value);
+        }
+    }
+    if let Some(expiry) = e.secrets.get("expiration_date").filter(|v| !v.is_empty()) {
+        let (year, month) = expiry.split_once('-').ok_or("Invalid card expiry")?;
+        if year.len() != 4
+            || !year.bytes().all(|c| c.is_ascii_digit())
+            || month.len() != 2
+            || !month.parse::<u8>().is_ok_and(|n| (1..=12).contains(&n))
+        {
+            return Err("Invalid card expiry");
+        }
+        let year = Zeroizing::new(year.to_owned());
+        let month = Zeroizing::new(month.to_owned());
+        e.secrets.insert("exp_year".into(), year);
+        e.secrets.insert("exp_month".into(), month);
+    }
     Ok(e)
 }
 
@@ -193,7 +228,10 @@ fn map_fields(
         let value = match field.content.as_mut() {
             Some(Content::Text(v)) => std::mem::take(&mut v.content),
             Some(Content::Hidden(v)) => std::mem::take(&mut v.content),
-            Some(Content::Totp(v)) => std::mem::take(&mut v.totp_uri),
+            Some(Content::Totp(v)) => {
+                e.totp_fields.push(name.to_owned());
+                std::mem::take(&mut v.totp_uri)
+            }
             Some(Content::Timestamp(v)) => v
                 .timestamp
                 .as_ref()
@@ -207,4 +245,30 @@ fn map_fields(
         }
     }
     Ok(())
+}
+
+/// rosec's TOTP frontend selects one `totp` attribute per entry. Give additional
+/// Proton TOTP fields stable derived IDs while retaining their original names
+/// on the parent item for direct retrieval.
+pub fn additional_totp_entries(parent: &Entry) -> Vec<Entry> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    parent
+        .totp_fields
+        .iter()
+        .filter_map(|name| {
+            let value = parent.secrets.get(name).filter(|v| !v.is_empty())?;
+            Some(Entry {
+                id: format!("{}#totp/{}", parent.id, URL_SAFE_NO_PAD.encode(name)),
+                label: format!("{} — {}", parent.label, name.trim_start_matches("custom.")),
+                public: BTreeMap::from([
+                    ("rosec:type".into(), "login".into()),
+                    ("rosec:totp".into(), "true".into()),
+                ]),
+                // Both independently owned entries must survive cache serialization.
+                secrets: BTreeMap::from([("totp".into(), Zeroizing::new(value.to_string()))]),
+                passkeys: Vec::new(),
+                totp_fields: Vec::new(),
+            })
+        })
+        .collect()
 }

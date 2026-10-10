@@ -486,7 +486,7 @@ fn apply_landlock(config: &crate::WasmProviderConfig) -> Result<(), anyhow::Erro
     // and stashed them inside; for now we'll compute a minimal ruleset
     // from the config's allowed_hosts/allowed_paths/allowed_files since
     // the WasmProviderConfig is the single source of truth here.
-    use rosec_core::sandbox::landlock::{ConnectPort, FsMode, PathRule};
+    use rosec_core::sandbox::landlock::{FsMode, PathRule};
     use std::path::PathBuf;
 
     let mut paths: Vec<PathRule> = Vec::new();
@@ -534,11 +534,7 @@ fn apply_landlock(config: &crate::WasmProviderConfig) -> Result<(), anyhow::Erro
         });
     }
 
-    let ports: Vec<ConnectPort> = if config.allowed_hosts.is_empty() {
-        Vec::new()
-    } else {
-        vec![ConnectPort(443), ConnectPort(80)]
-    };
+    let ports = super::policy_to_ruleset::ports_for_hosts(&config.allowed_hosts);
 
     rosec_core::sandbox::landlock::apply_paths_and_ports(&paths, &ports)
         .map_err(|e| anyhow!("{e}"))?;

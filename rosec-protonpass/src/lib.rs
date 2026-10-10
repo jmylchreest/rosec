@@ -1,11 +1,12 @@
 // Copyright (c) 2026 Proton AG (adapted PAT parser)
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Feasibility spike: Proton's GPL wire schema, PAT key hierarchy and Extism HTTP.
-//! Not installed or included in release packaging.
+//! Read-only Proton Pass provider: GPL wire schema, PAT key hierarchy and Extism HTTP.
 pub mod crypto;
+pub mod folders;
 #[cfg(target_family = "wasm")]
 mod guest;
 pub mod mapping;
+pub mod passkey;
 pub mod sensitive;
 #[rustfmt::skip]
 pub mod upstream;

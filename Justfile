@@ -107,6 +107,7 @@ build-wasm:
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-bitwarden-sm/Cargo.toml
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-gnome-keyring/Cargo.toml
   cargo build --target wasm32-wasip1 --release --manifest-path rosec-keepassxc-file/Cargo.toml
+  cargo build --locked --target wasm32-wasip1 --release --manifest-path rosec-protonpass/Cargo.toml
 
 # Run all tests
 test:
@@ -262,7 +263,7 @@ _bins := "rosec rosecd rosec-prompt rosec-pam-unlock"
 
 # WASM plugins (manifest-path, lowercase artifact stem).  Kept in lockstep
 # with build-wasm.
-_wasm_crates := "rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file"
+_wasm_crates := "rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass"
 
 # Full install: binaries + plugins.  Builds first if artifacts are stale.
 install: build-release build-wasm install-bin install-wasm

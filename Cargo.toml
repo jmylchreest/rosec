@@ -19,6 +19,7 @@ exclude = [
     "rosec-bitwarden-sm",
     "rosec-gnome-keyring",
     "rosec-keepassxc-file",
+    "rosec-protonpass",
 ]
 
 [workspace.package]

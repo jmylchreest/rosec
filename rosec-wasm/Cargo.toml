@@ -42,6 +42,8 @@ toml = { workspace = true }
 crossbeam-channel = { workspace = true }
 minisign = { workspace = true, optional = true }
 
+tempfile = { workspace = true }
+
 [features]
 # Bundle signing (PluginBundle::sign_with) for author-side tooling.
 # The daemon never signs, so this stays off its build.
@@ -49,4 +51,3 @@ sign = ["dep:minisign"]
 
 [dev-dependencies]
 minisign = { workspace = true }
-tempfile = { workspace = true }

@@ -39,7 +39,7 @@ fn seal(plain: &[u8], key: &[u8], aad: &[u8], nonce: u8) -> String {
     );
     STANDARD.encode(data)
 }
-fn fixture(updated: bool) -> Value {
+fn fixture(updated: bool, with_passkey: bool) -> Value {
     let mut item = item_v1::Item::new();
     let mut meta = item_v1::Metadata::new();
     meta.name = "WASM fixture".into();
@@ -55,6 +55,25 @@ fn fixture(updated: bool) -> Value {
     login.item_username = "fixture-user".into();
     login.totp_uri =
         "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30".into();
+    if with_passkey {
+        let key = p256::SecretKey::from_slice(&[7; 32]).unwrap();
+        let public = key.public_key().to_sec1_bytes();
+        let inner = json!({"key":{"kty":{"t":"assign","c":"EC2"},"alg":{"t":"assign","c":"ES256"},"par":[
+            [{"t":"int","c":-1},{"t":"int","c":{"inner":1i128.to_le_bytes().to_vec()}}],
+            [{"t":"int","c":-2},{"t":"bytes","c":public[1..33]}],
+            [{"t":"int","c":-3},{"t":"bytes","c":public[33..]}],
+            [{"t":"int","c":-4},{"t":"bytes","c":vec![7;32]}]
+        ]},"cid":[1,2,3],"rid":"example.test","uhd":[4,5],"cnt":null});
+        login.passkeys.push(item_v1::Passkey {
+            credential_id: vec![1, 2, 3],
+            rp_id: "example.test".into(),
+            content: rmp_serde::to_vec_named(
+                &json!({"v":1,"c":rmp_serde::to_vec_named(&inner).unwrap()}),
+            )
+            .unwrap(),
+            ..Default::default()
+        });
+    }
     let mut content = item_v1::Content::new();
     content.content = Some(item_v1::content::Content::Login(login));
     item.content = MessageField::some(content);
@@ -72,6 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             [],
             true,
         )?;
+        assert!(!plugin.function_exists("test_refresh"));
         for endpoint in [
             "http://127.0.0.1:8080",
             "http://127.0.0.1:80@evil.invalid",
@@ -141,6 +161,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     assert!(data.len() < 65536);
                 }
+                // TCP readiness probes connect and close without an HTTP request.
+                if data.is_empty() {
+                    continue;
+                }
                 let text = String::from_utf8(data).unwrap();
                 assert!(
                     !text.contains(&URL_SAFE_NO_PAD.encode([1; 32])),
@@ -194,8 +218,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         200,
                         json!({"ShareKeys":{"Keys":[{"KeyRotation":1,"Key":seal(&[2;32],&[1;32],crypto::SHARE_KEY,1)}],"Total":1}}),
                     )
+                } else if path.starts_with("/pass/v1/share/share1/folder?") {
+                    let folder = rosec_protonpass::upstream::folder_v1::Folder {
+                        name: "Test folder".into(),
+                        ..Default::default()
+                    };
+                    (
+                        200,
+                        json!({"Folders":{"Folders":[{"FolderID":"folder1","ParentFolderID":null,"KeyRotation":1,
+                        "FolderKey":seal(&[4;32], &[2;32],rosec_protonpass::folders::FOLDER_KEY,4),"ContentFormatVersion":1,
+                        "Content":seal(&folder.write_to_bytes().unwrap(), &[4;32],rosec_protonpass::folders::FOLDER_CONTENT,5)}],"LastToken":null}}),
+                    )
                 } else if path.starts_with("/pass/v1/share/share1/item?") {
-                    let mut item = fixture(current == 3);
+                    let mut item = fixture(current == 3, current == 14);
+                    if current == 12 {
+                        item["FolderID"] = json!("folder1");
+                        item["ItemKey"] = json!(seal(&[3; 32], &[4; 32], crypto::ITEM_KEY, 6));
+                    }
+                    if current == 13 {
+                        let mut special = item_v1::Item::new();
+                        special.metadata = MessageField::some(item_v1::Metadata {
+                            name: "SSH fixture".into(),
+                            ..Default::default()
+                        });
+                        special.content = MessageField::some(item_v1::Content {
+                            content: Some(item_v1::content::Content::SshKey(item_v1::ItemSSHKey {
+                                public_key: "ssh-ed25519 fixture".into(),
+                                private_key: "synthetic-ssh-private".into(),
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        });
+                        item["Content"] = json!(seal(
+                            &special.write_to_bytes().unwrap(),
+                            &[3; 32],
+                            crypto::ITEM_CONTENT,
+                            7
+                        ));
+                    }
                     if current == 1 {
                         item["Content"] = json!(STANDARD.encode([0; 64]));
                     }
@@ -247,8 +307,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(server),
         )
     };
-    let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/wasm32-wasip1/release/rosec_protonpass.wasm");
+    let wasm = std::env::var_os("PROTONPASS_WASM")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/wasm32-wasip1/release/rosec_protonpass.wasm")
+        });
     let host = if live {
         "pass-api.proton.me"
     } else {
@@ -280,7 +344,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // removing it from the additional fields passed to the guest.
     assert_eq!(auth["fields"][0]["kind"], "secret");
     let caps = call(&mut p, "capabilities", Value::Null)?;
-    assert_eq!(caps["capabilities"], json!(["Sync", "Totp"]));
+    assert_eq!(
+        caps["capabilities"],
+        json!(["Sync", "Totp", "Ssh", "Fido2", "OfflineCache"])
+    );
     let unlock = json!({"password":"ephemeral-test-only","auth_fields":{"personal_access_token":pat.trim()}});
     let result = call(&mut p, "unlock", unlock)?;
     if result["ok"] != true {
@@ -332,6 +399,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             server.join().unwrap();
         }
         return Ok(());
+    }
+    if live && std::env::var_os("PROTONPASS_TEST_REFRESH").is_some() {
+        let refreshed = call(&mut p, "test_refresh", Value::Null)?;
+        if refreshed["ok"] != true {
+            eprintln!(
+                "Guest status: {}",
+                refreshed["error"].as_str().unwrap_or("Unknown failure")
+            );
+            return Err("Live refresh failed".into());
+        }
+        assert_eq!(
+            call(&mut p, "sync", Value::Null)?["ok"],
+            true,
+            "Live sync after refresh failed"
+        );
+        println!("PASS: live session refresh and subsequent sync");
     }
     if live && check_fixture {
         if count != 1 || list["items"][0]["label"] != "rosec WASM live fixture" {
@@ -412,6 +495,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .len(),
             1
         );
+        // Round-trip the real WASM snapshot, then reject tampering and lock.
+        let cache = call(&mut p, "export_cache", Value::Null)?;
+        assert_eq!(cache["ok"], true);
+        assert!(
+            !String::from_utf8(STANDARD.decode(cache["blob_b64"].as_str().unwrap())?)?
+                .contains("synthetic-access")
+        );
+        assert_eq!(call(&mut p, "lock", Value::Null)?["ok"], true);
+        assert_eq!(
+            call(
+                &mut p,
+                "restore_cache",
+                json!({"blob_b64":cache["blob_b64"]})
+            )?["ok"],
+            true
+        );
+        assert_eq!(
+            call(&mut p, "list_items", Value::Null)?["items"],
+            list["items"]
+        );
+        assert_eq!(
+            call(&mut p, "sync", Value::Null)?["error_kind"],
+            "unavailable"
+        );
+        assert_eq!(
+            call(&mut p, "restore_cache", json!({"blob_b64":"invalid"}))?["ok"],
+            false
+        );
+        assert_eq!(call(&mut p, "status", Value::Null)?["locked"], true);
+        assert_eq!(
+            call(
+                &mut p,
+                "unlock",
+                json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+            )?["ok"],
+            true
+        );
         let before = requests.load(Ordering::SeqCst);
         for operation in [
             "create_item",
@@ -426,6 +546,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         assert_eq!(requests.load(Ordering::SeqCst), before);
         assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        mode.store(12, Ordering::SeqCst);
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        assert_eq!(
+            call(&mut p, "get_item_attributes", json!({"id":"share1/item1"}))?["public"]["folder"],
+            "Test folder"
+        );
+        mode.store(13, Ordering::SeqCst);
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        assert_eq!(
+            call(&mut p, "list_ssh_keys", Value::Null)?["keys"][0]["item_id"],
+            "share1/item1"
+        );
+        assert_eq!(
+            call(
+                &mut p,
+                "get_ssh_private_key",
+                json!({"item_id":"share1/item1"})
+            )?["pem"],
+            "synthetic-ssh-private"
+        );
+        assert_eq!(
+            call(&mut p, "get_ssh_private_key", json!({"item_id":"other"}))?["error_kind"],
+            "not_found"
+        );
+        mode.store(14, Ordering::SeqCst);
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        let credentials = call(&mut p, "list_fido2_credentials", Value::Null)?;
+        assert_eq!(credentials["credentials"][0]["credential_id"], "AQID");
+        assert!(!credentials.to_string().contains("PRIVATE KEY"));
+        let material = call(
+            &mut p,
+            "get_fido2_key",
+            json!({"item_id":"share1/item1","credential_id":"AQID"}),
+        )?;
+        use p256::{
+            ecdsa::{
+                Signature, SigningKey,
+                signature::{Signer, Verifier},
+            },
+            pkcs8::DecodePrivateKey,
+        };
+        let signing = SigningKey::from_pkcs8_pem(material["pem"].as_str().unwrap())?;
+        let assertion = [42; 69];
+        let signature: Signature = signing.sign(&assertion);
+        signing.verifying_key().verify(&assertion, &signature)?;
+        assert_eq!(
+            call(
+                &mut p,
+                "get_fido2_key",
+                json!({"item_id":"other","credential_id":"AQID"})
+            )?["error_kind"],
+            "not_found"
+        );
         mode.store(3, Ordering::SeqCst);
         assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
         let changed = call(
@@ -566,6 +739,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         call(&mut p, "list_items", Value::Null)?["error_kind"],
         "locked"
     );
+    if !live {
+        mode.store(0, Ordering::SeqCst);
+        host_cache_probe(&api, &pat, &stop)?;
+    }
     stop.store(true, Ordering::SeqCst);
     if let Some(server) = server {
         server.join().unwrap();
@@ -579,5 +756,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "PASS: compiled WASM, HTTP, decryption, metadata separation, TOTP, sync changes/deletions, malformed input, limits, lock and read-only boundary"
         );
     }
+    Ok(())
+}
+
+fn host_cache_probe(
+    api: &str,
+    pat: &str,
+    stop: &AtomicBool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rosec_core::{Provider, UnlockInput};
+    use rosec_wasm::{WasmProvider, WasmProviderConfig};
+    let directory = tempfile::tempdir()?;
+    // This standalone test process has no other environment readers.
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", directory.path());
+    }
+    let wasm_path = std::env::var("PROTONPASS_WASM")?;
+    let config = WasmProviderConfig {
+        id: "proton-fixture".into(),
+        name: "Proton fixture".into(),
+        kind: "protonpass".into(),
+        wasm_bytes: Arc::new(std::fs::read(&wasm_path)?),
+        wasm_path,
+        allowed_hosts: vec!["127.0.0.1".into(), api.trim_start_matches("http://").into()],
+        allowed_paths: vec![],
+        allowed_files: vec![],
+        options: std::collections::HashMap::from([("api_url".into(), json!(api))]),
+        offline_cache: true,
+        tls_mode: rosec_core::config::TlsMode::Bundled,
+        tls_mode_probe: rosec_core::config::TlsMode::Bundled,
+        unlock_timeout_secs: 60,
+    };
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let provider = WasmProvider::new(config.clone())?;
+        provider
+            .unlock(UnlockInput::WithRegistration {
+                password: Zeroizing::new("fixture-passphrase".into()),
+                registration_fields: std::collections::HashMap::from([(
+                    "personal_access_token".into(),
+                    Zeroizing::new(pat.into()),
+                )]),
+            })
+            .await?;
+        let items = provider.list_items().await?;
+        assert_eq!(items.len(), 1);
+        provider.lock().await?;
+        drop(provider);
+        let provider = WasmProvider::new(config)?;
+        assert!(
+            provider
+                .unlock(UnlockInput::Password(Zeroizing::new("wrong".into())))
+                .await
+                .is_err()
+        );
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new(
+                "fixture-passphrase".into(),
+            )))
+            .await?;
+        provider.lock().await?;
+        // Stop the network source: readiness now fails and the host must decrypt
+        // the persisted snapshot, rather than use an in-memory guest session.
+        stop.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            provider
+                .unlock(UnlockInput::Password(Zeroizing::new("wrong".into())))
+                .await
+                .is_err()
+        );
+        provider
+            .unlock(UnlockInput::Password(Zeroizing::new(
+                "fixture-passphrase".into(),
+            )))
+            .await?;
+        assert!(provider.status().await?.cached);
+        let secret = provider.get_secret_attr(&items[0].id, "password").await?;
+        assert_eq!(secret.as_slice(), b"synthetic-password");
+        provider.lock().await?;
+        assert!(
+            provider
+                .get_secret_attr(&items[0].id, "password")
+                .await
+                .is_err()
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    println!("PASS: real host registration, restart, wrong password, offline fallback and lock");
     Ok(())
 }

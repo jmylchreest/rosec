@@ -45,14 +45,14 @@ fn card_identity_wifi_and_custom_values_are_sensitive() {
     card.pin = "9876".into();
     let e = map(content::Content::CreditCard(card));
     assert_eq!(e.secrets["number"].as_str(), "4111111111111111");
-    assert_eq!(e.secrets["verification_number"].as_str(), "123");
+    assert_eq!(e.secrets["code"].as_str(), "123");
     assert_eq!(e.secrets["pin"].as_str(), "9876");
     assert!(!e.public.contains_key("number"));
     assert!(!e.public.contains_key("pin"));
     let mut identity = ItemIdentity::new();
     identity.social_security_number = "SYNTHETIC".into();
     let e = map(content::Content::Identity(identity));
-    assert_eq!(e.secrets["social_security_number"].as_str(), "SYNTHETIC");
+    assert_eq!(e.secrets["ssn"].as_str(), "SYNTHETIC");
     assert!(!e.public.values().any(|v| v == "SYNTHETIC"));
     let mut wifi = ItemWifi::new();
     wifi.password = "wifi-secret".into();
@@ -94,4 +94,28 @@ fn duplicate_custom_names_are_rejected_without_leaking_the_value() {
         map_item("demo".into(), &item.write_to_bytes().unwrap()),
         Err("Duplicate custom field name")
     ));
+}
+
+#[test]
+fn extra_totp_has_stable_frontend_entry_and_no_public_seed() {
+    let mut totp = ExtraTotp::new();
+    totp.totp_uri = "otpauth://totp/test?secret=GEZDGNBV".into();
+    let mut field = ExtraField::new();
+    field.field_name = "Backup".into();
+    field.content = Some(extra_field::Content::Totp(totp));
+    let mut item = Item::new();
+    item.extra_fields.push(field);
+    let mut c = Content::new();
+    c.content = Some(content::Content::Note(ItemNote::new()));
+    item.content = MessageField::some(c);
+    let parent = map_item("share/item".into(), &item.write_to_bytes().unwrap()).unwrap();
+    let extra = rosec_protonpass::mapping::additional_totp_entries(&parent);
+    assert_eq!(extra.len(), 1);
+    assert_eq!(extra[0].public["rosec:totp"], "true");
+    assert_eq!(extra[0].secrets["totp"], parent.secrets["custom.Backup"]);
+    assert!(!extra[0].public.values().any(|v| v.contains("GEZDGNBV")));
+    assert_eq!(
+        extra[0].id,
+        rosec_protonpass::mapping::additional_totp_entries(&parent)[0].id
+    );
 }

@@ -1,12 +1,13 @@
-# Proton Pass provider spike
+# Proton Pass provider
 
 This GPL-3.0-or-later Extism WASI guest reads Proton Pass directly through its API.
 The official Proton CLI is used to provision test data and PATs, not by the guest
-at runtime. The crate is standalone and is not part of release packaging.
+at runtime. The crate is standalone and ships as a separate GPL WASM provider, with matching
+source and third-party notices.
 
-**Status: experimental and not approved for production.** The
+**Release validation is recorded below and in SECURITY-REVIEW.md.** The
 [security/performance review](SECURITY-REVIEW.md) records fixes, measurements and
-remaining release blockers. The [provider guide](../docs/docs/providers/protonpass.md)
+release checks and operational boundaries. The [provider guide](../docs/docs/providers/protonpass.md)
 explains capabilities, authentication and field mappings.
 
 ## Build and test
@@ -35,12 +36,19 @@ cargo clippy --manifest-path rosec-protonpass/Cargo.toml --locked \
 ```
 
 The probe loads `rosec-protonpass/target/wasm32-wasip1/release/rosec_protonpass.wasm`.
-Do not override the fixture guest's target directory. Native tests/probes may use
+Set `PROTONPASS_WASM` to override the guest path when using a separate target directory. Native tests/probes may use
 `CARGO_TARGET_DIR` to reuse a host build directory. The local server requires a
 loopback socket. Tests cover authenticated decryption, TOTP, mappings, malformed
 authentication, failed reauthentication, rejected endpoints, duplicate IDs, page
 and share limits, sync changes/deletion, revocation, locking and read-only stubs.
 The benchmark uses 1,000 synthetic items across ten pages and makes no Proton calls.
+
+## User setup
+
+The [provider guide](../docs/docs/providers/protonpass.md#obtain-a-personal-access-token)
+walks through web/CLI PAT creation, viewer vault grants, rosec registration, normal
+unlock and renewal/revocation. Account credentials are only used with Proton;
+rosec receives a normal PAT and a separate local passphrase.
 
 ## Isolated live development
 
@@ -87,19 +95,21 @@ passphrase. It does not change the Proton account password.
 
 Host tests cover restart, wrong-password rejection, replacement and legacy migration.
 The guest itself accepts a nonempty local passphrase with an explicitly supplied PAT;
-the host is responsible for local credential protection. These tests are synthetic,
-and the new restart/refresh/logout flows have not been revalidated against Proton.
+the host is responsible for local credential protection. Synthetic and isolated live tests cover these flows; see the review for evidence.
 
 Revoke the PAT, log out of temporary CLI sessions, stop the isolated daemon and
 remove its temporary data after testing. Keep signature verification enabled in
 the regular daemon. The [earlier live transcript](LIVE-DEMO.txt) records successful
 reads of all eight CLI-created native types; it predates this hardening pass.
-This pass used synthetic fixtures and did not access the user's Proton account.
+The release pass additionally verifies a scoped temporary PAT and SSH signing against
+the demo vault, with credentials withheld and temporary PATs revoked afterwards.
 
 ## Runtime boundaries
 
-- Capabilities are `Sync` and `Totp`; writes and password changes always return
-  `not_supported`. SSH keys are readable attributes, not agent/signing support.
+- Capabilities are `Sync`, `Totp`, `Ssh`, `Fido2` and `OfflineCache`; writes and
+  password changes always return `not_supported`. SSH signing requires confirmation.
+  Existing ES256/Ed25519 synced passkeys are supported; new passkey creation and
+  nonzero signature counters are not supported by this read-only provider.
 - Production requests use `https://pass-api.proton.me` only. The sidecar allows
   that hostname and no guest filesystem access. The rosec host disables redirects.
 - A sync accepts at most 32 shares, 128 keys per share, 100 revisions per page,
@@ -121,13 +131,14 @@ This pass used synthetic fixtures and did not access the user's Proton account.
   the worker. A saturated queue returns `unavailable` without blocking Tokio.
 - Full sync drops the old snapshot before constructing a replacement. Network
   failures report `unavailable`; permission/revocation failures report `auth_failed`.
-  Both leave the provider locked. There is no offline fallback.
+  Both leave the provider locked. A later offline unlock may restore a valid
+  host-encrypted cache; cached data is explicitly unconfirmed.
 - An expired access token gets one refresh attempt; 403 permission denials do not.
   Normal lock/re-authentication attempts to revoke only this API session before
   discarding its tokens. Network failure, timeout or active-call cancellation can
   prevent remote logout; local lock still completes or invalidates the instance.
   The PAT remains registered for later unlock and is not remotely revoked by lock.
-- Full sync is serial. There is no incremental event cursor, offline cache or
+- Full sync is serial. There is no incremental event cursor or
   background notification. Revocation is detected on the next API call, not pushed.
 
 ## Licensing
@@ -135,5 +146,5 @@ This pass used synthetic fixtures and did not access the user's Proton account.
 The guest is GPL-3.0-or-later, including selected Proton code and unchanged generated
 protobuf files. [UPSTREAM.txt](UPSTREAM.txt) records exact commits, hashes and
 modifications; [LICENSE](LICENSE) contains the licence. `Cargo.lock` pins dependencies.
-A combined host/plugin distribution and corresponding-source/notice review remains
-required. This spike does not establish that WASM creates a legal licence boundary.
+See [DISTRIBUTION.md](DISTRIBUTION.md) for licence review, dependency notices,
+corresponding-source packaging and rebuild instructions.

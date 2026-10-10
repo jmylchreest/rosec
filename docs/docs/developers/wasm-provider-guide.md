@@ -594,7 +594,7 @@ Lock:
 ### Host-side encryption
 
 The host wraps the guest blob with:
-- **Key derivation:** `HKDF-SHA256(machine_key || password, salt=b"rosec-provider-cache-v1", info=provider_id, len=64)`
+- **Key derivation:** `Argon2id(password, secret=machine_key, salt=SHA256("rosec-provider-cache-v2" || provider_id), 64 MiB, 3 passes, 1 lane, len=64)`; cache format v2 invalidates older snapshots, which regenerate after an online unlock
   producing 32 bytes AES key + 32 bytes HMAC key.
 - **Encryption:** AES-256-CBC with PKCS7 padding + HMAC-SHA256 (encrypt-then-MAC).
 - **File format:** `[version 1B][timestamp 8B BE][IV 16B][ct_len 4B BE][ciphertext...][MAC 32B]`
