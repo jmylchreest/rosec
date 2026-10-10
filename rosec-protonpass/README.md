@@ -7,9 +7,9 @@ source and third-party notices.
 
 **Experimental provider.** Local release checks pass, but the provider retains
 its experimental status.
-[RELEASE-VALIDATION.md](RELEASE-VALIDATION.md) records the checks. The
+The
 [security/performance review](SECURITY-REVIEW.md) records fixes, measurements and
-release checks and operational boundaries. The [provider guide](../docs/docs/providers/protonpass.md)
+operational boundaries. The [provider guide](../docs/docs/providers/protonpass.md)
 explains capabilities, authentication and field mappings.
 
 ## Build and test
@@ -101,10 +101,7 @@ the host is responsible for local credential protection. Synthetic and isolated 
 
 Revoke the PAT, log out of temporary CLI sessions, stop the isolated daemon and
 remove its temporary data after testing. Keep signature verification enabled in
-the regular daemon. The [earlier live transcript](LIVE-DEMO.txt) records successful
-reads of all eight CLI-created native types; it predates this hardening pass.
-The release pass additionally verifies a scoped temporary PAT and SSH signing against
-the demo vault, with credentials withheld and temporary PATs revoked afterwards.
+the regular daemon.
 
 ## Runtime boundaries
 

@@ -19,8 +19,7 @@ short-lived viewer PAT scoped to a dedicated synthetic vault. The PAT was revoke
 and the CLI session logged out. No account credentials or live secret values are
 included in this report or committed fixtures.
 
-Local release validation is complete; see RELEASE-VALIDATION.md for the check
-record, including offline source rebuild and AUR packaging. The plugin remains
+Local release validation includes offline source rebuild and AUR packaging. The plugin remains
 experimental despite passing these checks; deployment must respect the operational
 boundaries below. This
 is not a claim that every possible vulnerability has been excluded.
@@ -127,7 +126,7 @@ of the improvement to any one change and is not a live-network benchmark.
 
 ## Validation and audit method
 
-The final validation commands and results are recorded in RELEASE-VALIDATION.md.
+Reproduction commands are in README.md and DISTRIBUTION.md.
 Coverage includes full workspace tests (108 core and 104 WASM-host tests), 15
 standalone guest tests, compiled production/fixture WASM, real-host offline/restart
 flows, isolated live Proton tests, Clippy, MSRV and documentation builds.
