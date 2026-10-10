@@ -1,13 +1,16 @@
 // Copyright (c) 2026 Proton AG (adapted protocol handling)
 // SPDX-License-Identifier: GPL-3.0-or-later
 // REST envelope and PAT flow adapted from Proton pass-cli 2.4.2; see UPSTREAM.md.
-use crate::{crypto, parse_pat, upstream::item_v1};
+use crate::{
+    crypto,
+    mapping::{Entry, map_item},
+    parse_pat,
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use extism_pdk::*;
-use protobuf::Message;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Mutex};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 struct State {
@@ -19,12 +22,6 @@ struct Session {
     uid: Zeroizing<String>,
     access: Zeroizing<String>,
     key: Zeroizing<Vec<u8>>,
-}
-struct Entry {
-    id: String,
-    label: String,
-    public: BTreeMap<String, String>,
-    secrets: BTreeMap<String, Zeroizing<String>>,
 }
 
 fn fail(kind: &str, message: &str) -> Json<Value> {
@@ -85,74 +82,8 @@ fn take_secret(v: &mut Value, name: &str) -> Result<Zeroizing<String>, &'static 
     }
 }
 
-fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
-    let mut item = item_v1::Item::parse_from_bytes(bytes).map_err(|_| "Invalid item protobuf")?;
-    let mut e = Entry {
-        id,
-        label: String::new(),
-        public: BTreeMap::new(),
-        secrets: BTreeMap::new(),
-    };
-    if let Some(mut metadata) = item.metadata.take() {
-        e.label = std::mem::take(&mut metadata.name);
-        e.secrets.insert(
-            "notes".into(),
-            Zeroizing::new(std::mem::take(&mut metadata.note)),
-        );
-    }
-    let content = item
-        .content
-        .as_mut()
-        .and_then(|c| c.content.take())
-        .ok_or("Missing item content")?;
-    match content {
-        item_v1::content::Content::Login(mut login) => {
-            e.public.insert("type".into(), "login".into());
-            e.public
-                .insert("username".into(), std::mem::take(&mut login.item_username));
-            e.public.insert(
-                "uri".into(),
-                login.urls.first().cloned().unwrap_or_default(),
-            );
-            e.secrets.insert(
-                "password".into(),
-                Zeroizing::new(std::mem::take(&mut login.password)),
-            );
-            if !login.totp_uri.is_empty() {
-                e.public.insert("rosec:totp".into(), "true".into());
-                e.secrets.insert(
-                    "totp".into(),
-                    Zeroizing::new(std::mem::take(&mut login.totp_uri)),
-                );
-            }
-            // The spike does not expose passkeys yet; scrub their private payloads.
-            for p in &mut login.passkeys {
-                p.content.zeroize();
-            }
-        }
-        item_v1::content::Content::Note(_) => {
-            e.public.insert("type".into(), "note".into());
-        }
-        item_v1::content::Content::SshKey(mut ssh) => {
-            e.public.insert("type".into(), "ssh-key".into());
-            e.public
-                .insert("public_key".into(), std::mem::take(&mut ssh.public_key));
-            e.secrets.insert(
-                "private_key".into(),
-                Zeroizing::new(std::mem::take(&mut ssh.private_key)),
-            );
-        }
-        _ => return Err("Item type not implemented in spike"),
-    }
-    // Limit the spike to uncomplicated fixtures rather than silently dropping fields.
-    if !item.extra_fields.is_empty() {
-        return Err("Custom fields not implemented in spike");
-    }
-    Ok(e)
-}
-
 fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
-    let session = s.session.as_ref().ok_or("Locked")?;
+    let session = s.session.as_ref().ok_or("locked")?;
     let shares = request(s, "GET", "/pass/v1/share", None)?;
     let mut result = Vec::new();
     for share in array(&shares, "Shares")? {
@@ -220,10 +151,16 @@ fn fetch_items(s: &State) -> Result<Vec<Entry>, &'static str> {
                     &item_key,
                     crypto::ITEM_CONTENT,
                 )?;
-                result.push(map_item(
-                    format!("{sid}/{}", field(row, "ItemID")?),
-                    &content,
-                )?);
+                let mut entry = map_item(format!("{sid}/{}", field(row, "ItemID")?), &content)?;
+                if entry
+                    .public
+                    .get("proton_type")
+                    .is_some_and(|v| v == "alias")
+                    && let Some(email) = row["AliasEmail"].as_str()
+                {
+                    entry.public.insert("email".into(), email.into());
+                }
+                result.push(entry);
             }
             let next = response["Items"]["LastToken"].as_str().unwrap_or_default();
             if next.is_empty() {
@@ -247,7 +184,7 @@ pub fn init(Json(v): Json<Value>) -> FnResult<Json<Value>> {
         .trim_end_matches('/')
         .to_owned();
     if api != "https://pass-api.proton.me" && !api.starts_with("http://127.0.0.1:") {
-        return Ok(fail("InvalidInput", "Unsupported API endpoint"));
+        return Ok(fail("invalid_input", "Unsupported API endpoint"));
     }
     *STATE.lock().map_err(|_| Error::msg("State unavailable"))? = Some(State {
         api,
@@ -269,14 +206,20 @@ pub fn status(_: ()) -> FnResult<Json<Value>> {
 }
 #[plugin_fn]
 pub fn unlock(Json(mut input): Json<Value>) -> FnResult<Json<Value>> {
-    let token = take_secret(&mut input["auth_fields"], "personal_access_token");
+    // The daemon currently routes additional interactive auth fields through
+    // WithRegistration; the direct harness uses WithAuth. Accept both envelopes.
+    let token = if input["auth_fields"]["personal_access_token"].is_string() {
+        take_secret(&mut input["auth_fields"], "personal_access_token")
+    } else {
+        take_secret(&mut input["registration_fields"], "personal_access_token")
+    };
     let password = take_secret(&mut input, "password");
     if !password.as_ref().is_ok_and(|p| !p.is_empty()) {
-        return Ok(fail("AuthFailed", "Local passphrase required"));
+        return Ok(fail("auth_failed", "Local passphrase required"));
     }
     let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_mut() else {
-        return Ok(fail("InvalidInput", "Not initialized"));
+        return Ok(fail("invalid_input", "Not initialized"));
     };
     s.session = None;
     s.items.clear();
@@ -305,7 +248,7 @@ pub fn unlock(Json(mut input): Json<Value>) -> FnResult<Json<Value>> {
         Err(e) => {
             s.session = None;
             s.items.clear();
-            Ok(fail("AuthFailed", e))
+            Ok(fail("auth_failed", e))
         }
     }
 }
@@ -322,7 +265,7 @@ pub fn lock(_: ()) -> FnResult<Json<Value>> {
 pub fn sync(_: ()) -> FnResult<Json<Value>> {
     let mut guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_mut().filter(|s| s.session.is_some()) else {
-        return Ok(fail("Locked", "Locked"));
+        return Ok(fail("locked", "locked"));
     };
     match fetch_items(s) {
         Ok(items) => {
@@ -332,7 +275,7 @@ pub fn sync(_: ()) -> FnResult<Json<Value>> {
         Err(e) => {
             s.session = None;
             s.items.clear();
-            Ok(fail("AuthFailed", e))
+            Ok(fail("auth_failed", e))
         }
     }
 }
@@ -350,7 +293,7 @@ pub fn search(Json(v): Json<Value>) -> FnResult<Json<Value>> {
 fn search_impl(v: Value) -> FnResult<Json<Value>> {
     let guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_ref().filter(|s| s.session.is_some()) else {
-        return Ok(fail("Locked", "Locked"));
+        return Ok(fail("locked", "locked"));
     };
     let items: Vec<_> = s
         .items
@@ -369,7 +312,7 @@ fn search_impl(v: Value) -> FnResult<Json<Value>> {
 pub fn get_item_attributes(Json(v): Json<Value>) -> FnResult<Json<Value>> {
     let guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_ref().filter(|s| s.session.is_some()) else {
-        return Ok(fail("Locked", "Locked"));
+        return Ok(fail("locked", "locked"));
     };
     match s
         .items
@@ -379,14 +322,14 @@ pub fn get_item_attributes(Json(v): Json<Value>) -> FnResult<Json<Value>> {
         Some(e) => Ok(Json(
             json!({"ok":true,"public":e.public,"secret_names":e.secrets.keys().collect::<Vec<_>>()}),
         )),
-        None => Ok(fail("NotFound", "Item not found")),
+        None => Ok(fail("not_found", "Item not found")),
     }
 }
 #[plugin_fn]
 pub fn get_secret_attr(Json(v): Json<Value>) -> FnResult<Json<Value>> {
     let guard = STATE.lock().map_err(|_| Error::msg("State unavailable"))?;
     let Some(s) = guard.as_ref().filter(|s| s.session.is_some()) else {
-        return Ok(fail("Locked", "Locked"));
+        return Ok(fail("locked", "locked"));
     };
     let secret = s
         .items
@@ -397,23 +340,36 @@ pub fn get_secret_attr(Json(v): Json<Value>) -> FnResult<Json<Value>> {
         Some(secret) => Ok(Json(
             json!({"ok":true,"value_b64":STANDARD.encode(secret.as_bytes())}),
         )),
-        None => Ok(fail("NotFound", "Secret not found")),
+        None => Ok(fail("not_found", "Secret not found")),
     }
 }
 // Mutations intentionally remain unsupported, matching all rosec WASM providers.
 #[plugin_fn]
 pub fn create_item(_: Json<Value>) -> FnResult<Json<Value>> {
-    Ok(fail("NotSupported", "Read-only provider"))
+    Ok(fail("not_supported", "Read-only provider"))
 }
 #[plugin_fn]
 pub fn update_item(_: Json<Value>) -> FnResult<Json<Value>> {
-    Ok(fail("NotSupported", "Read-only provider"))
+    Ok(fail("not_supported", "Read-only provider"))
 }
 #[plugin_fn]
 pub fn delete_item(_: Json<Value>) -> FnResult<Json<Value>> {
-    Ok(fail("NotSupported", "Read-only provider"))
+    Ok(fail("not_supported", "Read-only provider"))
 }
 #[plugin_fn]
 pub fn change_password(_: Json<Value>) -> FnResult<Json<Value>> {
-    Ok(fail("NotSupported", "Read-only provider"))
+    Ok(fail("not_supported", "Read-only provider"))
+}
+
+#[plugin_fn]
+pub fn plugin_manifest(_: String) -> FnResult<Json<Value>> {
+    Ok(Json(
+        json!({"kind":"protonpass","name":"Proton Pass","description":"Experimental read-only Proton Pass provider","version":env!("CARGO_PKG_VERSION"),"default_allowed_hosts":["pass-api.proton.me"],"required_options":[],"optional_options":[],"experimental":true}),
+    ))
+}
+#[plugin_fn]
+pub fn auth_fields(_: String) -> FnResult<Json<Value>> {
+    Ok(Json(
+        json!({"fields":[{"id":"personal_access_token","label":"Personal access token","placeholder":"","required":true,"kind":"secret"}]}),
+    ))
 }

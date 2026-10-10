@@ -184,6 +184,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         call(&mut p, "init", json!({"options":{"api_url":api}}))?["ok"],
         true
     );
+    let descriptor = call(&mut p, "plugin_manifest", Value::Null)?;
+    assert_eq!(descriptor["kind"], "protonpass");
+    assert_eq!(descriptor["experimental"], true);
+    let auth = call(&mut p, "auth_fields", Value::Null)?;
+    assert_eq!(auth["fields"][0]["id"], "personal_access_token");
+    // Password-kind would make the host use the PAT as the local passphrase,
+    // removing it from the additional fields passed to the guest.
+    assert_eq!(auth["fields"][0]["kind"], "secret");
     let caps = call(&mut p, "capabilities", Value::Null)?;
     assert_eq!(caps["capabilities"], json!(["Sync", "Totp"]));
     let unlock = json!({"password":"ephemeral-test-only","auth_fields":{"personal_access_token":pat.trim()}});
@@ -287,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ] {
             assert_eq!(
                 call(&mut p, operation, json!({}))?["error_kind"],
-                "NotSupported"
+                "not_supported"
             );
         }
         assert_eq!(requests.load(Ordering::SeqCst), before);
@@ -312,7 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "get_secret_attr",
                 json!({"id":"share1/item1","attr":"password"})
             )?["error_kind"],
-            "NotFound"
+            "not_found"
         );
         mode.store(1, Ordering::SeqCst);
         assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], false);
@@ -322,14 +330,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "get_secret_attr",
                 json!({"id":"share1/item1","attr":"totp"})
             )?["error_kind"],
-            "Locked"
+            "locked"
         );
         mode.store(0, Ordering::SeqCst);
         assert_eq!(
             call(
                 &mut p,
                 "unlock",
-                json!({"password":"test","auth_fields":{"personal_access_token":pat.as_str()}})
+                json!({"password":"test","registration_fields":{"personal_access_token":pat.as_str()}})
             )?["ok"],
             true
         );
@@ -340,7 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     call(&mut p, "lock", Value::Null)?;
     assert_eq!(
         call(&mut p, "list_items", Value::Null)?["error_kind"],
-        "Locked"
+        "locked"
     );
     stop.store(true, Ordering::SeqCst);
     if let Some(server) = server {

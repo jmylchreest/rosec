@@ -1,8 +1,8 @@
 Proton Pass WASM feasibility spike
 ================================
 
-Read-only, GPL-3.0-or-later. Not a production provider. Not installed or wired into
-rosec's provider registry or release packaging. The local vault remains writable;
+Read-only, GPL-3.0-or-later. Not a production provider. Dynamically discoverable for isolated development testing; not installed in the
+normal daemon or wired into release packaging. The local vault remains writable;
 external provider writes and password changes deliberately return NotSupported.
 
 What this proves
@@ -72,14 +72,21 @@ This proves the direct-vault/root-login live path, not all first-release feature
 
 Limitations and next implementation steps
 -----------------------------------------
-- The ephemeral auth_fields PAT must be supplied for each unlock. The nonempty
-  local passphrase is only a harness requirement, not verified or used to encrypt
-  credentials. Production must use rosec's established passphrase-wrapped credential
-  storage; this guest must not be installed as a normal user provider yet.
-- Only direct vault shares and root login/note/SSH item payloads are decoded.
+- The PAT is accepted in auth_fields or registration_fields, matching the direct
+  harness and daemon respectively. The isolated daemon may wrap registration
+  credentials in its temporary data directory; that directory is removed after testing. The nonempty
+  local passphrase is only checked for nonemptiness by the guest. Host credential
+  wrapping may store it indirectly as an encryption key input, but restart,
+  wrong-password, rotation and recovery flows remain unverified. Complete those
+  lifecycle tests before installing this as a normal user provider.
+- Only direct vault shares and root items are decoded. All eight native item
+  types are mapped: login, note, alias, card, identity, SSH key, Wi-Fi and custom.
+  Alias email is taken from the API revision envelope. Card/identity fields
+  currently retain Proton field names; full rosec cross-provider normalization
+  and attribute descriptors remain first-release work.
   Only Sync and Totp are advertised. SSH key fields can be retrieved as secrets,
   but SSH-agent enumeration and passkey operations are not implemented in this spike.
-- Implement folders, all mapped item/custom field types, multiple TOTP fields,
+- Implement folders, multiple TOTP fields,
   SSH/passkey adapters, metadata/offline cache and session refresh for first release.
 - Protobuf/JSON temporary secret allocations and HTTP header copies require further
   zeroization review. Stored secret values and decryption buffers use Zeroizing.
@@ -93,3 +100,38 @@ Limitations and next implementation steps
 
 The read-only first-release feature plan remains intact. This directory is a
 feasibility checkpoint, not completion of that feature plan.
+
+CLI -> real rosec demonstration on 2026-10-10
+--------------------------------------------
+Created one of each native item type using the official Proton CLI 2.4.2 in a
+user-authorized dedicated "rosec demo" vault. The examples remain in that vault.
+A one-hour PAT had viewer access only to this vault. A separate rosecd process
+loaded the experimental guest from a temporary XDG data directory, used a private
+D-Bus socket, disabled local-development signature verification in that temporary
+config only, and disabled FUSE/FIDO frontends. The regular daemon was unaffected.
+
+Actual rosec CLI calls (not just the standalone Extism probe) verified:
+- unlock and sync; search returned exactly eight items;
+- inspect --all-attrs retrieved every item's mapped attributes;
+- login password, note, card number, identity name, Wi-Fi password, custom hidden
+  field, SSH private/public key format, and generated alias email;
+- get retrieved the expected login password;
+- totp get --stdout produced an independently verified current 8-digit code;
+- sensitive demo values were absent from public metadata;
+- lock denied subsequent get --no-unlock access.
+
+The daemon test exposed and fixed lowercase snake_case error discriminants,
+PAT field classification (secret rather than password), and the daemon's use
+of registration_fields for additional interactive auth fields. The fixture
+probe now covers the manifest/auth descriptors and both auth envelopes.
+
+All temporary PATs were revoked, official CLI sessions logged out, the isolated
+daemon stopped and temporary session/auth data removed. Account credentials were
+kept out of output. Private SSH key material was verified without displaying it.
+The remaining demo items are synthetic and deliberately not useful credentials.
+
+Passkeys are nested login data, not a ninth native item type. This official CLI
+version has no passkey creation command, so passkey creation/signing was not
+part of this CLI-created demonstration. The SSH test proves key reading, not
+SSH-agent signing. Extra custom TOTP fields are readable seeds, not additional
+entries in rosec's TOTP frontend yet. See LIVE-DEMO.txt for the read transcript.

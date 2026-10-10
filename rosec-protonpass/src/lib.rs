@@ -5,6 +5,7 @@
 pub mod crypto;
 #[cfg(target_family = "wasm")]
 mod guest;
+pub mod mapping;
 #[rustfmt::skip]
 pub mod upstream;
 
