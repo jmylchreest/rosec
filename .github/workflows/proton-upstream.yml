@@ -1,0 +1,41 @@
+name: Proton upstream changes
+
+on:
+  schedule:
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - contrib/check-proton-upstream.py
+      - tests/test_proton_upstream.py
+      - rosec-protonpass/UPSTREAM.txt
+      - .github/workflows/proton-upstream.yml
+  push:
+    branches: [main]
+    paths:
+      - contrib/check-proton-upstream.py
+      - tests/test_proton_upstream.py
+      - rosec-protonpass/UPSTREAM.txt
+      - .github/workflows/proton-upstream.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 tests/test_proton_upstream.py
+
+  upstream:
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare pinned Proton sources with upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 contrib/check-proton-upstream.py

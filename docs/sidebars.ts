@@ -17,6 +17,7 @@ const sidebars: SidebarsConfig = {
         'providers/bitwarden',
         'providers/bitwarden-sm',
         'providers/keepassxc-file',
+        'providers/protonpass',
       ],
     },
     {

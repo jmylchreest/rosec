@@ -53,6 +53,23 @@ pub struct UnlockRequest {
     pub auth_fields: Option<HashMap<String, String>>,
 }
 
+// Requests can be dropped while queued, on cancellation, or during unwinding.
+// Cleanup belongs to the owner, not only to the successful caller path.
+impl Drop for UnlockRequest {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.password.zeroize();
+        for fields in [&mut self.registration_fields, &mut self.auth_fields]
+            .into_iter()
+            .flatten()
+        {
+            for value in fields.values_mut() {
+                value.zeroize();
+            }
+        }
+    }
+}
+
 impl fmt::Debug for UnlockRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnlockRequest")
@@ -188,7 +205,7 @@ pub struct SecretAttrResponse {
     pub error_kind: Option<ErrorKind>,
     /// Base64-encoded secret bytes.
     #[serde(default)]
-    pub value_b64: Option<String>,
+    pub value_b64: Option<zeroize::Zeroizing<String>>,
 }
 
 impl fmt::Debug for SecretAttrResponse {
@@ -252,7 +269,7 @@ pub struct SshPrivateKeyResponse {
     pub error_kind: Option<ErrorKind>,
     /// PEM-encoded private key.
     #[serde(default)]
-    pub pem: Option<String>,
+    pub pem: Option<zeroize::Zeroizing<String>>,
 }
 
 impl fmt::Debug for SshPrivateKeyResponse {
@@ -335,7 +352,7 @@ pub struct Fido2KeyResponse {
     pub error_kind: Option<ErrorKind>,
     /// PEM-encoded PKCS#8 private key.
     #[serde(default)]
-    pub pem: Option<String>,
+    pub pem: Option<zeroize::Zeroizing<String>>,
 }
 
 impl fmt::Debug for Fido2KeyResponse {
@@ -540,7 +557,7 @@ pub struct CheckRemoteChangedResponse {
 ///
 /// The guest MAY pre-encrypt the blob (defense in depth) but is not
 /// required to — the host wrapper provides confidentiality and integrity.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ExportCacheResponse {
     pub ok: bool,
     #[serde(default)]
@@ -550,15 +567,15 @@ pub struct ExportCacheResponse {
     /// Opaque cache blob, base64-encoded.  The host treats this as an
     /// opaque byte string — it never inspects or interprets the contents.
     #[serde(default)]
-    pub blob_b64: Option<String>,
+    pub blob_b64: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Sent to `restore_cache` — the host unwrapped the cache file and passes
 /// the inner blob back to the guest to restore its in-memory state.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RestoreCacheRequest {
     /// The same opaque blob that was returned by `export_cache`, base64.
-    pub blob_b64: String,
+    pub blob_b64: zeroize::Zeroizing<String>,
 }
 
 /// Allows the guest to communicate structured error kinds.

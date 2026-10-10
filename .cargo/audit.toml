@@ -27,14 +27,6 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 
-    # wasmtime 43.0.2 — stores can mix up type indices between engines. Pulled
-    # only via extism, which caps wasmtime at the 43.x major; the advisory's
-    # fixed ranges skip that line entirely, so no semver-compatible release
-    # resolves it. Requires objects to cross between distinct Engines, which
-    # rosec never does directly. Tracked in #45 — remove when extism ships a
-    # release on wasmtime >= 46.0.2.
-    "RUSTSEC-2026-0222",
-
     # --- Unmaintained, transitive -------------------------------------------
     # ttf-parser 0.25.x unmaintained. Pulled via iced's font stack
     # (cosmic-text) in rosec-prompt; no action available to us and no

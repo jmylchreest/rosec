@@ -7,6 +7,7 @@ license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+tempfile = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
@@ -34,4 +35,3 @@ rand = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }

@@ -49,7 +49,7 @@ pre-release-hook = ["bash", "-c", """
 set -euo pipefail
 cargo clippy -- -D warnings
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
-  for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+  for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass; do
     manifest="${WORKSPACE_ROOT}/${crate}/Cargo.toml"
     cargo set-version --manifest-path "$manifest" "{{version}}"
     cargo update --workspace --manifest-path "$manifest" --offline

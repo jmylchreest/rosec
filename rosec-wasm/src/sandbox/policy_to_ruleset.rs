@@ -36,7 +36,12 @@ pub(crate) fn policy_to_ruleset(
         paths.push(PathRule::ro(file.clone()));
     }
 
-    let ports = if allowed_hosts.is_empty() {
+    (paths, ports_for_hosts(allowed_hosts))
+}
+
+/// Shared by policy translation and the actual worker sandbox.
+pub(crate) fn ports_for_hosts(allowed_hosts: &[String]) -> Vec<ConnectPort> {
+    if allowed_hosts.is_empty() {
         Vec::new()
     } else {
         // Allow standard HTTP(S) and provider-declared explicit ports parsed
@@ -51,9 +56,7 @@ pub(crate) fn policy_to_ruleset(
             }
         }
         ports.into_iter().map(ConnectPort).collect()
-    };
-
-    (paths, ports)
+    }
 }
 
 /// The minimum filesystem surface every WASM provider needs for libc /

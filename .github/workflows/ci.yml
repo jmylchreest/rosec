@@ -95,6 +95,7 @@ jobs:
             rosec-bitwarden-sm
             rosec-gnome-keyring
             rosec-keepassxc-file
+            rosec-protonpass
 
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
@@ -111,6 +112,34 @@ jobs:
       - name: Build keepassxc-file provider
         working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
+
+      - name: Build Proton Pass provider (production)
+        working-directory: rosec-protonpass
+        run: cargo build --locked --target wasm32-wasip1 --release
+
+  protonpass:
+    name: Proton Pass release checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rosec-protonpass
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rosec-protonpass
+      - run: cargo fmt -- --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --target wasm32-wasip1 -- -D warnings
+      - run: cargo build --locked --release --target wasm32-wasip1
+      - run: PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
+      - run: CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
+      - run: PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe
 
   msrv:
     name: MSRV
@@ -149,7 +178,7 @@ jobs:
 
       - name: Check WASM crates on MSRV
         run: |
-          for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+          for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass; do
             echo "::group::${crate}"
             (cd "${crate}" && cargo check --locked --target wasm32-wasip1)
             echo "::endgroup::"

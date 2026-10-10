@@ -28,8 +28,7 @@ pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
     let path = machine_key_path()?;
 
     if path.exists() {
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("failed to read machine key at {}: {e}", path.display()))?;
+        let bytes = Zeroizing::new(std::fs::read(&path).map_err(|_| "Failed to read machine key")?);
         if bytes.len() != 32 {
             return Err(format!(
                 "machine key at {} has unexpected length {} (expected 32)",
@@ -37,7 +36,7 @@ pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
                 bytes.len()
             ));
         }
-        return Ok(Zeroizing::new(bytes));
+        return Ok(bytes);
     }
 
     let mut seed = Zeroizing::new(vec![0u8; 32]);
@@ -47,7 +46,11 @@ pub fn load_or_create() -> Result<Zeroizing<Vec<u8>>, String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
-    write_secret(&path, &seed)?;
+    if !write_secret(&path, &seed)? {
+        // Another provider/process published the installation key first.
+        // Read that winner instead of ever replacing it with our candidate.
+        return load_or_create();
+    }
 
     Ok(seed)
 }
@@ -63,27 +66,21 @@ fn machine_key_path() -> Result<PathBuf, String> {
     Ok(base.join("rosec").join("machine-key"))
 }
 
-/// Write `data` to `path` with mode `0o600` on Unix (open-time, no chmod
-/// race). Falls back to default permissions on non-Unix targets.
-fn write_secret(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .and_then(|mut f| f.write_all(data))
-            .map_err(|e| format!("failed to write machine key to {}: {e}", path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, data)
-            .map_err(|e| format!("failed to write machine key to {}: {e}", path.display()))
+/// Atomically publish a complete key without replacing another creator's key.
+fn write_secret(path: &std::path::Path, data: &[u8]) -> Result<bool, String> {
+    use std::io::Write;
+    let parent = path.parent().ok_or("Missing machine key directory")?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| "Cannot create machine key")?;
+    file.write_all(data)
+        .map_err(|_| "Cannot write machine key")?;
+    file.as_file()
+        .sync_all()
+        .map_err(|_| "Cannot persist machine key")?;
+    match file.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => Err("Cannot publish machine key".into()),
     }
 }
 
@@ -103,6 +100,25 @@ mod tests {
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         drop(_guard);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn concurrent_first_use_keeps_one_installation_key() {
+        with_tmp_home(|| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let tasks: Vec<_> = (0..8)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create().unwrap()
+                    })
+                })
+                .collect();
+            let keys: Vec<_> = tasks.into_iter().map(|t| t.join().unwrap()).collect();
+            assert!(keys.iter().all(|key| **key == *keys[0]));
+            assert_eq!(*load_or_create().unwrap(), *keys[0]);
+        });
     }
 
     #[test]

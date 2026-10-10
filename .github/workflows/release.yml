@@ -129,6 +129,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip1
 
       - name: Cache Cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -141,6 +142,22 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+      - name: Proton Pass regression and lint checks
+        working-directory: rosec-protonpass
+        run: |
+          cargo fmt -- --check
+          cargo test --locked --all-features
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
+
+      - name: Proton Pass production and sandbox integration
+        working-directory: rosec-protonpass
+        run: |
+          cargo build --locked --release --target wasm32-wasip1
+          PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
+          CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
+          PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe
 
   # ---------------------------------------------------------------------------
   # Build binaries for all target platforms
@@ -289,6 +306,7 @@ jobs:
             rosec-bitwarden-sm
             rosec-gnome-keyring
             rosec-keepassxc-file
+            rosec-protonpass
 
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
@@ -305,6 +323,10 @@ jobs:
       - name: Build keepassxc-file provider
         working-directory: rosec-keepassxc-file
         run: cargo build --target wasm32-wasip1 --release
+
+      - name: Build Proton Pass provider (production)
+        working-directory: rosec-protonpass
+        run: cargo build --locked --target wasm32-wasip1 --release
 
       - name: Copy WASM providers + policies
         run: |
@@ -334,6 +356,26 @@ jobs:
           cp rosec-keepassxc-file/rosec_keepassxc_file.wasm.policy.toml \
              dist/providers/rosec_keepassxc_file.wasm.policy.toml
 
+          # Proton Pass is GPL-3.0-or-later and distributed with source/notices.
+          cp rosec-protonpass/target/wasm32-wasip1/release/rosec_protonpass.wasm dist/providers/
+          cp rosec-protonpass/rosec_protonpass.wasm.policy.toml dist/providers/
+
+      - name: Prepare Proton corresponding source and notices
+        run: |
+          cargo fetch --locked --manifest-path rosec-protonpass/Cargo.toml
+          python3 contrib/package-protonpass.py --version '${{ needs.prepare.outputs.version }}' --output dist/protonpass
+
+      - name: Verify Proton corresponding source rebuilds offline
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist/protonpass-rebuild
+          tar -xzf "dist/protonpass/rosec-provider-protonpass-${VERSION}.source.tar.gz" -C dist/protonpass-rebuild
+          export CARGO_HOME="$GITHUB_WORKSPACE/dist/protonpass-empty-cargo-home"
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/dist/protonpass-rebuild-target"
+          cd "dist/protonpass-rebuild/rosec-protonpass-source-${VERSION}/rosec-protonpass"
+          cargo build --offline --locked --release --target wasm32-wasip1 --lib
+
       # rosec-package-wasm validates each policy schema before signing and
       # reads the key from the WASM_SIGNING_KEY env var in-process (the key
       # never touches disk). The .minisig covers (wasm_bytes || policy_bytes)
@@ -362,15 +404,23 @@ jobs:
         run: |
           VERSION=${{ needs.prepare.outputs.version }}
 
-          for kind in bitwarden-pm bitwarden-sm gnome-keyring keepassxc-file; do
+          for kind in bitwarden-pm bitwarden-sm gnome-keyring keepassxc-file protonpass; do
             base="rosec_${kind//-/_}"
             ARCHIVE="rosec-provider-${kind}-${VERSION}.wasm.tar.gz"
-            tar -czf "${ARCHIVE}" -C dist/providers \
+            extra=()
+            if [[ "$kind" == protonpass ]]; then
+              cp -r dist/protonpass/notices dist/providers/protonpass-notices
+              extra=(protonpass-notices)
+            fi
+            tar -czf "${ARCHIVE}" -C dist/providers "${extra[@]}" \
               "${base}.wasm" \
               "${base}.wasm.policy.toml" \
               "${base}.wasm.minisig"
             sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
           done
+
+          cp dist/protonpass/*.source.tar.gz .
+          sha256sum rosec-provider-protonpass-*.source.tar.gz > protonpass-source.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -380,6 +430,8 @@ jobs:
           path: |
             rosec-provider-*.wasm.tar.gz
             rosec-provider-*.wasm.tar.gz.sha256
+            rosec-provider-protonpass-*.source.tar.gz
+            protonpass-source.sha256
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -640,6 +692,9 @@ jobs:
           - provider: gnome-keyring
             pkgbuild: contrib/aur/PKGBUILD-provider-gnome-keyring-bin
             aur_name: rosec-provider-gnome-keyring-bin
+          - provider: protonpass
+            pkgbuild: contrib/aur/PKGBUILD-provider-protonpass-bin
+            aur_name: rosec-provider-protonpass-bin
           - provider: keepassxc-file
             pkgbuild: contrib/aur/PKGBUILD-provider-keepassxc-file-bin
             aur_name: rosec-provider-keepassxc-file-bin

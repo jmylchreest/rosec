@@ -20,18 +20,18 @@ Each provider declares a set of capabilities — the optional pieces of function
 
 ## Matrix
 
-|                | `local` | `bitwarden` | `bitwarden-sm` | `gnome-keyring` | `keepassxc-file` *(experimental)* |
-|----------------|:-------:|:-----------:|:--------------:|:---------------:|:---------------------------------:|
-| **CAPS code**  | `WsKPF` | `SsCNF`     | `S`            | *(empty)*       | `SsF`                             |
-| Sync           | --      | yes         | yes            | --              | yes                               |
-| Write          | yes     | --          | --             | --              | --                                |
-| Ssh            | yes     | yes         | --             | --              | yes                               |
-| Fido2          | yes     | yes         | --             | --              | yes                               |
-| KeyWrapping    | yes     | --          | --             | --              | --                                |
-| PasswordChange | yes     | --          | --             | --              | --                                |
-| OfflineCache   | --      | yes         | --             | --              | --                                |
-| Notifications  | --      | yes         | --             | --              | --                                |
-| Totp           | yes     | yes         | --             | --              | yes                               |
+|                | `local` | `bitwarden` | `bitwarden-sm` | `gnome-keyring` | `keepassxc-file` *(experimental)* | `protonpass` *(experimental)* |
+|----------------|:-------:|:-----------:|:--------------:|:---------------:|:---------------------------------:|:------------:|
+| **CAPS code**  | `WsKPF` | `SsCNF`     | `S`            | *(empty)*       | `SsF`                             | `SsCF` |
+| Sync           | --      | yes         | yes            | --              | yes                               | yes |
+| Write          | yes     | --          | --             | --              | --                                | -- |
+| Ssh            | yes     | yes         | --             | --              | yes                               | yes |
+| Fido2          | yes     | yes         | --             | --              | yes                               | yes |
+| KeyWrapping    | yes     | --          | --             | --              | --                                | -- |
+| PasswordChange | yes     | --          | --             | --              | --                                | -- |
+| OfflineCache   | --      | yes         | --             | --              | --                                | yes |
+| Notifications  | --      | yes         | --             | --              | --                                | -- |
+| Totp           | yes     | yes         | --             | --              | yes                               | yes |
 
 ## Notes by provider
 
@@ -44,3 +44,9 @@ Each provider declares a set of capabilities — the optional pieces of function
 **GNOME Keyring (`gnome-keyring`)** — Read-only access to existing `~/.local/share/keyrings/*.keyring` files. No optional capabilities — items are loaded once at unlock time. Intended as a migration bridge: access old GNOME Keyring items while running rosec as the Secret Service daemon.
 
 **[KeePassXC (file)](./keepassxc-file) (`keepassxc-file`)** *(experimental)* — Reads a KeePassXC `.kdbx` database directly from disk (KDBX 4). Decrypts in-memory; never writes back. The host's filesystem watcher (`host_watch`) re-decrypts automatically when KeePassXC saves the file. SSH keys stored via KeePassXC's built-in SSH-agent integration (binary attachment + `KeeAgent.settings`) are surfaced to the rosec SSH agent and FUSE, and passkeys stored via KeePassXC's passkey support are served through the [FIDO2 frontend](../fido2-passkeys.md).
+
+**[Proton Pass](./protonpass) (`protonpass`)** *(experimental)* — Read-only API access using a normal
+PAT scoped to selected vaults. Supports full sync, primary/additional TOTP, SSH-agent
+signing, existing ES256/Ed25519 passkeys and encrypted offline snapshots. It has no
+write, password-change or push-notification capability. The separately packaged
+plugin is GPL-3.0-or-later; see its guide for PAT setup and supported boundaries.

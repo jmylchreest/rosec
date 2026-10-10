@@ -21,7 +21,7 @@ zeroize = { workspace = true }
 
 # QR code scanning
 image = { version = "0.25", default-features = false, features = ["png"] }
-rqrr = "0.10"
+rqrr = "0.11"
 # Pinned to 0.12.x: ashpd 0.13 split portals behind per-feature flags, but its
 # `screenshot` feature is broken (uses serde_repr without enabling the dep —
 # uncompilable in isolation). Revisit 0.13 once that upstream bug is fixed.

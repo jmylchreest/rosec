@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use zeroize::{Zeroize, Zeroizing};
 
 use extism::{CurrentPlugin, EXTISM_ENV_MODULE, Function, UserData, Val, ValType};
 use rosec_core::config::TlsMode;
@@ -27,6 +28,14 @@ struct HttpState {
     agent: ureq::Agent,
     status: u16,
     headers: BTreeMap<String, String>,
+}
+
+impl Drop for HttpState {
+    fn drop(&mut self) {
+        for value in self.headers.values_mut() {
+            value.zeroize();
+        }
+    }
 }
 
 fn build_tls_config(tls_mode: &TlsMode) -> ureq::tls::TlsConfig {
@@ -125,7 +134,50 @@ fn lock_state(
 ///
 /// Replicates the logic from extism's `pdk.rs` but uses a custom ureq agent
 /// with configurable TLS root certificates.
+// Extism owns these input allocations. Wipe them on success and errors before
+// freeing; the guest must not free the HTTP request/body a second time.
 fn http_request_impl(
+    data: &mut CurrentPlugin,
+    input: &[Val],
+    output: &mut [Val],
+    user_data: UserData<HttpState>,
+) -> Result<(), extism::Error> {
+    let handles: Vec<_> = input
+        .iter()
+        .filter_map(|v| {
+            let offset = v.unwrap_i64() as u64;
+            if offset == 0 {
+                None
+            } else {
+                data.memory_handle(offset)
+            }
+        })
+        .collect();
+    let result = http_request_inner(data, input, output, user_data);
+    for handle in handles {
+        data.memory_bytes_mut(handle)?.zeroize();
+        data.memory_free(handle)?;
+    }
+    result
+}
+
+struct SensitiveRequest(extism_manifest::HttpRequest);
+impl std::ops::Deref for SensitiveRequest {
+    type Target = extism_manifest::HttpRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for SensitiveRequest {
+    fn drop(&mut self) {
+        self.0.url.zeroize();
+        for value in self.0.headers.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+fn http_request_inner(
     data: &mut CurrentPlugin,
     input: &[Val],
     output: &mut [Val],
@@ -139,6 +191,9 @@ fn http_request_impl(
     {
         let mut state = lock_state(&state_arc)?;
         state.status = 0;
+        for value in state.headers.values_mut() {
+            value.zeroize();
+        }
         state.headers.clear();
     }
 
@@ -147,8 +202,10 @@ fn http_request_impl(
         Some(h) => h,
         None => anyhow::bail!("invalid handle offset for http request: {http_req_offset}"),
     };
-    let mut req: extism_manifest::HttpRequest = serde_json::from_slice(data.memory_bytes(handle)?)?;
-    data.memory_free(handle)?;
+    let req = SensitiveRequest(
+        serde_json::from_slice(data.memory_bytes(handle)?)
+            .map_err(|_| extism::Error::msg("Invalid HTTP request"))?,
+    );
 
     let body_offset = input[1].unwrap_i64() as u64;
 
@@ -171,10 +228,7 @@ fn http_request_impl(
     };
 
     if !host_matches {
-        return Err(extism::Error::msg(format!(
-            "HTTP request to {} is not allowed",
-            req.url
-        )));
+        return Err(extism::Error::msg("HTTP destination is not allowed"));
     }
 
     let mut r = ureq::http::request::Builder::new()
@@ -191,17 +245,13 @@ fn http_request_impl(
         r = r.header(k, v);
     }
 
-    // Scrub the deserialised header values from the source struct now that
-    // they're copied into the builder. Authorization tokens otherwise linger
-    // in extism_manifest::HttpRequest's plain String allocations until the
-    // value drops at end of scope. Best-effort: we can't change the upstream
-    // type, but we can overwrite the contents in place via zeroize.
-    use zeroize::Zeroize as _;
-    for v in req.headers.values_mut() {
-        v.zeroize();
-    }
-
-    let timeout = data.time_remaining();
+    // Bound a blocking host transport call even when guest cancellation cannot
+    // interrupt the underlying socket. The whole guest call has its own deadline.
+    let timeout = Some(
+        data.time_remaining()
+            .unwrap_or(std::time::Duration::from_secs(10))
+            .min(std::time::Duration::from_secs(10)),
+    );
     let res = if body_offset > 0 {
         let handle = match data.memory_handle(body_offset) {
             Some(h) => h,
@@ -223,10 +273,6 @@ fn http_request_impl(
         ureq::run(req)
     };
 
-    if let Some(handle) = data.memory_handle(body_offset) {
-        data.memory_free(handle)?;
-    }
-
     let reader = match res {
         Ok(res) => {
             let mut state = lock_state(&state_arc)?;
@@ -247,18 +293,18 @@ fn http_request_impl(
             {
                 anyhow::bail!("timeout");
             }
-            let msg = e.to_string();
+
             if let ureq::Error::StatusCode(status) = e {
                 lock_state(&state_arc)?.status = status;
                 None
             } else {
-                return Err(extism::Error::msg(msg));
+                return Err(extism::Error::msg("HTTP transport failed"));
             }
         }
     };
 
     if let Some(reader) = reader {
-        let mut buf = Vec::new();
+        let mut buf = Zeroizing::new(Vec::new());
         let max = data
             .manifest()
             .memory
@@ -270,7 +316,7 @@ fn http_request_impl(
             anyhow::bail!("HTTP response exceeds the configured maximum number of bytes: {max}");
         }
 
-        let mem = data.memory_new(&buf)?;
+        let mem = data.memory_new(buf.as_slice())?;
         output[0] = Val::I64(mem.offset() as i64);
     } else {
         output[0] = Val::I64(0);
@@ -303,9 +349,81 @@ fn http_headers_impl(
     if state.headers.is_empty() {
         output[0] = Val::I64(0);
     } else {
-        let headers = serde_json::to_string(&state.headers)?;
+        let headers = Zeroizing::new(serde_json::to_string(&state.headers)?);
         drop(state);
-        data.memory_set_val(&mut output[0], headers)?;
+        data.memory_set_val(&mut output[0], headers.as_str())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const HTTP_GUEST: &str = r#"(module
+        (import "extism:host/env" "input_offset" (func $input (result i64)))
+        (import "extism:host/env" "http_request" (func $http (param i64 i64) (result i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (func (export "request") (result i32) (local $response i64)
+            call $input i64.const 0 call $http local.set $response
+            local.get $response local.get $response call $length call $output
+            i32.const 0))"#;
+
+    fn plugin(max: u64, timeout: std::time::Duration) -> extism::Plugin {
+        let mut manifest =
+            extism::Manifest::new([extism::Wasm::data(HTTP_GUEST.as_bytes().to_vec())])
+                .with_allowed_host("127.0.0.1")
+                .with_timeout(timeout);
+        manifest.memory.max_http_response_bytes = Some(max);
+        extism::Plugin::new(manifest, build_http_host_functions(&TlsMode::Bundled), true).unwrap()
+    }
+    fn server(
+        body: &'static str,
+        delay: std::time::Duration,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).unwrap();
+            std::thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes());
+        });
+        (url, task)
+    }
+    fn request(plugin: &mut extism::Plugin, url: &str) -> Result<Vec<u8>, extism::Error> {
+        let json = serde_json::to_vec(&extism_manifest::HttpRequest::new(url)).unwrap();
+        plugin.call("request", json)
+    }
+    #[test]
+    fn override_enforces_response_limit_and_execution_deadline() {
+        let (url, task) = server("synthetic-response", std::time::Duration::ZERO);
+        let mut p = plugin(64, std::time::Duration::from_secs(2));
+        assert_eq!(request(&mut p, &url).unwrap(), b"synthetic-response");
+        task.join().unwrap();
+        let (url, task) = server("synthetic-response", std::time::Duration::ZERO);
+        let mut p = plugin(4, std::time::Duration::from_secs(2));
+        assert!(request(&mut p, &url).is_err());
+        task.join().unwrap();
+        let (url, task) = server("synthetic-response", std::time::Duration::from_millis(300));
+        let mut p = plugin(64, std::time::Duration::from_millis(50));
+        assert!(request(&mut p, &url).is_err());
+        task.join().unwrap();
+    }
+    #[test]
+    fn denied_url_does_not_leak_query_credentials() {
+        let mut p = plugin(64, std::time::Duration::from_secs(2));
+        let error = request(&mut p, "https://denied.invalid/?token=synthetic-secret").unwrap_err();
+        assert!(!error.to_string().contains("synthetic-secret"));
+    }
 }
