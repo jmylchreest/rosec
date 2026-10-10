@@ -1,0 +1,5 @@
+extism-convert, extism-convert-macros and extism-manifest 1.41.0
+Published crate archives omit their workspace BSD-3-Clause licence text.
+Retrieved from the revision recorded in their .cargo_vcs_info.json:
+https://raw.githubusercontent.com/extism/extism/051b765bb6abe4fe95d5e4f489f03ad7b137edbc/LICENSE
+SHA256: d01e60805075b591cbecc63b8582788e54e190f699037f1af19fb5294b7a47ab

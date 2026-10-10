@@ -5,6 +5,7 @@ Run from a committed checkout. Never reads credentials or signing keys.
 The binary itself is signed/packaged by rosec-package-wasm in release.yml.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -53,6 +54,17 @@ def main():
         directory = Path(package["manifest_path"]).parent
         dest = notices / (package["name"] + "-" + package["version"])
         files = [p for p in (directory.iterdir() if package["name"] == "rosec-protonpass" else directory.rglob("*")) if p.is_file() and p.name.lower().startswith(("license", "licence", "copying", "notice", "copyright"))]
+        if not files and package["version"] == "1.41.0" and package["name"] in {
+            "extism-convert", "extism-convert-macros", "extism-manifest"
+        }:
+            # These published crates omit the workspace licence. Preserve the
+            # exact pinned upstream text and its provenance, never guess a text
+            # from an SPDX expression or silently permit future versions.
+            directory = guest / "notices/extism-1.41.0"
+            licence = directory / "LICENSE"
+            if hashlib.sha256(licence.read_bytes()).hexdigest() != "d01e60805075b591cbecc63b8582788e54e190f699037f1af19fb5294b7a47ab":
+                raise SystemExit("Pinned Extism licence checksum mismatch")
+            files = [licence, directory / "PROVENANCE.txt"]
         if not files:
             raise SystemExit(f"Missing licence text: {package['name']}")
         for path in files:
