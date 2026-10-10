@@ -13,6 +13,8 @@ Apache-2.0 code can be incorporated into a GPLv3 work ([Apache guidance](https:/
 Keep the individual dependency notices: licensing the resulting plugin under
 GPL does not remove their attribution requirements. The packaging script rejects
 new, unreviewed licence expressions and missing licence texts.
+The three Extism 1.41.0 workspace crates that omit their licence files use the
+checked-in upstream text under `notices/extism-1.41.0`, pinned by revision and hash.
 
 Each release must provide, together in the same download location:
 

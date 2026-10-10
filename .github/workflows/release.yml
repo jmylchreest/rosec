@@ -129,6 +129,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip1
 
       - name: Cache Cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -141,6 +142,22 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+      - name: Proton Pass regression and lint checks
+        working-directory: rosec-protonpass
+        run: |
+          cargo fmt -- --check
+          cargo test --locked --all-features
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
+
+      - name: Proton Pass production and sandbox integration
+        working-directory: rosec-protonpass
+        run: |
+          cargo build --locked --release --target wasm32-wasip1
+          PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
+          CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
+          PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe
 
   # ---------------------------------------------------------------------------
   # Build binaries for all target platforms
@@ -347,6 +364,17 @@ jobs:
         run: |
           cargo fetch --locked --manifest-path rosec-protonpass/Cargo.toml
           python3 contrib/package-protonpass.py --version '${{ needs.prepare.outputs.version }}' --output dist/protonpass
+
+      - name: Verify Proton corresponding source rebuilds offline
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist/protonpass-rebuild
+          tar -xzf "dist/protonpass/rosec-provider-protonpass-${VERSION}.source.tar.gz" -C dist/protonpass-rebuild
+          export CARGO_HOME="$GITHUB_WORKSPACE/dist/protonpass-empty-cargo-home"
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/dist/protonpass-rebuild-target"
+          cd "dist/protonpass-rebuild/rosec-protonpass-source-${VERSION}/rosec-protonpass"
+          cargo build --offline --locked --release --target wasm32-wasip1 --lib
 
       # rosec-package-wasm validates each policy schema before signing and
       # reads the key from the WASM_SIGNING_KEY env var in-process (the key

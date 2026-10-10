@@ -20,11 +20,40 @@ independent audit. See SECURITY-REVIEW.md for findings and residual boundaries.
 - Proton lockfile audit passed without suppressions; workspace audit passed its
   existing documented policy. Database commit is recorded in SECURITY-REVIEW.md.
 
-## Final checks in progress
+## Final checks
 
-Final workspace tests/Clippy/MSRV, guest checks, production restrictions,
-benchmark, docs build, source archive offline rebuild and AUR package validation
-will be recorded here before release readiness is declared.
+| Check | Result |
+|---|---|
+| `cargo test --workspace --locked --offline` | PASS, including 108 core and 104 WASM-host tests |
+| Standalone guest tests, default and all features | PASS, 15 tests in each configuration |
+| Workspace/all-target Clippy, native guest/all-target Clippy and WASI guest Clippy | PASS with `-D warnings` |
+| Rust 1.96 workspace/all-target and production WASI checks | PASS |
+| Rust formatting and commit hooks | PASS |
+| Production and fixture WASM release builds | PASS |
+| Production endpoint/fixture-export rejection probe | PASS on original and source-rebuilt WASM |
+| Real guest and host synthetic integration | PASS, including offline/restart/wrong password |
+| Dependency audit | PASS under the scope/policy described above |
+| Documentation typecheck and production build | PASS, 237 indexed documents |
+| Workflow YAML and embedded Bash syntax | PASS |
+| Corresponding-source generation | PASS, 95 dependency notice entries and vendored locked sources |
+| Offline source rebuild with an empty Cargo home and fresh target directory | PASS |
+| Bundle signing/verification with a disposable key | PASS; test private key removed |
+| AUR `.SRCINFO` generation and `makepkg --nodeps --noconfirm --cleanbuild` | PASS; no installation performed |
+| AUR installed payload inspection | PASS: exact WASM, policy, signature, GPL text, dependency notices and source reference |
+
+Source packaging was tested from commit `0ff7757`. Later changes to the report,
+licence documentation, clean-tree check and workflow gates do not change the
+provider binary. Source rebuilds are functional rebuilds, not a claim of
+bit-for-bit reproducibility across source/vendor paths. Both artifacts passed
+production restriction checks.
+
+Final synthetic benchmark: 1,000 items, 1,000 lookups, p50 **30.509 microseconds**,
+p95 **51.889 microseconds**, full sync **69 ms**, **12 HTTP requests**. This is a
+local fixture measurement, not a live-network throughput promise.
+
+The local release gates are complete. The plugin is no longer marked experimental.
+No release/tag/AUR upload has been published. Release-key signing and GitHub/AUR
+execution remain deployment steps, and were not simulated with real release keys.
 
 ## Reproduction
 

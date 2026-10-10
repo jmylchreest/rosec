@@ -19,8 +19,10 @@ short-lived viewer PAT scoped to a dedicated synthetic vault. The PAT was revoke
 and the CLI session logged out. No account credentials or live secret values are
 included in this report or committed fixtures.
 
-Final packaging/rebuild validation is in progress; see RELEASE-VALIDATION.md for
-its completion record. Remaining operational and assurance boundaries are below.
+Local release validation is complete; see RELEASE-VALIDATION.md for the check
+record, including offline source rebuild and AUR packaging. The plugin is ready
+for release review and deployment within the operational boundaries below. This
+is not a claim that every possible vulnerability has been excluded.
 
 ## Release follow-up (2026-10-10)
 

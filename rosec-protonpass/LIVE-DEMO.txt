@@ -1,3 +1,6 @@
+Historical transcript: this predates release hardening and feature completion.
+See RELEASE-VALIDATION.md for the current checks and status.
+
 Live Proton CLI -> rosec demonstration (2026-10-10)
 ==================================================
 

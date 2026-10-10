@@ -27,7 +27,7 @@ def main():
         parser.error("invalid version")
     root = Path(__file__).resolve().parents[1]
     guest = root / "rosec-protonpass"
-    if run("git", "status", "--porcelain", "--untracked-files=no", cwd=root).strip():
+    if run("git", "status", "--porcelain", cwd=root).strip():
         raise SystemExit("Commit source changes before packaging corresponding source")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)

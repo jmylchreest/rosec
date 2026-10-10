@@ -5,7 +5,8 @@ The official Proton CLI is used to provision test data and PATs, not by the gues
 at runtime. The crate is standalone and ships as a separate GPL WASM provider, with matching
 source and third-party notices.
 
-**Release validation is recorded below and in SECURITY-REVIEW.md.** The
+**Local release checks pass; the provider is prepared for release.**
+[RELEASE-VALIDATION.md](RELEASE-VALIDATION.md) records the checks. The
 [security/performance review](SECURITY-REVIEW.md) records fixes, measurements and
 release checks and operational boundaries. The [provider guide](../docs/docs/providers/protonpass.md)
 explains capabilities, authentication and field mappings.
