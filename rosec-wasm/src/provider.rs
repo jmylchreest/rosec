@@ -600,6 +600,9 @@ impl WasmProvider {
 
 #[async_trait]
 impl Provider for WasmProvider {
+    // External WASM providers are intentionally read-only. Mutation and password
+    // management methods inherit Provider's NotSupported defaults; they are not
+    // forwarded to guests. Local vaults implement those operations separately.
     fn id(&self) -> &str {
         &self.config.id
     }
