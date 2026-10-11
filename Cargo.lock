@@ -4860,7 +4860,7 @@ version = "0.0.36"
 dependencies = [
  "anyhow",
  "libc",
- "signature 2.2.0",
+ "signature 3.0.0",
  "ssh-agent-lib",
  "ssh-key",
  "tokio",
