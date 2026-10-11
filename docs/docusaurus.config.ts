@@ -122,6 +122,7 @@ const config: Config = {
             {label: 'Local vault', to: '/providers/local'},
             {label: 'Bitwarden', to: '/providers/bitwarden'},
             {label: 'KeePassXC', to: '/providers/keepassxc-file'},
+            {label: 'Proton Pass', to: '/providers/protonpass'},
           ],
         },
         {

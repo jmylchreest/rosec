@@ -235,6 +235,13 @@ Available when the `bitwarden-sm` feature is compiled in.
 | `organization_id` | yes | Organization UUID. |
 | `server_url` | no | SM API base URL. Omit for official cloud. |
 
+### `[provider.options]` — Proton Pass (`kind = "protonpass"`) *— experimental*
+
+Read-only access to Proton Pass through its API. No provider-specific options
+are required. Register a personal access token and local unlock passphrase
+through `rosec provider auth <id>`; credentials do not belong in TOML.
+See [Proton Pass](./providers/protonpass) for token setup and supported items.
+
 ### `[provider.options]` — GNOME Keyring (`kind = "gnome-keyring"`)
 
 Read-only access to existing `~/.local/share/keyrings/*.keyring` files. No required options; the plugin scans the standard keyring directory at unlock time.

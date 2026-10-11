@@ -73,5 +73,5 @@ The file content is the live TOTP code — re-read it whenever you need a fresh 
 
 - **[CLI reference](./cli)** — every `rosec` command.
 - **[Configuration](./configuration)** — `config.toml` for the daemon, autolock policies, prompt theming.
-- **[Providers](./providers/capabilities)** — connect to Bitwarden, KeePassXC, or migrate from GNOME Keyring.
+- **[Providers](./providers/capabilities)** — connect to Bitwarden, Proton Pass, KeePassXC, or migrate from GNOME Keyring.
 - **[PAM unlock](./pam)** — auto-unlock on login.

@@ -46,3 +46,15 @@ remain deployment steps; preparing these files does not perform either action.
 Do not represent the MIT host licence as covering the GPL guest. Distributors
 combining this package with additional modules must check those modules' terms;
 this record covers this plugin's dependency closure, not arbitrary combinations.
+
+## AUR source builds
+
+`rosec-git` builds the production Proton Pass guest alongside the other providers
+and installs its policy and licence notices. Its package metadata declares both
+the MIT host and GPL-3.0-or-later guest licences. The build uses
+`contrib/package-protonpass.py --notices-only` to collect the same dependency
+notices without creating a release source archive. This mode permits the local
+build-tree changes made by makepkg; the recorded commit identifies its base
+checkout. Source-package builds are unsigned, like the other bundled guests.
+Redistributed binary releases still use the complete corresponding-source
+workflow above.

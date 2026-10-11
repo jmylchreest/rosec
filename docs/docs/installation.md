@@ -15,13 +15,14 @@ yay -S rosec-provider-bitwarden-pm-bin
 yay -S rosec-provider-bitwarden-sm-bin
 yay -S rosec-provider-gnome-keyring-bin
 yay -S rosec-provider-keepassxc-file-bin    # experimental
+yay -S rosec-provider-protonpass-bin       # experimental
 ```
 
-Source-build alternative: `rosec` (bundles all providers, requires Rust toolchain) or `rosec-git` (latest `main`).
+Source-build alternatives: `rosec` (release source) or `rosec-git` (latest `main`, bundles all WASM providers including Proton Pass). Both require the Rust toolchain.
 
 ## Build from source
 
-Requires Rust 1.85+ (for edition 2024) and a `wasm32-wasip1` target for the WASM provider crates.
+Requires Rust 1.96+ and a `wasm32-wasip1` target for the WASM provider crates.
 
 ```bash
 git clone https://github.com/jmylchreest/rosec
@@ -36,6 +37,7 @@ cargo build --target wasm32-wasip1 --release --manifest-path rosec-bitwarden-pm/
 cargo build --target wasm32-wasip1 --release --manifest-path rosec-bitwarden-sm/Cargo.toml
 cargo build --target wasm32-wasip1 --release --manifest-path rosec-gnome-keyring/Cargo.toml
 cargo build --target wasm32-wasip1 --release --manifest-path rosec-keepassxc-file/Cargo.toml
+cargo build --locked --target wasm32-wasip1 --release --manifest-path rosec-protonpass/Cargo.toml
 ```
 
 Or use the bundled Justfile:
@@ -82,6 +84,7 @@ rosec provider add local
 # Or an existing remote source
 rosec provider add bitwarden       # prompts for email + master password
 rosec provider add keepassxc-file path=~/Passwords.kdbx
+rosec provider add protonpass --id proton  # see the Proton Pass guide for PAT setup
 ```
 
 Then unlock it:

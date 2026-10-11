@@ -39,7 +39,10 @@ the token portion for an API session and decrypts share keys, item keys and cont
 Account passwords and account TOTP are not needed by the plugin itself.
 
 Install the signed `rosec-provider-protonpass` release bundle (WASM, policy and
-signature together), or the `rosec-provider-protonpass-bin` AUR package once published.
+signature together), or the `rosec-provider-protonpass-bin` AUR package.
+The `rosec-git` source package also bundles this provider and its licence notices.
+Like the other source-built plugins, it is unsigned and uses the existing
+`wasm_verify = "disabled"` development configuration.
 Add a provider through `rosec provider add` or configure:
 
 ```toml

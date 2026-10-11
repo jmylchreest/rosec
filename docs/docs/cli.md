@@ -1,5 +1,19 @@
 # CLI Reference
 
+## Provider Kinds
+
+```bash
+rosec provider kinds
+```
+
+Lists available provider kinds, including discovered WASM plugins, with their
+descriptions and required and optional configuration options. Discovery searches
+`/usr/lib/rosec/providers/` and `$XDG_DATA_HOME/rosec/providers/` (default
+`~/.local/share/rosec/providers/`) using your configured `wasm_prefer`,
+`wasm_verify`, and trusted keys. Plugins that fail verification or manifest
+probing are omitted. Use `rosec provider validate` to inspect signature and
+policy information when an installed plugin is missing from the list.
+
 ## Provider List
 
 ```bash

@@ -8,7 +8,7 @@ rosec integrates multiple secret backends into one secure desktop experience on 
 
 | | |
 |---|---|
-| **Providers** | Local encrypted vault, Bitwarden Password Manager, Bitwarden Secrets Manager, KeePassXC `.kdbx` files, read-only GNOME Keyring (for migration). All appear as one unified collection. |
+| **Providers** | Local encrypted vault, Bitwarden Password Manager, Bitwarden Secrets Manager, read-only [Proton Pass](https://jmylchreest.github.io/rosec/providers/protonpass) (experimental), KeePassXC `.kdbx` files, read-only GNOME Keyring (for migration). All appear as one unified collection. |
 | **Secret Service** | Drop-in `org.freedesktop.secrets` implementation, replacing GNOME Keyring's. Works with `libsecret`, `secret-tool`, and anything that talks to the bus directly. |
 | **SSH agent** | Keys from any provider auto-populate a built-in agent at `$XDG_RUNTIME_DIR/rosec/ssh/agent.sock`, no manual `ssh-add`. Optional FUSE tree exposes public keys and generated `~/.ssh/config` snippets. |
 | **TOTP** | Items with a TOTP seed appear as live files under `$XDG_RUNTIME_DIR/rosec/totp/`. `cat` for the current code. |
@@ -28,10 +28,13 @@ yay -S rosec-provider-bitwarden-pm-bin        # optional providers, install only
 yay -S rosec-provider-bitwarden-sm-bin
 yay -S rosec-provider-gnome-keyring-bin
 yay -S rosec-provider-keepassxc-file-bin      # experimental
+yay -S rosec-provider-protonpass-bin          # experimental
 
 yay -S rosec-uhid-bin                         # optional privileged broker for FIDO2 passkeys
 sudo systemctl enable --now rosec-uhid.socket # only needed with rosec-uhid-bin
 ```
+
+For the latest source build, `rosec-git` bundles all WASM providers, including Proton Pass.
 
 ### Build from source
 
@@ -115,7 +118,7 @@ Full set on the [docs FAQ](https://jmylchreest.github.io/rosec/faq).
 
 **Is this a drop-in for GNOME Keyring?** For the Secret Service API, yes. rosec also ships its own SSH agent, so `rosec enable` masks gnome-keyring's SSH autostart too. The one component it does not provide is the **PKCS#11** module (certificate / crypto-token storage); keep gnome-keyring installed for that if you depend on it.
 
-**Does the daemon sync between machines?** No. rosec is a local daemon; sync happens within individual providers (Bitwarden API, KeePassXC kdbx via Syncthing, etc.).
+**Does the daemon sync between machines?** No. rosec is a local daemon; sync happens within individual providers (Bitwarden and Proton Pass APIs, KeePassXC kdbx via Syncthing, etc.).
 
 **How is the master password stored?** It isn't; only a wrapped key is stored. PBKDF2-SHA256 with a per-vault salt, AES-256 key wrap. Unlocking re-derives the key in memory; locking zeroes it.
 
@@ -129,8 +132,8 @@ Full set on the [docs FAQ](https://jmylchreest.github.io/rosec/faq).
 
 ## Status
 
-Active development. The `local`, `bitwarden`, `bitwarden-sm`, and `gnome-keyring` providers are stable. The `keepassxc-file` provider is **experimental**; interfaces and on-disk caching may change between releases.
+Active development. The `local`, `bitwarden`, `bitwarden-sm`, and `gnome-keyring` providers are stable. The `keepassxc-file` and `protonpass` providers are **experimental**; interfaces and on-disk caching may change between releases.
 
 ## Licence
 
-[MIT](LICENSE).
+The host is [MIT](LICENSE). The Proton Pass WASM provider is [GPL-3.0-or-later](rosec-protonpass/LICENSE), with its own [provenance and distribution notices](rosec-protonpass/DISTRIBUTION.md).

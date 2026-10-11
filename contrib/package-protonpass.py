@@ -22,12 +22,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--notices-only", action="store_true",
+                        help="collect licence notices for a local source package without a source archive")
     args = parser.parse_args()
     if not args.version or any(c not in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.+-_" for c in args.version):
         parser.error("invalid version")
     root = Path(__file__).resolve().parents[1]
     guest = root / "rosec-protonpass"
-    if run("git", "status", "--porcelain", cwd=root).strip():
+    if not args.notices_only and run("git", "status", "--porcelain", cwd=root).strip():
         raise SystemExit("Commit source changes before packaging corresponding source")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,14 @@ def main():
         inventory.append({k: package[k] for k in ("name", "version", "license", "repository")})
     (notices / "dependencies.json").write_text(json.dumps(inventory, indent=2) + "\n")
     commit = run("git", "rev-parse", "HEAD", cwd=root).strip()
+    if args.notices_only:
+        (notices / "SOURCE.txt").write_text(
+            f"Built from source checkout: {commit}\n"
+            "Repository: https://github.com/jmylchreest/rosec\n"
+            "Local source-package build; no corresponding-source archive generated.\n"
+        )
+        print(f"Collected {len(inventory)} dependency notices at {notices}")
+        return
     (notices / "SOURCE.txt").write_text(f"Source commit: {commit}\nCorresponding source: rosec-provider-protonpass-{args.version}.source.tar.gz\nPublished alongside the WASM archive in the same release.\n")
     # Work below output rather than /tmp: vendored build/test dependencies can
     # exceed small temporary filesystems. Include the full tracked source tree

@@ -100,4 +100,4 @@ git config --global gpg.ssh.allowedSignersFile \
 
 ## Does rosec sync?
 
-The daemon doesn't sync between machines — it's a local daemon. Individual providers may sync from their own remote source (Bitwarden does, KeePassXC reloads from the kdbx file on save, gnome-keyring is read-only). For multi-machine "same vault everywhere" use-cases, the cleanest path is a sync'd Bitwarden account, or a kdbx file under Syncthing.
+The daemon doesn't sync between machines — it's a local daemon. Individual providers may sync from their own remote source (Bitwarden and Proton Pass do, KeePassXC reloads from the kdbx file on save, gnome-keyring is read-only). For multi-machine "same vault everywhere" use-cases, the cleanest path is a synced Bitwarden or Proton Pass account, or a kdbx file under Syncthing.

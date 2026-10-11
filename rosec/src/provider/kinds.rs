@@ -1,6 +1,6 @@
 //! `rosec provider kinds` — list available provider kinds with their options.
 
-use rosec_core::{WasmPreference, config_edit};
+use rosec_core::config_edit;
 
 pub fn run() {
     println!("Available provider kinds:\n");
@@ -33,8 +33,8 @@ pub fn run() {
 
     let cfg = crate::load_config();
     let registry = rosec_wasm::discovery::scan_plugins(
-        WasmPreference::default(),
-        rosec_core::WasmVerify::default(),
+        cfg.service.wasm_prefer,
+        cfg.service.wasm_verify,
         &cfg.service.wasm_trusted_key,
     );
     for kind in registry.kinds() {
