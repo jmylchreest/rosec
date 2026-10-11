@@ -163,7 +163,7 @@ impl Session for SshAgent {
         let identities: Vec<Identity> = store
             .unique_keys()
             .map(|entry| Identity {
-                pubkey: entry.private_key.public_key().clone().into(),
+                credential: entry.private_key.public_key().key_data().clone().into(),
                 comment: entry.item_name.clone(),
             })
             .collect();
@@ -173,7 +173,11 @@ impl Session for SshAgent {
     }
 
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
-        let fingerprint = request.pubkey.fingerprint(HashAlg::Sha256).to_string();
+        let fingerprint = request
+            .credential
+            .key_data()
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
 
         // First-pass lookup: capture identity for the confirm dialog and the
         // post-callback identity check. Lock is released before any await.
@@ -249,5 +253,46 @@ impl Session for SshAgent {
                 ssh_agent_lib::proto::ProtoError::UnsupportedCommand { command: 0 },
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keystore::build_entry;
+    use signature::Verifier;
+    use ssh_key::{PrivateKey, private::Ed25519Keypair};
+
+    #[tokio::test]
+    async fn advertised_credential_signs_and_respects_confirmation() {
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[42; 32]));
+        let public_key = key.public_key().clone();
+        let entry = build_entry(
+            key,
+            "item".into(),
+            "Test key".into(),
+            "provider".into(),
+            vec![],
+            vec![],
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        let store = KeyStore::new();
+        store.write().unwrap().insert(entry);
+        let mut agent = SshAgent::new(store, PathBuf::new())
+            .with_confirm(Arc::new(|_, _| Box::pin(async { false })));
+        let mut identities = agent.request_identities().await.unwrap();
+        assert_eq!(identities.len(), 1);
+        let request = SignRequest {
+            credential: identities.remove(0).credential,
+            data: b"dependency migration regression".to_vec(),
+            flags: 0,
+        };
+        assert!(agent.sign(request.clone()).await.is_err());
+        agent = agent.with_confirm(Arc::new(|_, _| Box::pin(async { true })));
+        let signature = agent.sign(request.clone()).await.unwrap();
+        Verifier::verify(&public_key, &request.data, &signature).unwrap();
     }
 }

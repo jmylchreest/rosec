@@ -16,7 +16,7 @@ fn seal(bytes: &[u8], key: &[u8], aad: &[u8]) -> String {
     out.extend(
         Aes256Gcm::new_from_slice(key)
             .unwrap()
-            .encrypt(Nonce::from_slice(&[0; 12]), Payload { msg: bytes, aad })
+            .encrypt(&Nonce::from([0; 12]), Payload { msg: bytes, aad })
             .unwrap(),
     );
     STANDARD.encode(out)

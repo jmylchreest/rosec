@@ -39,9 +39,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes::Aes256;
 use block_padding::Pkcs7;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use rosec_core::ProviderError;
 use sha2::{Digest, Sha256};
@@ -165,7 +165,7 @@ pub fn write_cache_file(
     let encryptor = Aes256CbcEnc::new_from_slices(key.enc_key(), &iv)
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("AES init: {e}")))?;
     let ciphertext = encryptor
-        .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+        .encrypt_padded::<Pkcs7>(&mut buf, plaintext.len())
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("AES encrypt: {e}")))?;
 
     let ct_len = ciphertext.len() as u32;
@@ -302,7 +302,7 @@ pub fn read_cache_file(
     let decryptor = Aes256CbcDec::new_from_slices(key.enc_key(), &iv)
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("AES init: {e}")))?;
     let plaintext = decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("AES decrypt: {e}")))?;
 
     let result = Zeroizing::new(plaintext.to_vec());

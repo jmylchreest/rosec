@@ -21,17 +21,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Crypto
-aes = "0.8"
-cbc = "0.1"
-hmac = "0.12"
-sha2 = "0.10"
-sha1 = "0.10"
-pbkdf2 = "0.12"
-argon2 = "0.5"
-hkdf = "0.12"
+aes = "0.9"
+cbc = "0.2"
+hmac = "0.13"
+sha2 = "0.11"
+# rsa 0.9 requires digest 0.10 for OAEP.
+sha1 = "0.10.7"
+pbkdf2 = "0.13"
+argon2 = "0.6"
+hkdf = "0.13"
 rsa = "0.9"
-base64 = "0.22"
-block-padding = "0.3"
+base64 = "0.23"
+block-padding = "0.4"
 
 # Zeroize for secret scrubbing
 zeroize = { version = "1", features = ["derive", "serde"] }

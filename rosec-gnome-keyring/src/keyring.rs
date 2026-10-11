@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::io::{self, Cursor, Read};
 
 use aes::Aes128;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 use md5::Digest as _;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -319,7 +319,7 @@ fn decrypt_aes128_cbc(
 
     let mut buf = ciphertext.to_vec();
     Aes128CbcDec::new(key.into(), iv.into())
-        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .decrypt_padded::<NoPadding>(&mut buf)
         .map_err(|_| KeyringError::WrongPassword)?;
 
     Ok(buf)

@@ -27,9 +27,9 @@ use aes::Aes256;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use block_padding::Pkcs7;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -92,7 +92,7 @@ pub fn encrypt(key: &StorageKey, plaintext: &[u8]) -> Result<EncryptedFields, St
     let encryptor =
         Aes256CbcEnc::new_from_slices(key.enc_key(), &iv).map_err(|e| format!("AES init: {e}"))?;
     let ciphertext = encryptor
-        .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+        .encrypt_padded::<Pkcs7>(&mut buf, plaintext.len())
         .map_err(|e| format!("AES encrypt: {e}"))?
         .to_vec();
 
@@ -136,7 +136,7 @@ pub fn decrypt(key: &StorageKey, fields: &EncryptedFields) -> Result<Zeroizing<V
     let decryptor =
         Aes256CbcDec::new_from_slices(key.enc_key(), &iv).map_err(|e| format!("AES init: {e}"))?;
     let plaintext = decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map_err(|e| format!("AES decrypt: {e}"))?;
 
     Ok(Zeroizing::new(plaintext.to_vec()))

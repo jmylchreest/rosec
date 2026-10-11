@@ -23,7 +23,7 @@ pub const ALG_RS256: i64 = -257;
 pub enum SigningKey {
     Es256(Box<p256::ecdsa::SigningKey>),
     Ed25519(Box<ed25519_dalek::SigningKey>),
-    Rs256(Box<rsa::pkcs1v15::SigningKey<sha2::Sha256>>),
+    Rs256(Box<rsa::pkcs1v15::SigningKey<rsa::sha2::Sha256>>),
 }
 
 impl SigningKey {
@@ -208,7 +208,7 @@ iZjQhvXs1XDEnxX1YxWPZa/H
         use rsa::pkcs8::DecodePrivateKey;
         use rsa::signature::Verifier;
         let sk = rsa::RsaPrivateKey::from_pkcs8_pem(&pem).unwrap();
-        let vk = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(sk.to_public_key());
+        let vk = rsa::pkcs1v15::VerifyingKey::<rsa::sha2::Sha256>::new(sk.to_public_key());
         let sig = rsa::pkcs1v15::Signature::try_from(sig.as_slice()).unwrap();
         assert!(vk.verify(msg, &sig).is_ok());
     }

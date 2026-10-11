@@ -12,8 +12,8 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use block_padding::Pkcs7;
 use cbc::Decryptor;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use hmac::{Hmac, Mac};
+use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -195,7 +195,7 @@ pub fn decrypt_symmetric(
     let decryptor = Aes256CbcDec::new_from_slices(keys.enc_key(), iv)
         .map_err(|e| BitwardenError::Crypto(format!("aes init: {e}")))?;
     let plaintext = decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map_err(|e| BitwardenError::Crypto(format!("aes decrypt: {e}")))?;
 
     Ok(Zeroizing::new(plaintext.to_vec()))

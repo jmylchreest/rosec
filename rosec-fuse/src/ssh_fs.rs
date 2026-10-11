@@ -482,7 +482,7 @@ pub fn mount(mountpoint: &Path, agent_sock: PathBuf) -> anyhow::Result<MountHand
     config.acl = crate::sandbox::ACL;
 
     let fs_wrapper = ArcFs(Arc::clone(&fuse));
-    let session = fuser::spawn_mount2(fs_wrapper, mountpoint, &config)
+    let session = fuser::spawn_mount(fs_wrapper, mountpoint, &config)
         .with_context(|| format!("mount FUSE at {:?}", mountpoint))?;
 
     // Health check: verify the FUSE session is actually serving requests.

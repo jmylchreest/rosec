@@ -392,7 +392,7 @@ impl ItemMeta {
 /// Returns `None` if the machine key is unavailable (the caller should
 /// fall back to skipping the entry rather than emitting plaintext).
 pub fn sidecar_attribute_hash(value: &str) -> Option<String> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     let mk = machine_key::load_or_create().ok()?;
