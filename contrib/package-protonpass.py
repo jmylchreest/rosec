@@ -35,7 +35,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     notices = output / "notices"
     notices.mkdir(exist_ok=True)
-    for name in ("LICENSE", "UPSTREAM.txt", "DISTRIBUTION.md"):
+    for name in ("LICENSE", "UPSTREAM.txt"):
         shutil.copyfile(guest / name, notices / name)
     metadata = json.loads(run("cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", "wasm32-wasip1", cwd=guest))
     tree = run("cargo", "tree", "--locked", "--offline", "--target", "wasm32-wasip1", "--edges", "normal,build", "--prefix", "none", "--format", "{p}", cwd=guest)

@@ -125,7 +125,7 @@ If multiple methods are available, rosec shows a numbered list and lets you choo
 
 | Method | Notes |
 |--------|-------|
-| **FIDO2 / WebAuthn** | Requires host-side hardware key access; deferred (see FUTURE.md) |
+| **FIDO2 / WebAuthn** | Requires host-side hardware key access; not yet implemented |
 | **Duo push / call** | Requires browser redirect; only passcode mode is supported |
 | **Remember token** | 30-day remember-me token caching is planned |
 

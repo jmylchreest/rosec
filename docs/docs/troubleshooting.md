@@ -125,3 +125,10 @@ Make sure your CA certificate is installed in the system trust store (e.g. via
 By default, readiness probes inherit the same TLS mode. You can override this
 separately with `tls_mode_probe` (accepts `"bundled"`, `"system"`, or
 `"disabled"` to skip TLS verification entirely).
+
+## Wrong password is skipped during unlock
+
+The initial `rosec unlock` sweep tries one password across locked providers.
+Providers that reject it are reported as `wrong password (skipped)` without a
+second prompt. If a provider uses a different password, unlock it individually
+with `rosec provider auth <id>`.

@@ -38,7 +38,7 @@ Adapted into src/lib.rs:
 
 Adapted into src/crypto.rs:
   pass/src/domain/crypto.rs (AES-GCM decrypt and AAD constants)
-  Changes: aes-gcm 0.10 API, zeroizing result, checked nonce/tag lengths,
+  Changes: aes-gcm API, zeroizing result, checked nonce/tag lengths,
   fixed AAD byte strings, no encryption/randomness API in production guest.
 
 Adapted protocol handling in src/guest.rs:
@@ -52,7 +52,7 @@ Adapted protocol handling in src/guest.rs:
   vault shares and nested folder items, indexed bounded snapshots and guarded session JSON,
   HTTP-buffer wiping, fail-closed authentication and test-only loopback HTTP,
   no native/browser runtime or muon dependency, no debug
-  logging of API bodies. Unsupported data fails explicitly. See README.md.
+  logging of API bodies. Unsupported data fails explicitly. See docs/docs/providers/protonpass.md in the repository.
 
 All test credentials, keys and item contents are newly authored synthetic data.
 No account credentials, personal vault contents, or live API responses are fixtures.
@@ -70,5 +70,18 @@ Adapted into src/folders.rs and src/guest.rs:
 
 Distribution
 ============
-See DISTRIBUTION.md. Releases include GPL text, upstream provenance, dependency
-notices and a corresponding-source archive with locked vendored dependencies.
+
+Release downloads pair rosec-provider-protonpass-VERSION.wasm.tar.gz with
+rosec-provider-protonpass-VERSION.source.tar.gz and checksums for both.
+The source archive contains the committed tree, lockfiles, build scripts,
+vendored dependencies and offline rebuild instructions. The binary archive
+includes the GPL text, provenance and dependency notices. Preserve those
+notices alongside the host's MIT licence.
+
+From a clean committed checkout:
+  python3 contrib/package-protonpass.py --version VERSION --output dist/protonpass
+
+The release workflow signs the production WASM and policy sidecar. Never
+ship the test-http feature. Source builds for rosec-git use --notices-only
+to collect dependency notices without producing a release source archive.
+The Rust compiler, WASI standard library and system tools are prerequisites.
