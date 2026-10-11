@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # KeePass / KDBX 4
-keepass = { version = "0.13", default-features = false }
+keepass = { version = "0.15", default-features = false }
 
 # Zeroize for secret scrubbing
 zeroize = { version = "1", features = ["derive"] }
@@ -40,7 +40,7 @@ semver = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 # Base64 for binary-safe secret transport via the JSON protocol
-base64 = "0.22"
+base64 = "0.23"
 
 # UUID parsing for resolving items by ID
 uuid = { version = "1", default-features = false }

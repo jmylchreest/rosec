@@ -345,7 +345,7 @@ pub fn totp_mount(mountpoint: &Path) -> anyhow::Result<TotpMountHandle> {
     config.acl = crate::sandbox::ACL;
 
     let fs_wrapper = ArcFs(Arc::clone(&fuse));
-    let session = fuser::spawn_mount2(fs_wrapper, mountpoint, &config)
+    let session = fuser::spawn_mount(fs_wrapper, mountpoint, &config)
         .with_context(|| format!("mount TOTP FUSE at {:?}", mountpoint))?;
 
     std::thread::sleep(std::time::Duration::from_millis(50));

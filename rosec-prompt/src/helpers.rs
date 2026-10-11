@@ -67,20 +67,11 @@ impl<'a> TextMeasurer<'a> {
         let lh = line_height(font_size);
         let metrics = cosmic_text::Metrics::new(font_size, lh);
         let mut buffer = cosmic_text::Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, Some(self.content_w), None);
-        // cosmic-text 0.15 dropped the `.family()`/`.weight()` builders; set the
-        // (public) fields directly, and `set_text` now borrows the attrs and
-        // takes a trailing alignment argument.
+        buffer.set_size(Some(self.content_w), None);
         let mut attrs = cosmic_text::Attrs::new();
         attrs.family = self.family;
         attrs.weight = weight;
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs,
-            cosmic_text::Shaping::Advanced,
-            None,
-        );
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Sum the line_height of every layout run; one run per wrapped line.

@@ -98,7 +98,7 @@ fn request(
 fn refresh_session(s: &mut State) -> Result<(), &'static str> {
     let session = s.session.as_ref().ok_or("locked")?;
     let mut state = Zeroizing::new([0u8; 32]);
-    getrandom::getrandom(state.as_mut()).map_err(|_| "Refresh randomness unavailable")?;
+    getrandom::fill(state.as_mut()).map_err(|_| "Refresh randomness unavailable")?;
     let refresh_body = SensitiveJson(json!({"UID":session.uid.as_str(),
         "State":STANDARD.encode(state.as_slice()), "AccessToken":session.access.as_str(),
         "RefreshToken":session.refresh.as_str(), "ResponseType":"token",

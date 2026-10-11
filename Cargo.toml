@@ -30,31 +30,31 @@ license = "MIT"
 repository = "https://github.com/jmylchreest/rosec"
 
 [workspace.dependencies]
-anyhow = "1.0.103"
-thiserror = "2.0.18"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-async-trait = "0.1.89"
-zeroize = { version = "1.8.2", features = ["serde"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+async-trait = "0.1.92"
+zeroize = { version = "1.9.1", features = ["serde"] }
 iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "advanced"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
 wait-timeout = "0.2"
-landlock = "0.4.4"
+landlock = "0.4.7"
 crossbeam-channel = "0.5"
-toml = "1.0.3"
-sha1 = "0.10.6"
-sha2 = "0.10.9"
-data-encoding = "2.8.0"
-aes = { version = "0.8.4", features = ["zeroize"] }
-cbc = { version = "0.1.2", features = ["alloc", "std", "zeroize"] }
-hmac = "0.12.1"
-hkdf = "0.12.4"
-base64 = "0.22.1"
-rand = "0.10.0"
-block-padding = "0.3.3"
-num-bigint = { version = "0.4.6", features = ["rand"] }
+toml = "1.1.8"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+data-encoding = "2.11.1"
+aes = { version = "0.9.3", features = ["zeroize"] }
+cbc = { version = "0.2.1", features = ["alloc", "zeroize"] }
+hmac = "0.13.0"
+hkdf = "0.13.0"
+base64 = "0.23.1"
+rand = "0.10.3"
+block-padding = "0.4.2"
+num-bigint = "0.5.1"
 rpassword = "7"
 libc = "0.2"
 toml_edit = "0.25"
@@ -63,27 +63,28 @@ tokio-websockets = { version = "0.13", features = ["client", "rustls-native-root
 wildmatch = "2.6.1"
 chrono = { version = "0.4", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
-minisign = "0.9"
-minisign-verify = "0.2"
-pbkdf2 = "0.12.2"
+minisign = "0.10"
+minisign-verify = "0.3"
+pbkdf2 = "0.13.0"
 tempfile = "3"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 url = "2"
 
 # Hoisted from per-crate declarations to ensure version consistency
-zbus = "5.14.0"
-zvariant = "5.10.0"
-uuid = { version = "1.21.0", features = ["v4"] }
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "form"] }
+zbus = "5.19.0"
+zvariant = "5.15.0"
+uuid = { version = "1.28.0", features = ["v4"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 notify = "8"
 busd = "0.5"
 ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "encryption"] }
-ssh-agent-lib = "0.5.1"
-fuser = "0.17.0"
-signature = "2"
+ssh-agent-lib = "0.6.0"
+fuser = "0.18.0"
+# ssh-key 0.6 implements the signature 2 traits.
+signature = "2.2.0"
 
 # Dev dependencies for git hooks
-husky-rs = "0.3"
+husky-rs = "0.4"
 
 # Patch ssh-key and ssh-encoding with the fixed version from the upstream 'stable' branch.
 # Work around RSA signing bug in ssh-key 0.6.7.

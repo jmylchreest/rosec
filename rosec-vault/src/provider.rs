@@ -230,7 +230,7 @@ impl LocalVault {
         // scrub the buffer on drop rather than leaving it in freed heap.
         let plaintext =
             Zeroizing::new(serde_json::to_vec(&data).map_err(|e| ProviderError::Other(e.into()))?);
-        let encrypted = crypto::encrypt(&plaintext, &*vault_key);
+        let encrypted = crypto::encrypt(&plaintext, &vault_key);
         let hmac = crypto::compute_hmac(&*mac_key, &encrypted)
             .map_err(|e| ProviderError::Other(e.into()))?;
 
@@ -266,7 +266,7 @@ impl LocalVault {
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&state.data).map_err(|e| ProviderError::Other(e.into()))?,
         );
-        let encrypted = crypto::encrypt(&plaintext, &*state.vault_key);
+        let encrypted = crypto::encrypt(&plaintext, &state.vault_key);
         let hmac = crypto::compute_hmac(&*state.mac_key, &encrypted)
             .map_err(|e| ProviderError::Other(e.into()))?;
 

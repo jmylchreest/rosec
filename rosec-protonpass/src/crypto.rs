@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Proton AG
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from pass-cli 2.4.2 pass/src/domain/crypto.rs (see UPSTREAM.txt).
-// Uses aes-gcm 0.10, fixed AAD slices, checked lengths and zeroizing output.
+// Uses aes-gcm 0.11, fixed AAD slices, checked lengths and zeroizing output.
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -22,8 +22,9 @@ pub fn decrypt(
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "Invalid key length")?;
     let (nonce, data) = ciphertext.split_at(12);
+    let nonce = Nonce::try_from(nonce).map_err(|_| "Invalid nonce length")?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: data, aad })
+        .decrypt(&nonce, Payload { msg: data, aad })
         .map(Zeroizing::new)
         .map_err(|_| "Payload authentication failed")
 }

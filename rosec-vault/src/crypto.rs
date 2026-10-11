@@ -1,7 +1,7 @@
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::Rng;
 use sha2::Sha256;
@@ -77,7 +77,7 @@ pub fn wrap_vault_key(
     let wrapping_key = derive_key(password, &kdf)?;
     let wrapping_mac_key = derive_mac_key(&*wrapping_key)?;
 
-    let wrapped = encrypt(vault_key, &*wrapping_key);
+    let wrapped = encrypt(vault_key, &wrapping_key);
     let hmac = compute_hmac(&*wrapping_mac_key, &wrapped)?;
 
     Ok(WrappingEntry {
@@ -123,10 +123,10 @@ pub fn unwrap_vault_key(
 }
 
 /// Encrypt plaintext with AES-256-CBC. Returns IV || ciphertext.
-pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Vec<u8> {
+pub fn encrypt(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Vec<u8> {
     let iv = rand::random::<[u8; IV_LEN]>();
     let cipher = Aes256CbcEnc::new(key.into(), (&iv).into());
-    let ciphertext = cipher.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let ciphertext = cipher.encrypt_padded_vec::<Pkcs7>(plaintext);
 
     let mut result = Vec::with_capacity(IV_LEN + ciphertext.len());
     result.extend_from_slice(&iv);
@@ -143,10 +143,10 @@ pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, &'sta
     }
 
     let (iv, ciphertext) = encrypted.split_at(IV_LEN);
-    let cipher = Aes256CbcDec::new(key.into(), iv.into());
+    let cipher = Aes256CbcDec::new_from_slices(key, iv).map_err(|_| "invalid key or IV length")?;
 
     cipher
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .map(Zeroizing::new)
         .map_err(|_| "decryption failed")
 }

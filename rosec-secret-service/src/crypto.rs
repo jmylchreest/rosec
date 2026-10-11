@@ -15,7 +15,7 @@
 //!    16-byte IV is returned in the `parameters` field of the Secret struct.
 
 use aes::Aes128;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use hkdf::Hkdf;
 use num_bigint::BigUint;
 use rosec_core::ProviderError;
@@ -158,7 +158,7 @@ pub fn aes128_cbc_encrypt(
     rand::RngExt::fill(&mut rand::rng(), &mut iv[..]);
 
     let encryptor = Aes128CbcEnc::new(key.into(), &iv.into());
-    let ciphertext = encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let ciphertext = encryptor.encrypt_padded_vec::<Pkcs7>(plaintext);
 
     Ok((iv.to_vec(), ciphertext))
 }
@@ -183,7 +183,7 @@ pub fn aes128_cbc_decrypt(
 
     let decryptor = Aes128CbcDec::new(key.into(), iv_arr.into());
     let plaintext = decryptor
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .map_err(|e| ProviderError::Unavailable(format!("AES-128-CBC decrypt failed: {e}")))?;
 
     Ok(Zeroizing::new(plaintext))

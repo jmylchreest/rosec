@@ -9,9 +9,9 @@
 //! - `decrypt_field_opt`: decrypt an optional EncString field → `String`
 //! - `hkdf_expand_sha256`: low-level HKDF-Expand
 
-use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -132,7 +132,7 @@ pub fn decrypt_enc_string(enc: &str, key64: &[u8; 64]) -> Result<Zeroizing<Vec<u
     let mut buf = Zeroizing::new(data.clone());
     let plaintext = Aes256CbcDec::new_from_slices(enc_key, &iv)
         .map_err(|e| SmError::Crypto(format!("AES key/IV: {e}")))?
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map_err(|e| SmError::Crypto(format!("AES decrypt: {e}")))?;
 
     Ok(Zeroizing::new(plaintext.to_vec()))

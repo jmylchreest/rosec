@@ -14,7 +14,7 @@ fn authenticates_all_layers_and_rejects_tampering() {
     bytes.extend(
         cipher
             .encrypt(
-                Nonce::from_slice(&[9; 12]),
+                &Nonce::from([9; 12]),
                 Payload {
                     msg: b"synthetic",
                     aad: crypto::ITEM_CONTENT,
