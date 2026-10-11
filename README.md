@@ -136,4 +136,4 @@ Active development. The `local`, `bitwarden`, `bitwarden-sm`, and `gnome-keyring
 
 ## Licence
 
-The host is [MIT](LICENSE). The Proton Pass WASM provider is [GPL-3.0-or-later](rosec-protonpass/LICENSE), with its own [provenance and distribution notices](rosec-protonpass/DISTRIBUTION.md).
+The host is [MIT](LICENSE). The Proton Pass WASM provider is [GPL-3.0-or-later](rosec-protonpass/LICENSE), with its own [provenance and distribution notices](rosec-protonpass/UPSTREAM.txt).

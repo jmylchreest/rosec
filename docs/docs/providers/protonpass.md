@@ -111,7 +111,7 @@ rosec lock
 `get --attr` reads public attributes. `inspect --all-attrs` also reveals sensitive
 fields, so use it only when you intend to display their contents. Configuration,
 fixture builds, the HTTP policy and isolated-daemon instructions are in
-`rosec-protonpass/README.md` in the source tree. No credentials belong in TOML.
+the [development checks](#development-checks) below. No credentials belong in TOML.
 
 ### Replace, renew or revoke a token
 
@@ -176,12 +176,62 @@ fields retain their original names. Public attributes can also be retrieved via
 the protected secret lookup interface. Custom field values and notes are never
 published as public attributes.
 
-The source tree's `rosec-protonpass/SECURITY-REVIEW.md` records verification and
-performance evidence, supported boundaries and remaining deployment checks.
+Remote revocation cannot invalidate an already downloaded offline cache.
+Folder hierarchy and passkeys have synthetic fixture coverage; a browser/UHID
+login with a real Proton-stored passkey has not been verified. Group shares,
+non-vault shares and PRF/hmac-secret extensions are unsupported.
 
 ## Licence
 
 The plugin is GPL-3.0-or-later. The source tree includes Proton provenance,
 unchanged schema/generated code, the licence and a pinned dependency lockfile.
 Release archives include third-party notices and a matching vendored corresponding-source
-archive. See `rosec-protonpass/DISTRIBUTION.md` for the distribution record.
+archive. See `rosec-protonpass/UPSTREAM.txt` for provenance and distribution instructions.
+
+## Development checks
+
+Run these commands from the repository root. Rust with the `wasm32-wasip1` target
+and Rust 1.96 or newer for the native host are required. The fixture feature is off by default and must not be distributed.
+
+```sh
+# Production endpoint restrictions; distinct output avoids confusing test builds.
+cargo build --manifest-path rosec-protonpass/Cargo.toml --locked --release \
+  --target wasm32-wasip1 --target-dir rosec-protonpass/target/production
+
+PROTONPASS_WASM=rosec-protonpass/target/production/wasm32-wasip1/release/rosec_protonpass.wasm \
+  cargo run --manifest-path rosec-protonpass/Cargo.toml --locked --example probe -- --check-production
+
+# Local synthetic HTTP fixtures only.
+cargo build --manifest-path rosec-protonpass/Cargo.toml --locked --release \
+  --target wasm32-wasip1 --features test-http
+cargo test --manifest-path rosec-protonpass/Cargo.toml --locked
+cargo test --manifest-path rosec-protonpass/Cargo.toml --locked --all-features
+PROTONPASS_WASM="$PWD/rosec-protonpass/target/wasm32-wasip1/release/rosec_protonpass.wasm" \
+  cargo run --manifest-path rosec-protonpass/Cargo.toml --locked --example probe
+cargo run --manifest-path rosec-protonpass/Cargo.toml --locked --example probe -- --bench
+cargo clippy --manifest-path rosec-protonpass/Cargo.toml --locked --all-targets -- -D warnings
+cargo clippy --manifest-path rosec-protonpass/Cargo.toml --locked \
+  --target wasm32-wasip1 --all-features -- -D warnings
+```
+
+The probe loads `rosec-protonpass/target/wasm32-wasip1/release/rosec_protonpass.wasm`.
+Set `PROTONPASS_WASM` to override the guest path when using a separate target directory. Native tests/probes may use
+`CARGO_TARGET_DIR` to reuse a host build directory. The local server requires a
+loopback socket. Tests cover authenticated decryption, TOTP, mappings, malformed
+authentication, failed reauthentication, rejected endpoints, duplicate IDs, page
+and share limits, sync changes/deletion, revocation, locking and read-only stubs.
+The benchmark uses 1,000 synthetic items across ten pages and makes no Proton calls.
+
+## Live development
+
+Use a short-lived viewer PAT scoped to a dedicated synthetic vault. Supply it
+through the prompt or the probe's standard input, never command arguments or logs.
+Build without `test-http` for Proton requests. Use separate XDG config, data and
+runtime directories, `rosecd --socket PATH --no-migrate --config FILE`, and
+`ROSEC_SOCKET` for test CLI calls. Install the WASM and policy sidecar together.
+Only an isolated development daemon should disable signature verification for a
+locally built unsigned guest.
+
+Follow the [registration guide](#obtain-a-personal-access-token)
+for PAT setup and local passphrase protection. Revoke the test PAT, log out of
+CLI sessions and remove temporary daemon data after testing.

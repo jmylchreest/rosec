@@ -105,3 +105,16 @@ destroys the device, so a stopped daemon cannot leave a virtual key behind.
   owned by that user at mode `0600`, keyed to their uid — so concurrent local
   users are safe from one another; there is simply no reason to install the
   broker on a headless server.
+
+## Broker isolation
+
+The broker authenticates the caller's uid through `SO_PEERCRED`; it does not
+restrict access to a particular executable. Other processes running as the same
+user share that trust boundary. The daemon checks that the broker is root and
+that the received descriptor identifies `/dev/uhid` before accepting it.
+
+Install `69-rosec-uhid.rules` with the broker. Mode `0600` alone is insufficient:
+the standard FIDO udev rules can grant the active-seat user an additional ACL.
+The rosec rule clears `ID_SECURITY_TOKEN` before `70-uaccess.rules`, preventing
+that grant when users switch sessions. Verify a created node with
+`getfacl /dev/hidrawN`; it should have no named-user ACL entries.
