@@ -38,10 +38,6 @@ The token's encryption-key component stays local to the guest. The provider exch
 the token portion for an API session and decrypts share keys, item keys and contents.
 Account passwords and account TOTP are not needed by the plugin itself.
 
-The official CLI was used to create the eight synthetic items in the development
-test. The real rosec CLI then read those items through a separate daemon and WASM
-provider. Provisioning through Proton's CLI does not imply rosec supports writing.
-
 Install the signed `rosec-provider-protonpass` release bundle (WASM, policy and
 signature together), or the `rosec-provider-protonpass-bin` AUR package once published.
 Add a provider through `rosec provider add` or configure:
