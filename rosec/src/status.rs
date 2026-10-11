@@ -51,8 +51,8 @@ pub async fn run() -> Result<()> {
         println!("  (none configured)");
     } else {
         let registry = rosec_wasm::discovery::scan_plugins(
-            rosec_core::WasmPreference::default(),
-            rosec_core::WasmVerify::default(),
+            cfg.service.wasm_prefer,
+            cfg.service.wasm_verify,
             &cfg.service.wasm_trusted_key,
         );
         let is_experimental_kind = |k: &str| -> bool {

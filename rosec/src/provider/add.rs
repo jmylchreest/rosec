@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 
-use rosec_core::{WasmPreference, config_edit};
+use rosec_core::config_edit;
 
 use crate::cli::ProviderAddArgs;
 use crate::{config_path, load_config, open_tty_owned_fd};
@@ -13,11 +13,11 @@ use super::{
 };
 
 pub async fn run(args: ProviderAddArgs) -> Result<()> {
-    let trusted_keys = crate::load_config().service.wasm_trusted_key;
+    let cfg = load_config();
     let registry = rosec_wasm::discovery::scan_plugins(
-        WasmPreference::default(),
-        rosec_core::WasmVerify::default(),
-        &trusted_keys,
+        cfg.service.wasm_prefer,
+        cfg.service.wasm_verify,
+        &cfg.service.wasm_trusted_key,
     );
 
     let kind = &args.kind;
