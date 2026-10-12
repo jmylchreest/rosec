@@ -81,7 +81,7 @@ ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "e
 ssh-agent-lib = "0.6.0"
 fuser = "0.18.0"
 # ssh-key 0.6 implements the signature 2 traits.
-signature = "3.0.0"
+signature = "2.2.0"
 
 # Dev dependencies for git hooks
 husky-rs = "0.4"
