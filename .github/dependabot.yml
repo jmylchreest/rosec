@@ -8,7 +8,6 @@ updates:
     # Excluded WASM providers have independent manifests and lockfiles.
     directories:
       - "/"
-      - "/rosec-bitwarden-pm"
       - "/rosec-bitwarden-sm"
       - "/rosec-gnome-keyring"
       - "/rosec-keepassxc-file"
@@ -16,6 +15,41 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # Shared cipher/digest traits and feature-only zeroize dependencies
+      # must be reviewed together; a passing build alone is insufficient.
+      rustcrypto:
+        patterns:
+          - "aes"
+          - "aes-gcm"
+          - "argon2"
+          - "block-padding"
+          - "cbc"
+          - "cipher"
+          - "crypto-common"
+          - "ctr"
+          - "digest"
+          - "ghash"
+          - "hkdf"
+          - "hmac"
+          - "md-5"
+          - "pbkdf2"
+          - "polyval"
+          - "sha1"
+          - "sha2"
+          - "universal-hash"
+      shared-dependencies:
+        patterns: ["*"]
+        group-by: dependency-name
+  - package-ecosystem: "cargo"
+    directory: "/rosec-bitwarden-pm"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # rsa 0.9 requires digest 0.10 for OAEP; migrate rsa before sha1.
+    ignore:
+      - dependency-name: "sha1"
+        versions: [">=0.11"]
     groups:
       # Shared cipher/digest traits and feature-only zeroize dependencies
       # must be reviewed together; a passing build alone is insufficient.
