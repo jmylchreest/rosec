@@ -668,6 +668,12 @@ $ rosec-package-wasm verify --pubkey ~/keys/acme-signing.pub dist/
 $ rosec-package-wasm verify dist/   # against the rosec release keys instead
 ```
 
+For per-user package integration, a public trust key can live in a separate
+TOML file explicitly included by the user's main config. This lets Home Manager
+manage the key without owning the writable main file. See
+[config fragments and Home Manager](../configuration.md#include-user-configuration-fragments).
+A package installation alone does not automatically trust its signing key.
+
 ### Getting users to trust your plugin
 
 Stock rosec builds only load plugins signed by a rosec release key. Your

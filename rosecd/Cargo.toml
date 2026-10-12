@@ -41,4 +41,5 @@ private-socket = ["dep:busd"]
 console = ["dep:console-subscriber"]
 
 [dev-dependencies]
+tempfile = { workspace = true }
 husky-rs = { workspace = true }
