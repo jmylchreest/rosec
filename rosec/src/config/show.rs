@@ -18,7 +18,7 @@ pub fn run(show_defaults: bool) -> Result<()> {
     }
 
     if show_defaults {
-        let mut cfg = load_config();
+        let mut cfg = load_config()?;
         for entry in &mut cfg.provider {
             if entry.tls_mode_probe.is_none() {
                 entry.tls_mode_probe = Some(entry.tls_mode.clone());

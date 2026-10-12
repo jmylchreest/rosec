@@ -15,7 +15,7 @@ pub async fn run(id: &str) -> Result<()> {
     let cfg = config_path();
 
     // Check if this is a local vault with a path — if so, offer to delete the file.
-    let cfg_data = load_config();
+    let cfg_data = load_config()?;
     let vault_path = cfg_data
         .provider
         .iter()

@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 pub mod config;
 pub mod config_edit;
+pub mod config_load;
 pub mod credential;
 pub mod dedup;
 pub mod limits;

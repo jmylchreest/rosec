@@ -13,7 +13,7 @@ use super::{
 };
 
 pub async fn run(args: ProviderAddArgs) -> Result<()> {
-    let cfg = load_config();
+    let cfg = load_config()?;
     let registry = rosec_wasm::discovery::scan_plugins(
         cfg.service.wasm_prefer,
         cfg.service.wasm_verify,
@@ -119,7 +119,7 @@ pub async fn run(args: ProviderAddArgs) -> Result<()> {
         ensure_local_vault_path(&id, &mut options, custom_path.is_none())?;
     }
 
-    let cfg_data = load_config();
+    let cfg_data = load_config()?;
     if cfg_data.provider.iter().any(|p| p.id == id) {
         bail!("provider '{id}' already exists. Use --id to choose a different name.");
     }
