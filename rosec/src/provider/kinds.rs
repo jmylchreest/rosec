@@ -2,7 +2,7 @@
 
 use rosec_core::config_edit;
 
-pub fn run() {
+pub fn run() -> anyhow::Result<()> {
     println!("Available provider kinds:\n");
     println!("  local");
     println!("    A local encrypted vault file on disk.");
@@ -31,7 +31,7 @@ pub fn run() {
         println!();
     }
 
-    let cfg = crate::load_config();
+    let cfg = crate::load_config()?;
     let registry = rosec_wasm::discovery::scan_plugins(
         cfg.service.wasm_prefer,
         cfg.service.wasm_verify,
@@ -61,4 +61,5 @@ pub fn run() {
         }
         println!();
     }
+    Ok(())
 }

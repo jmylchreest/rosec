@@ -1557,12 +1557,14 @@ async fn config_watcher(
         )
     })?;
 
-    watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive)?;
+    let mut watched_dirs = std::collections::BTreeSet::new();
+    update_config_watches(&mut watcher, &mut watched_dirs, &config_path)?;
     tracing::info!(path = %config_path.display(), "config watcher started");
 
     // Seed `known` from the initial config fingerprints so the first diff
     // compares actual config values — not bare provider IDs.
     let mut known: Vec<(String, String)> = fingerprint_providers(&initial_config);
+    let mut known_config = serde_json::to_value(&initial_config)?;
 
     loop {
         if rx.recv().await.is_none() {
@@ -1574,7 +1576,8 @@ async fn config_watcher(
             tokio::time::timeout(tokio::time::Duration::from_millis(500), rx.recv()).await
         {}
 
-        // Only reload if the event is for our config file specifically.
+        // An atomic replacement may briefly remove the root config. Keep the
+        // running configuration until its replacement is available.
         if !config_path.exists() {
             tracing::debug!("config file removed, skipping reload");
             continue;
@@ -1592,6 +1595,19 @@ async fn config_watcher(
             }
         };
 
+        if let Err(error) = update_config_watches(&mut watcher, &mut watched_dirs, &config_path) {
+            tracing::warn!(%error, "could not update config fragment watches");
+        }
+        if new_config.service.wasm_trusted_key != initial_config.service.wasm_trusted_key
+            || new_config.service.wasm_verify != initial_config.service.wasm_verify
+            || new_config.service.wasm_prefer != initial_config.service.wasm_prefer
+        {
+            tracing::warn!(
+                "WASM trust or discovery settings changed; restart rosecd to apply them. Keeping the running configuration."
+            );
+            continue;
+        }
+
         // Same treatment as a parse error: an invalid provider set never
         // reaches reconcile_providers, so the running config stays intact.
         if let Err(msg) = rosec_core::config::check_local_vault_path_conflicts(&new_config) {
@@ -1606,7 +1622,8 @@ async fn config_watcher(
         // Build fingerprints for the new config.
         let new_fingerprints = fingerprint_providers(&new_config);
 
-        if new_fingerprints == known {
+        let config_value = serde_json::to_value(&new_config)?;
+        if config_value == known_config {
             tracing::debug!("config unchanged, no reload needed");
             continue;
         }
@@ -1629,12 +1646,31 @@ async fn config_watcher(
 
         state.update_live_config(new_config.clone());
         known = new_fingerprints;
+        known_config = config_value;
         tracing::info!(
             "hot-reload complete ({} providers active)",
             state.provider_count()
         );
     }
 
+    Ok(())
+}
+
+/// Watch lexical and resolved parents so Home Manager link switches and
+/// atomic saves of included files both trigger a reload.
+fn update_config_watches(
+    watcher: &mut notify::RecommendedWatcher,
+    watched: &mut std::collections::BTreeSet<PathBuf>,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let desired = rosec_core::config_load::load(config_path)?.watch_dirs;
+    for path in desired.difference(watched) {
+        watcher.watch(path, notify::RecursiveMode::NonRecursive)?;
+    }
+    for path in watched.difference(&desired) {
+        watcher.unwatch(path)?;
+    }
+    *watched = desired;
     Ok(())
 }
 
@@ -2073,9 +2109,7 @@ fn load_config(path: &PathBuf) -> Result<Config> {
         }
     }
 
-    let content = std::fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&content)?;
-    Ok(config)
+    Ok(rosec_core::config_load::load(path)?.config)
 }
 //
 // Bitwarden APIs require a stable `deviceIdentifier`.  The WASM provider
@@ -2171,5 +2205,42 @@ mod tests {
     #[test]
     fn extract_host_garbage_returns_none() {
         assert_eq!(extract_host_from_url("not-a-url"), None);
+    }
+    #[test]
+    fn fragment_atomic_replacement_notifies_daemon() {
+        use notify::Watcher;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("config.toml");
+        let parts = dir.path().join("parts");
+        std::fs::create_dir(&parts).unwrap();
+        std::fs::write(&main, "include = ['parts/settings.toml']").unwrap();
+        let fragment = parts.join("settings.toml");
+        std::fs::write(&fragment, "[service]\nssh_fuse = false").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event {
+                    let _ = tx.send(event);
+                }
+            },
+            notify::Config::default(),
+        )
+        .unwrap();
+        let mut watched = std::collections::BTreeSet::new();
+        super::update_config_watches(&mut watcher, &mut watched, &main).unwrap();
+        assert!(watched.contains(&parts));
+        let replacement = parts.join("replacement");
+        std::fs::write(&replacement, "[service]\nssh_fuse = true").unwrap();
+        std::fs::rename(replacement, &fragment).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            if event.paths.contains(&fragment) {
+                break;
+            }
+        }
+        assert!(super::load_config(&main).unwrap().service.ssh_fuse);
     }
 }

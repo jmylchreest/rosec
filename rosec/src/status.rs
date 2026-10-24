@@ -40,7 +40,7 @@ pub async fn run() -> Result<()> {
 
     let (cache_size,): (u32,) = proxy.call("Status", &()).await?;
 
-    let cfg = load_config();
+    let cfg = load_config()?;
     let disabled: Vec<&rosec_core::config::ProviderEntry> =
         cfg.provider.iter().filter(|p| !p.enabled).collect();
     let providers: Vec<ProviderEntry> = proxy.call("ProviderList", &()).await?;

@@ -21,7 +21,7 @@ pub async fn run(args: ProviderAttachArgs) -> Result<()> {
         None => derive_vault_id_from_path(&vault_path),
     };
 
-    let existing = load_config();
+    let existing = load_config()?;
     if let Some(other) = find_local_path_conflict(&existing, &vault_path) {
         let state = if other.enabled { "" } else { " (disabled)" };
         bail!(

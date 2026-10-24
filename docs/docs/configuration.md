@@ -2,13 +2,79 @@
 
 Config file: `$XDG_CONFIG_HOME/rosec/config.toml` (default: `~/.config/rosec/config.toml`)
 
+## Include user configuration fragments
+
+The main config can explicitly include other TOML files:
+
+```toml
+# ~/.config/rosec/config.toml (include must be at the top level)
+include = ["packaged-trust.toml", "personal-settings.toml"]
+```
+
+No system configuration or fragment directory is loaded automatically. The CLI
+and daemon use the same loader, including when you select a file with `--config`.
+Absolute paths are accepted. Relative paths are resolved against the directory
+of the file containing the include, not the process's working directory. For a
+symlinked config, this is the directory of the symlink. Symlinks into the Nix
+store are supported. Paths are literal: no glob, environment or `~` expansion.
+
+Includes are processed in list order, then the containing file is applied last.
+Nested tables merge, and later scalar values and arrays replace earlier ones.
+There is one exception: nonempty `service.wasm_trusted_key` lists append, so
+independent signing keys can coexist. Set `wasm_trusted_key = []` explicitly to
+clear all additional keys inherited so far. Embedded release keys are unaffected.
+Key names are labels, not identifiers for replacing entries; restricting an
+inherited key requires clearing the list and specifying the desired keys again.
+
+Missing includes, invalid TOML or configuration values, and include cycles are
+errors. Includes are limited to 16 levels, 128 file reads, and 1 MiB per file.
+A missing main config still uses defaults. Each fragment must be valid on its
+own; split settings across tables, not partial provider or trusted-key entries.
+
+`rosec config show` prints the main file. Use `rosec config show --show-defaults`
+to inspect the merged config with defaults, or `rosec config get` for a supported
+individual setting. Config editing commands write only the main file and
+preserve its include list. Edit packaged fragments through their owner, such as
+Home Manager. Keep provider entries in the main file when managing them through
+the CLI: a main-file `[[provider]]` array replaces an included provider array.
+
+The daemon watches included files as well as the main file. Invalid edits keep
+the running configuration intact. **Restart rosecd after changing trusted keys,
+`wasm_verify`, or `wasm_prefer`.** Those changes are not applied to already loaded
+plugins; the daemon keeps its running configuration until restarted.
+
+### Home Manager and packaged signing keys
+
+Home Manager can own a public-key fragment while the main config stays writable:
+
+```nix
+xdg.configFile."rosec/packaged-trust.toml".text = ''
+  [[service.wasm_trusted_key]]
+  name = "my-provider-builds"
+  key = "RWQ..." # Replace with the signing public key's second line.
+  kinds = ["bitwarden-pm"]
+'';
+```
+
+Add `include = ["packaged-trust.toml"]` to the user's main config once. Home
+Manager links its generated file into the user's config directory; enabling
+that configuration is the user's decision to trust the signer. Merely installing
+a package does not add a trust anchor. A module can instead generate the entire
+main config, but CLI edits to an immutable generated file are not supported.
+
+Only public keys belong in these generated files. Keep private signing keys and
+credentials out of Nix expressions and store outputs. The package builder still
+needs to sign its rebuilt WASM together with the policy sidecar and install the
+complete bundle. Includes do not sign providers or change provider search paths.
+See [Packaging, signing, and distribution](developers/wasm-provider-guide.md#packaging-signing-and-distribution).
+
 ## Editing from the CLI
 
 Read or change individual settings without opening the file — the daemon
 hot-reloads on `set`:
 
 ```bash
-rosec config show                                 # print the resolved config
+rosec config show --show-defaults                 # print the merged config
 rosec config get autolock.idle_timeout_minutes    # read one dotted key
 rosec config set service.refresh_interval_secs 120
 ```

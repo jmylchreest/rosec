@@ -11,7 +11,7 @@ pub fn run(key: &str) -> Result<()> {
         bail!("unknown config key: {key}\nrun `rosec config --help` to see supported keys");
     }
 
-    let cfg = load_config();
+    let cfg = load_config()?;
     let value = config_get_value(&cfg, key)?;
     println!("{value}");
     Ok(())
