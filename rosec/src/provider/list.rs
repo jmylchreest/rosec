@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub async fn run() -> Result<()> {
-    let cfg = load_config();
+    let cfg = load_config()?;
     if cfg.provider.is_empty() {
         println!("No providers configured. Run `rosec provider add <kind>` to add one.");
         return Ok(());

@@ -52,6 +52,9 @@ async fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    if let Some(path) = cli.config {
+        let _ = CONFIG_PATH.set(path);
+    }
 
     match cli.command {
         Commands::Provider { action } => provider::dispatch(action).await,
@@ -94,18 +97,14 @@ pub(crate) async fn conn() -> Result<Connection> {
     ))
 }
 
-/// Resolve the config file path from `--config <path>` flag or XDG default.
+static CONFIG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Resolve the config file path from clap's global option or the XDG default.
 pub(crate) fn config_path() -> PathBuf {
-    let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len().saturating_sub(1) {
-        if args[i] == "--config" || args[i] == "-c" {
-            return PathBuf::from(&args[i + 1]);
-        }
-        if let Some(p) = args[i].strip_prefix("--config=") {
-            return PathBuf::from(p);
-        }
-    }
-    default_config_path()
+    CONFIG_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(default_config_path)
 }
 
 fn default_config_path() -> PathBuf {
@@ -116,15 +115,8 @@ fn default_config_path() -> PathBuf {
     base.join("rosec").join("config.toml")
 }
 
-pub(crate) fn load_config() -> Config {
-    let path = config_path();
-    if !path.exists() {
-        return Config::default();
-    }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
+pub(crate) fn load_config() -> Result<Config> {
+    Ok(rosec_core::config_load::load(&config_path())?.config)
 }
 
 //

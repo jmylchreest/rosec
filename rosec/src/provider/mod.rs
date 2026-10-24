@@ -30,10 +30,7 @@ pub async fn dispatch(action: Option<ProviderCommands>) -> Result<()> {
     let action = action.unwrap_or(ProviderCommands::List);
     match action {
         ProviderCommands::List => list::run().await,
-        ProviderCommands::Kinds => {
-            kinds::run();
-            Ok(())
-        }
+        ProviderCommands::Kinds => kinds::run(),
         ProviderCommands::Validate(args) => validate::run(&args),
         ProviderCommands::Auth(args) => auth::run(&args).await,
         ProviderCommands::Add(args) => add::run(args).await,

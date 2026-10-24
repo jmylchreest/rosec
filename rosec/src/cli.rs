@@ -65,6 +65,9 @@ EXAMPLES:
     rosec enable --mask                                     activate + suppress gnome-keyring",
 )]
 pub struct Cli {
+    /// Read and edit this user config file instead of the XDG default
+    #[arg(long, short = 'c', global = true)]
+    pub config: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -553,9 +556,9 @@ pub struct ProviderRemovePasswordArgs {
 // config subcommands
 #[derive(Subcommand)]
 pub enum ConfigCommands {
-    /// Print the current effective configuration as TOML
+    /// Print the main config file, or merged settings with --show-defaults
     Show {
-        /// Include fields set to their default values
+        /// Resolve includes and include fields set to their default values
         #[arg(long, alias = "show-default")]
         show_defaults: bool,
     },

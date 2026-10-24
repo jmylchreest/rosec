@@ -29,7 +29,7 @@ use crate::cli::ProviderValidateArgs;
 use crate::load_config;
 
 pub fn run(args: &ProviderValidateArgs) -> Result<()> {
-    let cfg = load_config();
+    let cfg = load_config()?;
 
     let wasm_paths: Vec<PathBuf> = if let Some(path) = &args.wasm {
         vec![path.clone()]
