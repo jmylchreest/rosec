@@ -21,6 +21,16 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # --- Transitive, capped below the fixed version --------------------------
+    # crypto-bigint 0.5.5 timing variability in secret integer arithmetic.
+    # ssh-key 0.6 / ssh-agent-lib 0.6 require elliptic-curve 0.13 and cannot
+    # use the fixed crypto-bigint >=0.7.6. The compatible 0.7 dependency is
+    # already patched. Temporarily accepted by the maintainer on 2026-10-24;
+    # this does not establish that SSH signing is unaffected by the advisory.
+    # Remove when the SSH stack can migrate or receives a compatible backport.
+    # Tracking: https://github.com/jmylchreest/rosec/pull/69
+    # Upstream fix: https://github.com/RustCrypto/crypto-bigint/pull/1365
+    "RUSTSEC-2026-0387",
+
     # quick-xml < 0.41 DoS (quadratic attribute scan / unbounded ns alloc).
     # Pulled via the desktop-portal / font stack in rosec-prompt; the direct
     # dependents cap quick-xml at 0.39.x, so we cannot advance it yet. DoS only.

@@ -45,7 +45,14 @@ jobs:
         run: |
           for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass; do
             echo "::group::${crate}"
-            (cd "${crate}" && cargo audit --ignore RUSTSEC-2023-0071)
+            # Only KeePassXC retains crypto-bigint 0.5 through ssh-key 0.6.
+            # Temporary maintainer-approved exception; rationale and removal
+            # criteria are recorded in .cargo/audit.toml and PR #69.
+            extra_ignores=()
+            if [[ "$crate" == rosec-keepassxc-file ]]; then
+              extra_ignores+=(--ignore RUSTSEC-2026-0387)
+            fi
+            (cd "${crate}" && cargo audit --ignore RUSTSEC-2023-0071 "${extra_ignores[@]}")
             echo "::endgroup::"
           done
 
