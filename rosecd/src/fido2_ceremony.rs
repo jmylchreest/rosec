@@ -297,7 +297,9 @@ pub async fn run_event_loop(state: Arc<ServiceState>, registry: Arc<Fido2Registr
         warn!(error = %e, "fido2: could not set device non-blocking");
         return;
     }
-    let async_fd = match AsyncFd::new(device) {
+    // SAFETY: `device` is an owned File moved into AsyncFd. Its descriptor stays
+    // open and unchanged until AsyncFd drops it; no code closes it separately.
+    let async_fd = match unsafe { AsyncFd::register(device) } {
         Ok(f) => f,
         Err(e) => {
             warn!(error = %e, "fido2: registering device with the reactor failed");

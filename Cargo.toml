@@ -39,7 +39,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 async-trait = "0.1.92"
 zeroize = { version = "1.9.1", features = ["serde"] }
 iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "advanced"] }
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
 wait-timeout = "0.2"
 landlock = "0.4.7"
 crossbeam-channel = "0.5"
