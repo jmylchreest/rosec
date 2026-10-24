@@ -1716,7 +1716,7 @@ dependencies = [
  "ed25519 3.0.0",
  "rand_core 0.10.1",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signature 3.0.0",
  "subtle",
  "zeroize",
@@ -3988,7 +3988,7 @@ dependencies = [
  "elliptic-curve 0.14.1",
  "primefield",
  "primeorder 0.14.0",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -4739,7 +4739,7 @@ dependencies = [
  "rosec-wasm",
  "rpassword",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "ssh-key",
  "tempfile",
  "tokio",
@@ -4770,7 +4770,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
@@ -4843,7 +4843,7 @@ dependencies = [
  "rosec-core",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tokio",
  "tracing",
  "uuid",
@@ -4894,7 +4894,7 @@ dependencies = [
  "rand 0.10.3",
  "rosec-core",
  "rsa",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tracing",
@@ -4919,7 +4919,7 @@ dependencies = [
  "rosec-core",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4956,7 +4956,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5454,9 +5454,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -5894,7 +5894,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
