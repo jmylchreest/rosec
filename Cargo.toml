@@ -71,7 +71,7 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 url = "2"
 
 # Hoisted from per-crate declarations to ensure version consistency
-zbus = "5.19.0"
+zbus = "6.0.0"
 zvariant = "5.15.0"
 uuid = { version = "1.28.0", features = ["v4"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
