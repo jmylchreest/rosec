@@ -125,7 +125,7 @@ fn validate_bundle(
 
     match bundle.verify_signature_trusted(user_keys) {
         Ok(verified_by) => {
-            println!("  signature: ✓ valid ({verified_by})");
+            println!("  authenticity: ✓ verified ({verified_by})");
             if let rosec_wasm::discovery::VerifiedBy::UserKey { name } = &verified_by {
                 println!(
                     "    warning: verified by user-trusted key '{name}', \

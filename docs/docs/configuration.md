@@ -96,7 +96,7 @@ Controls vault caching and deduplication behaviour.
 | `totp_fuse` | bool | `true` | Mount the TOTP FUSE filesystem at `$XDG_RUNTIME_DIR/rosec/totp/`. Set to `false` to disable. |
 | `fido2` | bool | `false` | Serve stored passkeys to browsers as a virtual security key. Requires the `rosec-uhid` broker; off by default. See [FIDO2 passkeys](fido2-passkeys.md). |
 | `wasm_prefer` | string | `"user"` | Which copy wins when a WASM provider kind exists in both the system and user provider directories: `"user"`, `"system"`, or `"newest"`. |
-| `wasm_verify` | string | `"required"` | Signature verification for WASM provider plugins: `"required"` or `"disabled"` (local plugin development only). |
+| `wasm_verify` | string | `"required"` | Provider authenticity verification: `"required"` (signature or embedded package hashes) or `"disabled"` (local plugin development only). |
 | `wasm_trusted_key` | array of tables | `[]` | Additional trust anchors for WASM plugin signatures. See [Trusted plugin signing keys](#trusted-plugin-signing-keys). |
 
 ### Trusted plugin signing keys

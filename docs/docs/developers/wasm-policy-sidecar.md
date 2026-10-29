@@ -183,6 +183,12 @@ The `.policy.toml` sidecar is **always required**. `wasm_verify =
 not skip the policy. There is no manifest-declared fallback path —
 historic kind-string gates have been removed.
 
+The table below applies to providers without build-time package trust. Distro
+builds may embed exact install paths and hashes of **both** files in the host.
+At those paths, matching hashes satisfy `required` without a `.minisig`; a hash
+mismatch is rejected. Policy parsing and enforcement are unchanged. See
+[source-built packages](./wasm-provider-guide#packaging-signing-and-distribution).
+
 | `wasm_verify` | sidecar present | `.minisig` present | result |
 |---|---|---|---|
 | `required` (default) | yes | yes | verify combined signature; load with policy |

@@ -1350,16 +1350,15 @@ pub enum WasmPreference {
     Newest,
 }
 
-/// Controls signature verification of WASM provider plugins before probing.
+/// Controls authenticity verification of WASM provider plugins before probing.
 ///
-/// A `.wasm.sig` file (minisign format, ed25519) is expected alongside the
-/// `.wasm` file.  The public key is baked into the `rosec-wasm` crate at
-/// build time from the CI signing key.
+/// A `.wasm.minisig` file (minisign format, ed25519) authenticates the WASM and
+/// policy. Distro builds may instead embed exact package paths and hashes of
+/// both files at compile time; other providers still require signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WasmVerify {
-    /// Signature is required.  Plugins without a valid `.wasm.sig` are
-    /// rejected and never loaded.
+    /// A valid signature or matching embedded package hashes are required.
     #[default]
     #[serde(alias = "if-present")]
     Required,
