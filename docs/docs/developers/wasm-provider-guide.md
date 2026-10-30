@@ -674,6 +674,14 @@ manage the key without owning the writable main file. See
 [config fragments and Home Manager](../configuration.md#include-user-configuration-fragments).
 A package installation alone does not automatically trust its signing key.
 
+Source distributions can instead embed exact provider paths and SHA-256 hashes
+of both the WASM and policy in the host at compile time. This delegates trust to
+the distributor of the host, without a private signing key or disabling checks
+for user-installed plugins. The AUR `rosec-git` recipe uses this mechanism; it also supports Nix packaging.
+See the [source packaging instructions](https://github.com/jmylchreest/rosec/blob/main/contrib/packaged-providers.md)
+for the manifest format, build order and security boundary. Providers must be
+rebuilt together with the host; copied files at other paths still need signatures.
+
 ### Getting users to trust your plugin
 
 Stock rosec builds only load plugins signed by a rosec release key. Your
