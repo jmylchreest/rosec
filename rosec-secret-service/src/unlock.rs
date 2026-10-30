@@ -678,9 +678,12 @@ async fn auth_provider_with_tty_inner(
     };
 
     if let Some(methods) = two_fa_methods {
-        // Filter to methods with prompt_kind == "text" (the only kind we
-        // currently support).  FIDO2 / browser_redirect are deferred.
-        let text_methods: Vec<_> = methods.iter().filter(|m| m.prompt_kind == "text").collect();
+        // Text and six-digit TOTP prompts are supported.
+        // FIDO2 / browser_redirect are deferred.
+        let text_methods: Vec<_> = methods
+            .iter()
+            .filter(|m| matches!(m.prompt_kind.as_str(), "text" | "totp"))
+            .collect();
 
         if text_methods.is_empty() {
             return Err(anyhow!(
@@ -724,7 +727,7 @@ async fn auth_provider_with_tty_inner(
         let token_field = vec![TtyField {
             id: "__2fa_token".to_string(),
             label: "Code".to_string(),
-            kind: "secret".to_string(),
+            kind: two_factor_field_kind(&chosen.prompt_kind, &chosen.label).to_string(),
             placeholder: String::new(),
         }];
         // The chosen method's label went out through notice() just above, so on
@@ -845,5 +848,41 @@ fn print_on_fd(fd: RawFd, s: &str) {
     let bytes = s.as_bytes();
     unsafe {
         libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+    }
+}
+
+/// Older Bitwarden guests advertised authenticator codes as plain text.
+fn two_factor_field_kind(prompt_kind: &str, label: &str) -> &'static str {
+    if prompt_kind == "totp" || (prompt_kind == "text" && label == "Authenticator app (TOTP)") {
+        "totp"
+    } else {
+        "secret"
+    }
+}
+
+#[cfg(test)]
+mod totp_tests {
+    use super::two_factor_field_kind;
+
+    #[test]
+    fn only_authenticator_codes_use_segmented_entry() {
+        assert_eq!(two_factor_field_kind("totp", "Authenticator"), "totp");
+        assert_eq!(
+            two_factor_field_kind("text", "Authenticator app (TOTP)"),
+            "totp"
+        );
+        for label in [
+            "Email code",
+            "Email code (a***@example.com)",
+            "Duo (passcode)",
+            "YubiKey OTP (touch your key)",
+            "Recovery code",
+        ] {
+            assert_eq!(two_factor_field_kind("text", label), "secret");
+        }
+        assert_eq!(
+            two_factor_field_kind("secret", "Authenticator app (TOTP)"),
+            "secret"
+        );
     }
 }

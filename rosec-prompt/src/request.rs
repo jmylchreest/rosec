@@ -11,6 +11,8 @@ pub(crate) enum FieldKind {
     #[default]
     Password,
     Secret,
+    /// Six-digit authenticator code (not a seed or arbitrary recovery code).
+    Totp,
 }
 
 /// A single field descriptor from the JSON request.

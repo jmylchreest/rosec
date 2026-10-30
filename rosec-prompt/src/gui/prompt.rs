@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use zeroize::Zeroizing;
 
+use super::otp::{CodeEntry, DIGITS};
 use crate::helpers::{
     TextMeasurer, button_style, content_width, font_from_string, line_height, parse_color,
     parse_styled_spans,
@@ -20,6 +21,10 @@ static FIRST_FIELD_ID: LazyLock<iced::advanced::widget::Id> =
 #[derive(Debug, Clone)]
 pub(super) enum Message {
     FieldChanged(usize, String),
+    OtpChanged(usize, usize, String, bool),
+    OtpFocus(usize, usize),
+    OtpHide(usize, u64),
+    OtpNavigate(iced::advanced::widget::Id, iced::keyboard::Key),
     Confirm,
     Cancel,
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
@@ -30,6 +35,7 @@ struct FieldState {
     spec: FieldSpec,
     /// `Zeroizing` so the value is scrubbed when overwritten or dropped.
     value: Zeroizing<String>,
+    otp: Option<CodeEntry>,
 }
 
 #[derive(Debug)]
@@ -132,8 +138,13 @@ fn derive_window_height(request: &PromptRequest, fields: &[FieldSpec]) -> f32 {
     let fields_total_h: f32 = fields
         .iter()
         .map(|f| {
-            let label_text = if f.label.is_empty() { &f.id } else { &f.label };
-            m.body_small(label_text) + 3.0 + input_h + 10.0
+            if f.kind == FieldKind::Totp {
+                // No label: match the input row's 8px top / 16px bottom padding.
+                line_height(font_size + 8.0) + 16.0 + 8.0 + 16.0 + 10.0
+            } else {
+                let label_text = if f.label.is_empty() { &f.id } else { &f.label };
+                m.body_small(label_text) + 3.0 + input_h + 10.0
+            }
         })
         .sum();
 
@@ -192,6 +203,7 @@ impl GuiApp {
         let field_states = fields
             .into_iter()
             .map(|spec| FieldState {
+                otp: (spec.kind == FieldKind::Totp).then(CodeEntry::default),
                 spec,
                 value: Zeroizing::new(String::new()),
             })
@@ -241,8 +253,79 @@ fn confirm_and_exit(state: &GuiApp) -> ! {
     std::process::exit(0);
 }
 
+fn otp_id(field: usize, digit: usize) -> iced::advanced::widget::Id {
+    if field == 0 && digit == 0 {
+        FIRST_FIELD_ID.clone()
+    } else {
+        iced::advanced::widget::Id::from(format!("otp-{field}-{digit}"))
+    }
+}
+
+fn focus_digit(field: usize, digit: usize) -> iced::Task<Message> {
+    use iced::advanced::widget::{operate, operation};
+    let id = otp_id(field, digit);
+    operate(operation::focusable::focus(id.clone()))
+        .chain(operate(operation::text_input::select_all(id)))
+}
+
+fn can_confirm(state: &GuiApp) -> bool {
+    state
+        .fields
+        .iter()
+        .all(|field| field.otp.as_ref().is_none_or(CodeEntry::complete))
+}
+
 fn update(state: &mut GuiApp, message: Message) -> iced::Task<Message> {
     match message {
+        Message::OtpFocus(field, digit) => focus_digit(field, digit),
+        Message::OtpHide(field, revision) => {
+            if let Some(code) = state.fields.get_mut(field).and_then(|f| f.otp.as_mut()) {
+                code.hide(revision);
+            }
+            iced::Task::none()
+        }
+        Message::OtpChanged(field, digit, value, paste) => {
+            if let Some(f) = state.fields.get_mut(field)
+                && let Some(code) = f.otp.as_mut()
+            {
+                let next = code.edit(digit, value, paste);
+                f.value = code.value();
+                if let Some(next) = next {
+                    let revision = code.revision;
+                    let hide = if code.revealed(digit) {
+                        iced::Task::perform(
+                            async { tokio::time::sleep(std::time::Duration::from_secs(1)).await },
+                            move |_| Message::OtpHide(field, revision),
+                        )
+                    } else {
+                        iced::Task::none()
+                    };
+                    return iced::Task::batch([focus_digit(field, next), hide]);
+                }
+            }
+            iced::Task::none()
+        }
+        Message::OtpNavigate(id, key) => {
+            use iced::keyboard::{Key, key::Named};
+            for (field, f) in state.fields.iter().enumerate() {
+                if let Some(code) = f.otp.as_ref() {
+                    for digit in 0..DIGITS {
+                        if otp_id(field, digit) == id {
+                            let next = match key {
+                                Key::Named(Named::ArrowLeft) => digit.saturating_sub(1),
+                                Key::Named(Named::ArrowRight) => (digit + 1).min(DIGITS - 1),
+                                Key::Named(Named::Backspace) if code.digits[digit].is_empty() => {
+                                    digit.saturating_sub(1)
+                                }
+                                _ => return iced::Task::none(),
+                            };
+                            return focus_digit(field, next);
+                        }
+                    }
+                }
+            }
+            iced::Task::none()
+        }
         Message::FieldChanged(idx, value) => {
             if let Some(f) = state.fields.get_mut(idx) {
                 // Old `Zeroizing<String>` drops here → scrubbed.
@@ -250,13 +333,29 @@ fn update(state: &mut GuiApp, message: Message) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
-        Message::Confirm => confirm_and_exit(state),
+        Message::Confirm => {
+            if can_confirm(state) {
+                confirm_and_exit(state);
+            }
+            iced::Task::none()
+        }
         Message::Cancel => std::process::exit(1),
         Message::KeyPressed(key, modifiers) => {
             use iced::keyboard::Key;
             use iced::keyboard::key::Named;
             match key {
-                Key::Named(Named::Enter) => confirm_and_exit(state),
+                Key::Named(Named::Enter) => {
+                    if can_confirm(state) {
+                        confirm_and_exit(state);
+                    }
+                    iced::Task::none()
+                }
+                Key::Named(Named::Backspace | Named::ArrowLeft | Named::ArrowRight) => {
+                    iced::advanced::widget::operate(
+                        iced::advanced::widget::operation::focusable::find_focused(),
+                    )
+                    .map(move |id| Message::OtpNavigate(id, key.clone()))
+                }
                 Key::Named(Named::Escape) => std::process::exit(1),
                 // iced 0.14 no longer traverses focus on Tab automatically, so
                 // dispatch the focus operation ourselves (Shift+Tab = previous).
@@ -333,6 +432,54 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
             .size(font_size - 1.0)
             .color(state.label_color)
             .font(state.font);
+            if let Some(code) = f.otp.as_ref() {
+                let boxes = (0..DIGITS)
+                    .map(|digit| {
+                        let input = text_input("", code.digits[digit].as_str())
+                            .secure(!code.revealed(digit))
+                            .id(otp_id(idx, digit))
+                            .on_input(move |value| Message::OtpChanged(idx, digit, value, false))
+                            .on_paste(move |value| Message::OtpChanged(idx, digit, value, true))
+                            .on_submit(Message::Confirm)
+                            .align_x(iced::alignment::Horizontal::Center)
+                            .width(44)
+                            .padding(8)
+                            .size(font_size + 8.0)
+                            .font(iced::Font::MONOSPACE)
+                            .style(move |_, status| iced::widget::text_input::Style {
+                                background: Background::Color(state.input_bg),
+                                border: iced::Border {
+                                    color: if matches!(
+                                        status,
+                                        iced::widget::text_input::Status::Focused { .. }
+                                    ) {
+                                        state.accent
+                                    } else {
+                                        state.border
+                                    },
+                                    width: 1.0,
+                                    radius: 6.0.into(),
+                                },
+                                icon: state.label_color,
+                                placeholder: state.label_color,
+                                value: state.input_text,
+                                selection: state.accent,
+                            });
+                        iced::widget::mouse_area(input)
+                            .on_press(Message::OtpFocus(idx, digit))
+                            .into()
+                    })
+                    .collect::<Vec<Element<'_, Message>>>();
+                return container(iced::widget::Row::with_children(boxes).spacing(8))
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 8.0,
+                        bottom: 16.0,
+                        left: 0.0,
+                        right: 0.0,
+                    })
+                    .into();
+            }
             let mut inp = text_input(f.spec.placeholder.as_str(), f.value.as_str())
                 .on_input(move |v| Message::FieldChanged(idx, v))
                 .on_submit(Message::Confirm)
@@ -388,7 +535,7 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
     .width(Length::Fill)
     .padding(8)
     .style(move |_, s| button_style(state.confirm_bg, state.confirm_text, s))
-    .on_press(Message::Confirm);
+    .on_press_maybe(can_confirm(state).then_some(Message::Confirm));
 
     let cancel = button(
         text(&state.cancel_label)
@@ -459,4 +606,63 @@ fn view(state: &GuiApp) -> iced::Element<'_, Message> {
             snap: false,
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(json: &str) -> GuiApp {
+        let request: PromptRequest = serde_json::from_str(json).unwrap();
+        let fields = request.effective_fields();
+        GuiApp::from_request(request, fields)
+    }
+
+    #[test]
+    fn ordinary_fields_preserve_arbitrary_input_and_empty_submission() {
+        let mut state = app(r#"{"fields":[
+            {"id":"text","kind":"text"},
+            {"id":"password","kind":"password"},
+            {"id":"secret","kind":"secret"}] }"#);
+        assert!(can_confirm(&state));
+        for index in 0..state.fields.len() {
+            assert!(state.fields[index].otp.is_none());
+            let value = "arbitrary text / 秘密 + 0123456789";
+            let _ = update(&mut state, Message::FieldChanged(index, value.into()));
+            assert_eq!(state.fields[index].value.as_str(), value);
+            let _ = update(
+                &mut state,
+                Message::OtpNavigate(
+                    FIRST_FIELD_ID.clone(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace),
+                ),
+            );
+            assert_eq!(state.fields[index].value.as_str(), value);
+        }
+        assert!(can_confirm(&state));
+    }
+
+    #[test]
+    fn default_password_and_confirmation_dialog_remain_unchanged() {
+        let state = app("{}");
+        assert_eq!(state.fields.len(), 1);
+        assert_eq!(state.fields[0].spec.kind, FieldKind::Password);
+        assert!(state.fields[0].otp.is_none());
+        assert!(can_confirm(&state));
+        let confirmation = app(r#"{"confirm_mode":true}"#);
+        assert!(confirmation.fields.is_empty());
+        assert!(can_confirm(&confirmation));
+    }
+
+    #[test]
+    fn totp_requires_six_digits_and_keeps_original_output_value() {
+        let mut state = app(r#"{"fields":[{"id":"__2fa_token","kind":"totp"}]}"#);
+        assert!(!can_confirm(&state));
+        let _ = update(&mut state, Message::OtpChanged(0, 0, "012345".into(), true));
+        assert!(can_confirm(&state));
+        assert_eq!(state.fields[0].spec.id, "__2fa_token");
+        assert_eq!(state.fields[0].value.as_str(), "012345");
+        let _ = update(&mut state, Message::OtpChanged(0, 3, String::new(), false));
+        assert!(!can_confirm(&state));
+    }
 }

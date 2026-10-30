@@ -553,6 +553,7 @@ pub struct TwoFactorMethod {
     /// Human-readable label shown to the user (e.g. "Authenticator app (TOTP)").
     pub label: String,
     /// How the host should collect the credential:
+    /// - `"totp"` — six-digit numeric authenticator code (segmented GUI input).
     /// - `"text"` — prompt for a text string (TOTP, email code, YubiKey OTP, passcode).
     /// - `"fido2"` — perform a FIDO2/WebAuthn ceremony (deferred — not yet implemented).
     /// - `"browser_redirect"` — open a URL and wait for callback (deferred).

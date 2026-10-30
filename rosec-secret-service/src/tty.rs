@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 pub struct TtyField {
     pub id: String,
     pub label: String,
-    /// One of `"text"`, `"password"`, or `"secret"`.
+    /// One of `"text"`, `"password"`, `"secret"`, or `"totp"`.
     pub kind: String,
     pub placeholder: String,
 }
@@ -190,7 +190,7 @@ pub async fn prompt_field_on_fd(
         let mut writer = &*file;
 
         match kind.as_str() {
-            "password" | "secret" => {
+            "password" | "secret" | "totp" => {
                 writer.write_all(prompt_str.as_bytes())?;
                 writer.flush()?;
                 Ok(read_hidden(fd, cancel_fd)?)
