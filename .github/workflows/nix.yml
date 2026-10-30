@@ -1,0 +1,48 @@
+name: Nix packaging
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '20 5 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          enable_kvm: true
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Build source package and exercise provider trust
+        run: nix build -L --out-link provider-result .#checks.x86_64-linux.providers
+      - name: NixOS D-Bus and PAM integration
+        run: nix build -L .#checks.x86_64-linux.nixos
+      - name: Keep the provider validation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nix-provider-report
+          path: provider-result/report
+          if-no-files-found: ignore
+  upstream:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: Check against current nixpkgs without changing the pin
+        run: nix build -L --no-write-lock-file --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable .#checks.x86_64-linux.providers
