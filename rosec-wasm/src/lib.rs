@@ -38,6 +38,7 @@ pub(crate) mod host_http;
 pub(crate) mod host_watch;
 pub mod keys;
 pub mod notifications;
+mod packaged;
 pub(crate) mod path_util;
 pub mod policy;
 pub mod protocol;
