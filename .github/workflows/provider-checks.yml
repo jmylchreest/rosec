@@ -1,0 +1,70 @@
+name: Provider checks
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  provider:
+    name: ${{ matrix.provider }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - rosec-bitwarden-pm
+          - rosec-bitwarden-sm
+          - rosec-gnome-keyring
+          - rosec-keepassxc-file
+          - rosec-protonpass
+    defaults:
+      run:
+        working-directory: ${{ matrix.provider }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install host integration dependencies
+        if: matrix.provider == 'rosec-protonpass' || matrix.provider == 'rosec-keepassxc-file'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: provider-${{ matrix.provider }}
+          workspaces: |
+            .
+            ${{ matrix.provider }}
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Unit tests
+        run: cargo test --locked --all-features
+      - name: Native lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: WASM lint
+        run: cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
+      # Never enable fixture/test features in the production artifact.
+      - name: Build production WASM
+        run: cargo build --locked --release --target wasm32-wasip1
+      - name: Verify AUR WASM build flag isolation
+        if: matrix.provider == 'rosec-keepassxc-file'
+        working-directory: .
+        run: python3 tests/test_aur_wasm_flags.py
+      - name: Verify KeePassXC TOTP through the WASM host
+        if: matrix.provider == 'rosec-keepassxc-file'
+        working-directory: .
+        run: cargo test -p rosec-wasm --locked keepassxc_totp -- --ignored
+      - name: Verify Proton Pass production isolation
+        if: matrix.provider == 'rosec-protonpass'
+        run: PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
+      - name: Build Proton Pass HTTP fixture
+        if: matrix.provider == 'rosec-protonpass'
+        run: CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
+      - name: Verify Proton Pass sandbox integration
+        if: matrix.provider == 'rosec-protonpass'
+        run: PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe

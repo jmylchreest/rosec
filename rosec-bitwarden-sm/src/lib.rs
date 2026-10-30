@@ -220,7 +220,8 @@ fn urls_from_options(options: &HashMap<String, serde_json::Value>) -> SmUrls {
 /// Return the plugin manifest for discovery.
 ///
 /// Called by the host **before** `init` — no global state is accessed.
-#[plugin_fn]
+// Export the Extism ABI only on WASM; native unit tests have no Extism host.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
     Ok(Json(PluginManifest {
         kind: "bitwarden-sm".to_string(),
@@ -250,7 +251,7 @@ pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
 }
 
 /// Initialise the plugin with provider configuration.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
     let org_id = req
         .options
@@ -289,7 +290,7 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
 }
 
 /// Return the current provider status (locked/unlocked + last sync time).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn status(_input: ()) -> FnResult<Json<StatusResponse>> {
     let guard = STATE.lock();
 
@@ -319,7 +320,7 @@ pub fn status(_input: ()) -> FnResult<Json<StatusResponse>> {
 ///
 /// If `registration_fields` is absent or empty, return `RegistrationRequired`
 /// so the host prompts the user to enter their access token.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -389,7 +390,7 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
 }
 
 /// Lock the provider — drop all sensitive state.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn lock(_input: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -402,7 +403,7 @@ pub fn lock(_input: ()) -> FnResult<Json<SimpleResponse>> {
 }
 
 /// Re-sync secrets from the Bitwarden SM API using the cached access token.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn sync(_input: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -458,7 +459,7 @@ pub fn sync(_input: ()) -> FnResult<Json<SimpleResponse>> {
 }
 
 /// List all SM secrets as item metadata.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_items(_input: ()) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
 
@@ -496,7 +497,7 @@ pub fn list_items(_input: ()) -> FnResult<Json<ItemListResponse>> {
 }
 
 /// Search for SM secrets matching the given attributes.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
 
@@ -545,7 +546,7 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
 }
 
 /// Return public attributes + secret attribute names for a secret.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_item_attributes(
     Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
@@ -595,7 +596,7 @@ pub fn get_item_attributes(
 }
 
 /// Return the secret bytes for a named attribute of a secret.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
     let guard = STATE.lock();
 
@@ -648,7 +649,7 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
 ///
 /// SM supports `Sync` only.  `PasswordChange` is handled host-side by
 /// `WasmProvider` (re-encrypts stored credentials).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
     Ok(Json(CapabilitiesResponse {
         capabilities: vec!["sync".to_string()],
@@ -656,7 +657,7 @@ pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
 }
 
 /// Return attribute descriptors for SM secrets.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn attribute_descriptors(_input: ()) -> FnResult<Json<AttributeDescriptorsResponse>> {
     let descriptors = vec![
         WasmAttributeDescriptor {
@@ -704,7 +705,7 @@ pub fn attribute_descriptors(_input: ()) -> FnResult<Json<AttributeDescriptorsRe
 ///
 /// SM requires the user to provide their machine account access token
 /// (format: `0.{uuid}.{secret}:{base64_key}`).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn registration_info(_input: ()) -> FnResult<Json<RegistrationInfoResponse>> {
     Ok(Json(RegistrationInfoResponse {
         has_registration: true,
@@ -726,7 +727,7 @@ pub fn registration_info(_input: ()) -> FnResult<Json<RegistrationInfoResponse>>
 }
 
 /// Return the unlock password field descriptor.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
     Ok(Json(AuthFieldsResponse {
         fields: vec![WasmAuthField {
@@ -746,7 +747,7 @@ pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
 /// `{ ok: true, has_changes: true }` so the host falls back to a full sync.
 ///
 /// The host calls this before deciding whether to do a full `sync`.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn check_remote_changed(
     Json(req): Json<CheckRemoteChangedRequest>,
 ) -> FnResult<Json<CheckRemoteChangedResponse>> {

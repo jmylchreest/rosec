@@ -74,78 +74,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  wasm:
-    name: WASM Providers
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Cache Cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm-providers
-          workspaces: |
-            rosec-bitwarden-pm
-            rosec-bitwarden-sm
-            rosec-gnome-keyring
-            rosec-keepassxc-file
-            rosec-protonpass
-
-      - name: Verify AUR WASM build flag isolation
-        run: python3 tests/test_aur_wasm_flags.py
-
-      - name: Build bitwarden-pm provider
-        working-directory: rosec-bitwarden-pm
-        run: cargo build --target wasm32-wasip1 --release
-
-      - name: Build bitwarden-sm provider
-        working-directory: rosec-bitwarden-sm
-        run: cargo build --target wasm32-wasip1 --release
-
-      - name: Build gnome-keyring provider
-        working-directory: rosec-gnome-keyring
-        run: cargo build --target wasm32-wasip1 --release
-
-      - name: Build keepassxc-file provider
-        working-directory: rosec-keepassxc-file
-        run: cargo build --target wasm32-wasip1 --release
-
-      - name: Verify KeePassXC TOTP through the WASM host
-        run: cargo test -p rosec-wasm --locked keepassxc_totp -- --ignored
-
-      - name: Build Proton Pass provider (production)
-        working-directory: rosec-protonpass
-        run: cargo build --locked --target wasm32-wasip1 --release
-
-  protonpass:
-    name: Proton Pass release checks
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rosec-protonpass
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-          components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rosec-protonpass
-      - run: cargo fmt -- --check
-      - run: cargo test --locked
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo clippy --locked --target wasm32-wasip1 -- -D warnings
-      - run: cargo build --locked --release --target wasm32-wasip1
-      - run: PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
-      - run: CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
-      - run: PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe
+  providers:
+    name: Provider checks
+    uses: ./.github/workflows/provider-checks.yml
 
   msrv:
     name: MSRV

@@ -109,6 +109,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # CI gate — test, clippy, fmt must pass before any build or release job
   # ---------------------------------------------------------------------------
+  providers:
+    name: Provider checks
+    needs: prepare
+    if: needs.prepare.outputs.should_skip != 'true'
+    uses: ./.github/workflows/provider-checks.yml
+
   ci:
     name: CI
     runs-on: ubuntu-latest
@@ -143,22 +149,6 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Proton Pass regression and lint checks
-        working-directory: rosec-protonpass
-        run: |
-          cargo fmt -- --check
-          cargo test --locked --all-features
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
-
-      - name: Proton Pass production and sandbox integration
-        working-directory: rosec-protonpass
-        run: |
-          cargo build --locked --release --target wasm32-wasip1
-          PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production
-          CARGO_TARGET_DIR=target-fixture cargo build --locked --release --target wasm32-wasip1 --features test-http
-          PROTONPASS_WASM="$PWD/target-fixture/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe
-
   # ---------------------------------------------------------------------------
   # Build binaries for all target platforms
   #
@@ -171,7 +161,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
-    needs: [prepare, ci]
+    needs: [prepare, ci, providers]
     if: needs.prepare.outputs.should_skip != 'true'
     strategy:
       fail-fast: false
@@ -285,7 +275,7 @@ jobs:
   build-wasm:
     name: Build WASM Providers
     runs-on: ubuntu-latest
-    needs: [prepare, ci]
+    needs: [prepare, ci, providers]
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
@@ -310,19 +300,19 @@ jobs:
 
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
-        run: cargo build --target wasm32-wasip1 --release
+        run: cargo build --locked --target wasm32-wasip1 --release
 
       - name: Build bitwarden-sm provider
         working-directory: rosec-bitwarden-sm
-        run: cargo build --target wasm32-wasip1 --release
+        run: cargo build --locked --target wasm32-wasip1 --release
 
       - name: Build gnome-keyring provider
         working-directory: rosec-gnome-keyring
-        run: cargo build --target wasm32-wasip1 --release
+        run: cargo build --locked --target wasm32-wasip1 --release
 
       - name: Build keepassxc-file provider
         working-directory: rosec-keepassxc-file
-        run: cargo build --target wasm32-wasip1 --release
+        run: cargo build --locked --target wasm32-wasip1 --release
 
       - name: Build Proton Pass provider (production)
         working-directory: rosec-protonpass
@@ -440,7 +430,7 @@ jobs:
   build-sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
-    needs: [prepare, ci]
+    needs: [prepare, ci, providers]
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout

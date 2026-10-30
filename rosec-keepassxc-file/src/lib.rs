@@ -94,7 +94,8 @@ struct AuthState {
 
 // ── plugin_manifest ───────────────────────────────────────────────────────────
 
-#[plugin_fn]
+// Export the Extism ABI only on WASM; native unit tests have no Extism host.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
     Ok(Json(PluginManifest {
         kind: "keepassxc-file".into(),
@@ -120,7 +121,7 @@ pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
     let path = match req.options.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -156,7 +157,7 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
 
 // ── status ────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
     let guard = STATE.lock();
     let (locked, last_sync) = match guard.as_ref().and_then(|s| s.auth.as_ref()) {
@@ -218,7 +219,7 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn unlock(Json(mut req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -299,7 +300,7 @@ pub fn unlock(Json(mut req): Json<UnlockRequest>) -> FnResult<Json<SimpleRespons
 
 // ── lock ──────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
     if let Some(state) = guard.as_mut() {
@@ -319,7 +320,7 @@ pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
 
 /// Payload format must match `rosec_wasm::host_watch::WatchEvent`.
 #[derive(Debug, serde::Deserialize)]
-struct WatchEvent {
+pub struct WatchEvent {
     path: String,
     kind: String,
 }
@@ -358,7 +359,7 @@ fn try_redecrypt(state: &mut GuestState) -> Result<bool, String> {
 /// changes on disk.  Triggers an immediate re-decrypt with the cached
 /// master password.  Failure clears `auth` so the next call surfaces an
 /// auth error rather than serving stale data.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn on_path_changed(Json(evt): Json<WatchEvent>) -> FnResult<()> {
     info!("on_path_changed: {} {}", evt.kind, evt.path);
     let mut guard = STATE.lock();
@@ -377,7 +378,7 @@ pub fn on_path_changed(Json(evt): Json<WatchEvent>) -> FnResult<()> {
 
 // ── sync ──────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn sync(_: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
     let Some(state) = guard.as_mut() else {
@@ -455,7 +456,7 @@ fn matches_filter(
 
 // ── list_items / search ───────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
     match with_db(|provider_id, db| {
         db.iter_all_entries()
@@ -477,7 +478,7 @@ pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
     match with_db(|provider_id, db| {
         db.iter_all_entries()
@@ -502,7 +503,7 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
 
 // ── attribute access ──────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_item_attributes(
     Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
@@ -540,7 +541,7 @@ pub fn get_item_attributes(
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
     let bytes_result = with_db(|_, db| {
         lookup_entry_by_id(db, &req.id).and_then(|e| cipher::resolve_secret(&e, &req.attr))
@@ -583,7 +584,7 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
 
 // ── SSH key extraction ────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
     let result = with_db(|_, db| {
         db.iter_all_entries()
@@ -606,7 +607,7 @@ pub fn list_ssh_keys(_: ()) -> FnResult<Json<SshKeyListResponse>> {
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_ssh_private_key(
     Json(req): Json<SshPrivateKeyRequest>,
 ) -> FnResult<Json<SshPrivateKeyResponse>> {
@@ -648,7 +649,7 @@ pub fn get_ssh_private_key(
 
 // ── Static metadata queried once at plugin load ───────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_fido2_credentials(_: ()) -> FnResult<Json<Fido2CredentialListResponse>> {
     let result = with_db(|_, db| {
         db.iter_all_entries()
@@ -671,7 +672,7 @@ pub fn list_fido2_credentials(_: ()) -> FnResult<Json<Fido2CredentialListRespons
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2KeyResponse>> {
     let pem_result = with_db(|_, db| match lookup_entry_by_id(db, &req.item_id) {
         Some(entry) => fido2::resolve_fido2_key(&entry, &req.credential_id),
@@ -707,7 +708,7 @@ pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2Key
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     // Phase 1: read-only, sync via mtime polling.
     // Ssh: SSH key extraction from KeeAgent.settings + binary attachments.
@@ -716,7 +717,7 @@ pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     }))
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn auth_fields(_: ()) -> FnResult<Json<AuthFieldsResponse>> {
     // When a key file is configured the master password becomes optional
     // (KeePassXC permits key-file-only authentication).  When no key file
@@ -742,7 +743,7 @@ pub fn auth_fields(_: ()) -> FnResult<Json<AuthFieldsResponse>> {
     }))
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn registration_info(_: ()) -> FnResult<Json<RegistrationInfoResponse>> {
     Ok(Json(RegistrationInfoResponse {
         has_registration: false,
@@ -751,20 +752,20 @@ pub fn registration_info(_: ()) -> FnResult<Json<RegistrationInfoResponse>> {
     }))
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn attribute_descriptors(_: ()) -> FnResult<Json<AttributeDescriptorsResponse>> {
     Ok(Json(AttributeDescriptorsResponse {
         descriptors: vec![],
     }))
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn readiness_probes(_: ()) -> FnResult<Json<ReadinessProbesResponse>> {
     // No remote endpoint to probe.
     Ok(Json(ReadinessProbesResponse { probes: vec![] }))
 }
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_notification_config(_: ()) -> FnResult<Json<NotificationConfigResponse>> {
     Ok(Json(NotificationConfigResponse {
         ok: true,

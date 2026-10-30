@@ -1059,7 +1059,8 @@ fn simple_ok() -> SimpleResponse {
 /// Called by the host **before** `init` — no global state is accessed.
 /// This allows the host to scan `.wasm` files and discover provider
 /// kinds, config requirements, and allowed hosts automatically.
-#[plugin_fn]
+// Export the Extism ABI only on WASM; native unit tests have no Extism host.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
     Ok(Json(PluginManifest {
         kind: "bitwarden-pm".to_string(),
@@ -1110,7 +1111,7 @@ pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
 /// Called once by the host after loading the WASM module.
 /// Expects `InitRequest` JSON with `provider_id`, `provider_name`, and
 /// `options` containing `email`, `device_id`, and URL configuration.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
     let email = req
         .options
@@ -1206,7 +1207,7 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
 }
 
 /// Return the current provider status (locked/unlocked + last sync time).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn status(_input: ()) -> FnResult<Json<StatusResponse>> {
     let guard = STATE.lock();
 
@@ -1231,7 +1232,7 @@ pub fn status(_input: ()) -> FnResult<Json<StatusResponse>> {
 }
 
 /// Unlock the vault with a master password (and optional registration/auth fields).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -1345,7 +1346,7 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
 /// Lock the vault — drop decrypted secrets but preserve the refresh token
 /// so the next unlock can reuse the existing Bitwarden session instead of
 /// performing a full password login (which deauths other clients).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn lock(_input: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -1368,7 +1369,7 @@ pub fn lock(_input: ()) -> FnResult<Json<SimpleResponse>> {
 }
 
 /// Re-sync the vault with the Bitwarden server.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn sync(_input: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
 
@@ -1400,7 +1401,7 @@ pub fn sync(_input: ()) -> FnResult<Json<SimpleResponse>> {
 }
 
 /// List all items in the vault.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_items(_input: ()) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
 
@@ -1439,7 +1440,7 @@ pub fn list_items(_input: ()) -> FnResult<Json<ItemListResponse>> {
 }
 
 /// Search for items matching the given attributes.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
 
@@ -1489,7 +1490,7 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
 }
 
 /// Get full attributes (public + secret names) for a single item.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_item_attributes(
     Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
@@ -1539,7 +1540,7 @@ pub fn get_item_attributes(
 /// Get a specific secret attribute value for an item.
 ///
 /// Returns the secret bytes base64-encoded.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
     let guard = STATE.lock();
 
@@ -1591,7 +1592,7 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
 }
 
 /// List all SSH keys in the vault.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_ssh_keys(_input: ()) -> FnResult<Json<SshKeyListResponse>> {
     let guard = STATE.lock();
 
@@ -1630,7 +1631,7 @@ pub fn list_ssh_keys(_input: ()) -> FnResult<Json<SshKeyListResponse>> {
 }
 
 /// Get the PEM-encoded SSH private key for an item.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_ssh_private_key(
     Json(req): Json<SshPrivateKeyRequest>,
 ) -> FnResult<Json<SshPrivateKeyResponse>> {
@@ -1779,7 +1780,7 @@ fn to_fido2_meta(
 }
 
 /// List FIDO2 credentials (passkeys) across all login ciphers.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_fido2_credentials(_input: ()) -> FnResult<Json<Fido2CredentialListResponse>> {
     let guard = STATE.lock();
 
@@ -1824,7 +1825,7 @@ pub fn list_fido2_credentials(_input: ()) -> FnResult<Json<Fido2CredentialListRe
 }
 
 /// Get the PEM-encoded PKCS#8 private key for one FIDO2 credential.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2KeyResponse>> {
     let guard = STATE.lock();
 
@@ -1895,7 +1896,7 @@ pub fn get_fido2_key(Json(req): Json<Fido2KeyRequest>) -> FnResult<Json<Fido2Key
 ///
 /// Bitwarden PM supports: Sync, Ssh, Fido2, OfflineCache, Notifications,
 /// Totp (NOT Write, NOT PasswordChange).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
     Ok(Json(CapabilitiesResponse {
         capabilities: vec![
@@ -1910,7 +1911,7 @@ pub fn capabilities(_input: ()) -> FnResult<Json<CapabilitiesResponse>> {
 }
 
 /// Return the full attribute descriptor catalogue.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn attribute_descriptors(_input: ()) -> FnResult<Json<AttributeDescriptorsResponse>> {
     Ok(Json(AttributeDescriptorsResponse {
         descriptors: bitwarden_attribute_descriptors(),
@@ -1918,7 +1919,7 @@ pub fn attribute_descriptors(_input: ()) -> FnResult<Json<AttributeDescriptorsRe
 }
 
 /// Return registration info (device registration instructions + fields).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn registration_info(_input: ()) -> FnResult<Json<RegistrationInfoResponse>> {
     Ok(Json(RegistrationInfoResponse {
         has_registration: true,
@@ -1948,7 +1949,7 @@ pub fn registration_info(_input: ()) -> FnResult<Json<RegistrationInfoResponse>>
 }
 
 /// Return the auth fields for this provider (just the master password).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
     // The password field is already declared via `password_field()` on the
     // host side.  `auth_fields` is for *additional* authentication fields
@@ -1966,7 +1967,7 @@ pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
 /// For Bitwarden PM, the identity server is the first endpoint hit during
 /// unlock (prelogin + login).  If it's unreachable, there's no point
 /// attempting the call.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn readiness_probes(_input: ()) -> FnResult<Json<ReadinessProbesResponse>> {
     let guard = STATE.lock();
 
@@ -2022,7 +2023,7 @@ pub fn readiness_probes(_input: ()) -> FnResult<Json<ReadinessProbesResponse>> {
 /// `offline_cache = false` in config).
 ///
 /// Returns an error response if the provider is locked (no vault state).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn export_cache(_input: ()) -> FnResult<Json<ExportCacheResponse>> {
     use base64::Engine;
 
@@ -2103,7 +2104,7 @@ pub fn export_cache(_input: ()) -> FnResult<Json<ExportCacheResponse>> {
 /// `Capability::OfflineCache` is declared *and* the host's
 /// `offline_cache` config is enabled.** If either condition is false,
 /// the host never calls `export_cache` and no tokens are persisted.
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn restore_cache(Json(input): Json<RestoreCacheRequest>) -> FnResult<Json<SimpleResponse>> {
     use base64::Engine;
 
@@ -2231,7 +2232,7 @@ struct SignalRArgument {
 /// handshake as the `handshake_message`.
 ///
 /// Returns an error if not authenticated (no access token).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_notification_config(_input: ()) -> FnResult<Json<protocol::NotificationConfigResponse>> {
     let guard = STATE.lock();
     let Some(state) = guard.as_ref() else {
@@ -2326,7 +2327,7 @@ pub fn get_notification_config(_input: ()) -> FnResult<Json<protocol::Notificati
 /// Classifies each `\x1e`-delimited sub-frame as sync, lock, or ignore.
 /// If a frame contains multiple sub-frames and at least one is a sync or
 /// lock event, the most important action wins (lock > sync > ignore).
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn parse_notification(
     Json(frame): Json<protocol::NotificationFrame>,
 ) -> FnResult<Json<protocol::NotificationAction>> {
