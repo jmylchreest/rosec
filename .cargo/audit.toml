@@ -31,6 +31,19 @@ ignore = [
     # Upstream fix: https://github.com/RustCrypto/crypto-bigint/pull/1365
     "RUSTSEC-2026-0387",
 
+    # zstd/zstd-safe: stream data leakage and invalid/uninitialized decompression
+    # output. Extism 1.41 requires Wasmtime 49; its latest cache crate (49.0.5)
+    # still requires zstd 0.13. Vendoring was rejected; temporary exceptions
+    # keep the known risk explicit while unrelated advisories continue to fail.
+    # No claim is made that the vulnerable APIs are unreachable.
+    # Tracking: https://github.com/jmylchreest/rosec/issues/79
+    # Review by 2026-11-13; remove when compatible upstream releases resolve
+    # zstd >=0.14.3 and zstd-safe >=8.2.0 in BOTH affected lockfiles.
+    # Upstream fix: https://github.com/bytecodealliance/wasmtime/pull/15003
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+
     # quick-xml < 0.41 DoS (quadratic attribute scan / unbounded ns alloc).
     # Pulled via the desktop-portal / font stack in rosec-prompt; the direct
     # dependents cap quick-xml at 0.39.x, so we cannot advance it yet. DoS only.

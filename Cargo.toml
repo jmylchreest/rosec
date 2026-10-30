@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    # Temporary security backport; include its upstream regression tests.
-    "vendor/wasmtime-internal-cache",
     "rosec-core",
     "rosec-secret-service",
     "rosec-ssh-agent",
@@ -92,9 +90,6 @@ husky-rs = "0.4"
 # Work around RSA signing bug in ssh-key 0.6.7.
 # Remove when ssh-key 0.6.8 is released with the fix.
 [patch.crates-io]
-# Backport upstream Wasmtime PR #15003 until the 49.x cache crate ships zstd >=0.14.3.
-# See vendor/wasmtime-internal-cache/README.rosec.md for provenance/removal criteria.
-wasmtime-internal-cache = { path = "vendor/wasmtime-internal-cache" }
 ssh-key = { git = "https://github.com/RustCrypto/SSH", branch = "stable", package = "ssh-key" }
 ssh-encoding = { git = "https://github.com/RustCrypto/SSH", branch = "stable", package = "ssh-encoding" }
 
