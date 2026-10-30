@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use zbus::Connection;
+use zbus::{OwnedObjectPath, OwnedVariant as OwnedValue};
 use zeroize::Zeroizing;
-use zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::cli::InspectArgs;
 use crate::{
@@ -77,7 +77,7 @@ async fn inspect_inner(
     .await?;
 
     let (_, session_path): (OwnedValue, OwnedObjectPath) = service_proxy
-        .call("OpenSession", &("plain", zvariant::Value::from("")))
+        .call("OpenSession", &("plain", zbus::Variant::from("")))
         .await?;
 
     let item_proxy = zbus::Proxy::new(
@@ -169,8 +169,9 @@ async fn inspect_inner(
                         }
                     }
                 }
-                Err(zbus::Error::MethodError(_, Some(detail), _))
-                    if detail.as_str().starts_with("no secret for cipher") =>
+                Err(ref error)
+                    if crate::method_error_detail(error)
+                        .is_some_and(|detail| detail.starts_with("no secret for cipher")) =>
                 {
                     println!("Secret:     <not available — this item type has no primary secret>");
                 }

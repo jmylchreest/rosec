@@ -14,7 +14,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 rosec-core = { path = "../rosec-core" }
 zbus = { workspace = true }
-zvariant = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }

@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use rosec_core::{ProviderError, SecretBytes};
 use tracing::debug;
+use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
-use zvariant::OwnedObjectPath;
 
 use crate::crypto::aes128_cbc_encrypt;
 use crate::daemon::log_dbus_caller;
@@ -52,9 +52,9 @@ impl SecretService {
     async fn open_session(
         &self,
         algorithm: &str,
-        input: zvariant::Value<'_>,
+        input: zbus::Variant<'_>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(zvariant::Value<'static>, OwnedObjectPath), FdoError> {
+    ) -> Result<(zbus::Variant<'static>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "OpenSession", &header);
         let (output, path) = self
             .state
@@ -95,7 +95,7 @@ impl SecretService {
     async fn get_secrets(
         &self,
         items: Vec<OwnedObjectPath>,
-        session: zvariant::ObjectPath<'_>,
+        session: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, FdoError> {
         log_dbus_caller("service", "GetSecrets", &header);
@@ -149,7 +149,7 @@ impl SecretService {
 
     fn close_session(
         &self,
-        session: zvariant::ObjectPath<'_>,
+        session: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("service", "CloseSession", &header);
@@ -181,7 +181,7 @@ impl SecretService {
     fn set_alias(
         &self,
         _name: &str,
-        _collection: zvariant::ObjectPath<'_>,
+        _collection: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("service", "SetAlias", &header);
@@ -312,7 +312,7 @@ impl SecretService {
 
     fn create_collection(
         &self,
-        _properties: HashMap<String, zvariant::Value<'_>>,
+        _properties: HashMap<String, zbus::Variant<'_>>,
         alias: String,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), FdoError> {
@@ -342,7 +342,7 @@ impl SecretService {
 /// # Security note
 ///
 /// Even for encrypted sessions the plaintext briefly exists as a plain `Vec<u8>`
-/// because `zvariant::Value` requires owned, non-zeroizing types.  This is an
+/// because `zbus::Variant` requires owned, non-zeroizing types.  This is an
 /// inherent limitation of the zbus/zvariant API.  With DH session encryption the
 /// plaintext is only visible inside this process for the duration of the call.
 pub(crate) fn build_secret_value(

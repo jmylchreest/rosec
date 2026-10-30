@@ -4626,7 +4626,6 @@ dependencies = [
  "wildmatch",
  "zbus 6.1.0",
  "zeroize",
- "zvariant",
 ]
 
 [[package]]
@@ -4682,7 +4681,6 @@ dependencies = [
  "tokio",
  "zbus 6.1.0",
  "zeroize",
- "zvariant",
 ]
 
 [[package]]
@@ -4730,7 +4728,6 @@ dependencies = [
  "wildmatch",
  "zbus 6.1.0",
  "zeroize",
- "zvariant",
 ]
 
 [[package]]

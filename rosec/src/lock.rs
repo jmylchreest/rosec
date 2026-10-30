@@ -1,7 +1,7 @@
 //! `rosec lock` — lock the default collection (and report how many providers were locked).
 
 use anyhow::Result;
-use zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use crate::{ProviderEntry, conn};
 

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use futures_util::StreamExt as _;
+use zbus::OwnedFd;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
-use zvariant::OwnedFd;
 
 use super::log_dbus_caller;
 use crate::state::ServiceState;
@@ -550,7 +550,7 @@ impl RosecManagement {
     /// the path was not in the active-prompt registry (already completed or invalid).
     fn cancel_prompt(
         &self,
-        prompt_path: zvariant::ObjectPath<'_>,
+        prompt_path: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<bool, FdoError> {
         log_dbus_caller("management", "CancelPrompt", &header);
@@ -797,13 +797,13 @@ async fn wait_for_task_or_peer_exit<T: Send + 'static>(
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zbus::Type)]
 pub struct DaemonStatus {
     pub cache_size: u32,
 }
 
 /// A provider list entry returned by `ProviderList`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zbus::Type)]
 pub struct ProviderListEntry {
     pub id: String,
     pub name: String,
@@ -825,7 +825,7 @@ pub struct ProviderListEntry {
 }
 
 /// A single auth-field descriptor returned by `GetAuthFields`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zbus::Type)]
 pub struct AuthFieldInfo {
     pub id: String,
     pub label: String,
@@ -836,7 +836,7 @@ pub struct AuthFieldInfo {
 }
 
 /// Result entry returned by `UnlockWithTty`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zbus::Type)]
 pub struct UnlockResultEntry {
     pub provider_id: String,
     pub success: bool,
@@ -845,7 +845,7 @@ pub struct UnlockResultEntry {
 }
 
 /// A wrapping entry (password) descriptor returned by `ListPasswords`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zvariant::Type)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zbus::Type)]
 pub struct PasswordEntry {
     /// Unique entry ID (UUID).
     pub id: String,

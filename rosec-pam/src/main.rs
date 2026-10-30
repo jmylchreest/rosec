@@ -293,11 +293,11 @@ fn read_password_from_stdin() -> Result<Zeroizing<Vec<u8>>> {
 }
 
 /// Create a pipe, write `data` to the write end, close it, and return the
-/// read end as a `zvariant::OwnedFd` suitable for D-Bus fd-passing.
+/// read end as a `zbus::OwnedFd` suitable for D-Bus fd-passing.
 ///
 /// The password travels through kernel pipe buffers only — never through
 /// the D-Bus message payload.
-fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd> {
+fn make_password_pipe(data: &[u8]) -> Result<zbus::OwnedFd> {
     let mut fds = [0_i32; 2];
 
     // SAFETY: pipe() writes exactly two fds into the array.
@@ -325,7 +325,7 @@ fn make_password_pipe(data: &[u8]) -> Result<zvariant::OwnedFd> {
     // Wrap the read end in OwnedFd for D-Bus fd-passing.
     // SAFETY: read_fd is a valid fd from pipe(); OwnedFd takes ownership.
     let owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
-    Ok(zvariant::OwnedFd::from(owned))
+    Ok(zbus::OwnedFd::from(owned))
 }
 
 /// Connect to the D-Bus session bus and attempt to unlock all locked vaults.
@@ -354,8 +354,7 @@ async fn pam_connect() -> Result<zbus::Connection> {
         if std::path::Path::new(&socket).exists() {
             let addr = format!("unix:path={socket}");
             debug_log(&format!("trying private bus at {addr}"));
-            let builder = zbus::connection::Builder::address(&*addr)
-                .with_context(|| format!("parse private bus address {addr}"))?;
+            let builder = zbus::connection::Builder::address(&*addr);
             return builder
                 .build()
                 .await

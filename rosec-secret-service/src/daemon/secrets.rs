@@ -30,7 +30,7 @@ impl RosecSecrets {
     /// `org.freedesktop.Secret.Service` interface.
     async fn get_secret_attribute_names(
         &self,
-        item_path: zvariant::ObjectPath<'_>,
+        item_path: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<String>, FdoError> {
         log_dbus_caller("secrets", "GetSecretAttributeNames", &header);
@@ -59,7 +59,7 @@ impl RosecSecrets {
     /// `org.freedesktop.Secret.Service` interface.
     async fn get_secret_attribute(
         &self,
-        item_path: zvariant::ObjectPath<'_>,
+        item_path: zbus::ObjectPath<'_>,
         attr_name: &str,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<Vec<u8>, FdoError> {
@@ -94,7 +94,7 @@ impl RosecSecrets {
     /// provider does not declare the `Totp` capability.
     async fn get_totp_code(
         &self,
-        item_path: zvariant::ObjectPath<'_>,
+        item_path: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(String, u32), FdoError> {
         log_dbus_caller("secrets", "GetTotpCode", &header);

@@ -6,8 +6,8 @@ use clap::Parser;
 
 use anyhow::{Result, bail};
 use zbus::Connection;
+use zbus::OwnedObjectPath;
 use zeroize::Zeroizing;
-use zvariant::OwnedObjectPath;
 
 use rosec_core::config::Config;
 
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 pub(crate) async fn conn() -> Result<Connection> {
     if let Ok(socket) = std::env::var("ROSEC_SOCKET") {
         let addr = format!("unix:path={socket}");
-        return Ok(zbus::connection::Builder::address(&*addr)?.build().await?);
+        return Ok(zbus::connection::Builder::address(&*addr).build().await?);
     }
 
     if let Ok(c) = Connection::session().await {
@@ -87,7 +87,7 @@ pub(crate) async fn conn() -> Result<Connection> {
         let socket = std::path::Path::new(&runtime_dir).join("rosec").join("bus");
         if socket.exists() {
             let addr = format!("unix:path={}", socket.display());
-            return Ok(zbus::connection::Builder::address(&*addr)?.build().await?);
+            return Ok(zbus::connection::Builder::address(&*addr).build().await?);
         }
     }
 
@@ -132,13 +132,21 @@ pub(crate) fn load_config() -> Result<Config> {
 /// a provider needs interactive authentication.  This helper parses that sentinel
 /// and returns `Some(provider_id)` or `None`.
 fn extract_locked_provider(err: &zbus::Error) -> Option<String> {
-    if let zbus::Error::MethodError(_, Some(detail), _) = err {
-        let msg = detail.as_str();
-        if let Some(id) = msg.strip_prefix("locked::") {
-            return Some(id.to_string());
-        }
+    method_error_detail(err)?
+        .strip_prefix("locked::")
+        .map(str::to_owned)
+}
+
+/// zbus 6 decodes standard D-Bus failures as typed FDO errors.
+fn method_error_detail(err: &zbus::Error) -> Option<&str> {
+    match err {
+        zbus::Error::MethodError(_, Some(detail), _) => Some(detail.as_str()),
+        zbus::Error::FDO(err) => match err.as_ref() {
+            zbus::fdo::Error::Failed(detail) => Some(detail.as_str()),
+            _ => None,
+        },
+        _ => None,
     }
-    None
 }
 
 /// Attempt to interactively unlock a provider after receiving a `"locked::<id>"`
@@ -224,7 +232,7 @@ pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
                     // Completed signal body: (dismissed: bool, result: Variant)
                     // We only need the first field.
                     let body = message.body();
-                    match body.deserialize::<(bool, zvariant::OwnedValue)>() {
+                    match body.deserialize::<(bool, zbus::OwnedVariant)>() {
                         Ok((d, _)) => d,
                         Err(_) => true, // parse error → treat as dismissed
                     }
@@ -270,12 +278,12 @@ pub(crate) async fn trigger_unlock(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Open `/dev/tty` and return it as a `zvariant::OwnedFd` for D-Bus fd-passing.
+/// Open `/dev/tty` and return it as a `zbus::OwnedFd` for D-Bus fd-passing.
 ///
 /// The returned `OwnedFd` can be passed directly to `UnlockWithTty` /
 /// `AuthProviderWithTty`.  `dbus-monitor` sees only the fd number, never the
 /// terminal contents.
-pub(crate) fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
+pub(crate) fn open_tty_owned_fd() -> Result<zbus::OwnedFd> {
     use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -285,7 +293,7 @@ pub(crate) fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
     let raw = file.into_raw_fd();
     // SAFETY: raw is a freshly-opened, valid, owned fd.
     let std_owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
-    Ok(zvariant::OwnedFd::from(std_owned))
+    Ok(zbus::OwnedFd::from(std_owned))
 }
 
 /// Write a password to the write end of a pipe and return the read end as an
@@ -294,7 +302,7 @@ pub(crate) fn open_tty_owned_fd() -> Result<zvariant::OwnedFd> {
 /// The write end is closed after the password is written so the daemon sees
 /// EOF when it reads.  The password bytes are never visible in any D-Bus
 /// message payload — only the fd number travels over the bus.
-pub(crate) fn password_to_pipe_fd(password: &[u8]) -> Result<zvariant::OwnedFd> {
+pub(crate) fn password_to_pipe_fd(password: &[u8]) -> Result<zbus::OwnedFd> {
     use std::io::Write as _;
     use std::os::unix::io::FromRawFd as _;
 
@@ -315,7 +323,7 @@ pub(crate) fn password_to_pipe_fd(password: &[u8]) -> Result<zvariant::OwnedFd> 
 
     // SAFETY: read_fd is a valid fd from pipe() above.
     let std_owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
-    Ok(zvariant::OwnedFd::from(std_owned))
+    Ok(zbus::OwnedFd::from(std_owned))
 }
 
 /// Read one line from `fd` with terminal echo disabled.
@@ -1560,3 +1568,42 @@ async fn resolve_item_by_attrs(conn: &Connection, raw: &str) -> Result<(String, 
 // (config subcommand tree moved to rosec/src/config/)
 
 // (item subcommand tree moved to rosec/src/item/)
+
+#[cfg(test)]
+mod dbus_error_tests {
+    use super::{extract_locked_provider, method_error_detail};
+
+    fn wire_error(name: &str, detail: &str) -> zbus::Error {
+        let call = zbus::Message::method_call("/org/rosec/Daemon", "SyncProvider")
+            .build(&())
+            .unwrap();
+        let reply = zbus::Message::error(&call.header(), name)
+            .build(&detail)
+            .unwrap();
+        zbus::Error::from(reply)
+    }
+
+    #[test]
+    fn typed_fdo_failure_preserves_lazy_unlock_sentinel() {
+        let error = wire_error("org.freedesktop.DBus.Error.Failed", "locked::example");
+        assert!(matches!(error, zbus::Error::FDO(_)));
+        assert_eq!(extract_locked_provider(&error).as_deref(), Some("example"));
+        let ordinary = wire_error("org.freedesktop.DBus.Error.Failed", "ordinary failure");
+        assert_eq!(extract_locked_provider(&ordinary), None);
+    }
+
+    #[test]
+    fn both_error_representations_preserve_no_secret_detail() {
+        for name in [
+            "org.freedesktop.DBus.Error.Failed",
+            "org.rosec.Error.Custom",
+        ] {
+            let error = wire_error(name, "no secret for cipher example");
+            assert_eq!(
+                method_error_detail(&error),
+                Some("no secret for cipher example")
+            );
+            assert_eq!(extract_locked_provider(&error), None);
+        }
+    }
+}

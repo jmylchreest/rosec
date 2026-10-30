@@ -25,11 +25,9 @@ pub async fn run() -> Result<()> {
             Ok(count) => {
                 println!(" {count} items");
             }
-            Err(zbus::Error::MethodError(_, Some(detail), _))
-                if detail.as_str().starts_with("locked::") =>
-            {
+            Err(ref error) if crate::extract_locked_provider(error).is_some() => {
                 // Daemon says this provider needs credentials first.
-                let provider_id = detail.as_str().strip_prefix("locked::").unwrap_or("");
+                let provider_id = crate::extract_locked_provider(error).unwrap();
                 eprintln!(" locked");
                 let tty_fd = open_tty_owned_fd()?;
                 // force=false: don't re-register if creds already stored;

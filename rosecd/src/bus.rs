@@ -142,7 +142,7 @@ async fn spawn_private_bus_inner(socket_path: &Path) -> Result<Connection> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let conn = zbus::connection::Builder::address(&*address)?
+    let conn = zbus::connection::Builder::address(&*address)
         .build()
         .await
         .with_context(|| format!("connect to private bus at {address}"))?;
@@ -184,10 +184,7 @@ pub async fn session_bus_watcher(state: Arc<ServiceState>, interval: Duration) {
 
         // Try to claim the well-known name.
         match session_conn
-            .request_name_with_flags(
-                "org.freedesktop.secrets",
-                RequestNameFlags::DoNotQueue.into(),
-            )
+            .request_name_with_flags("org.freedesktop.secrets", RequestNameFlags::DO_NOT_QUEUE)
             .await
         {
             Ok(_) => {
@@ -195,7 +192,7 @@ pub async fn session_bus_watcher(state: Arc<ServiceState>, interval: Duration) {
                 if let Err(e) = session_conn
                     .request_name_with_flags(
                         "org.freedesktop.impl.portal.desktop.rosec",
-                        RequestNameFlags::DoNotQueue.into(),
+                        RequestNameFlags::DO_NOT_QUEUE,
                     )
                     .await
                 {
@@ -290,4 +287,54 @@ async fn bus_name_owner_info(conn: &Connection) -> String {
         .unwrap_or_else(|_| "unknown".to_string());
 
     format!("  current owner: {comm} (PID {pid}, bus name {unique_name})")
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    struct WireProbe;
+
+    #[zbus::interface(name = "org.rosec.WireProbe")]
+    impl WireProbe {
+        fn echo(
+            &self,
+            path: zbus::OwnedObjectPath,
+            bytes: Vec<u8>,
+        ) -> (zbus::OwnedObjectPath, Vec<u8>) {
+            (path, bytes)
+        }
+
+        fn fail(&self) -> zbus::fdo::Result<()> {
+            Err(zbus::fdo::Error::Failed("locked::example".into()))
+        }
+
+        #[zbus(property)]
+        fn state(&self) -> &str {
+            "ready"
+        }
+    }
+
+    #[tokio::test]
+    async fn zbus6_clients_exchange_wire_types_through_private_broker() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("bus");
+            let service = spawn_private_bus_inner(&socket).await.unwrap();
+            service.request_name("org.rosec.WireProbe").await.unwrap();
+            service.object_server().at("/org/rosec/Probe", WireProbe).await.unwrap();
+            let address = format!("unix:path={}", socket.display());
+            let client = zbus::connection::Builder::address(address.as_str())
+                .build().await.unwrap();
+            let proxy = zbus::Proxy::new(&client, "org.rosec.WireProbe", "/org/rosec/Probe",
+                                        "org.rosec.WireProbe").await.unwrap();
+            let path = zbus::OwnedObjectPath::try_from("/org/freedesktop/secrets/session/test").unwrap();
+            let reply: (zbus::OwnedObjectPath, Vec<u8>) = proxy.call("Echo", &(&path, vec![1u8, 2, 3])).await.unwrap();
+            assert_eq!(reply, (path, vec![1, 2, 3]));
+            assert_eq!(proxy.get_property::<String>("State").await.unwrap(), "ready");
+            let error = proxy.call::<_, _, ()>("Fail", &()).await.unwrap_err();
+            assert!(matches!(error, zbus::Error::FDO(error)
+                if matches!(*error, zbus::fdo::Error::Failed(ref text) if text == "locked::example")));
+        }).await.expect("private bus roundtrip timed out");
+    }
 }

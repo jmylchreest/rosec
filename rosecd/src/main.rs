@@ -148,10 +148,7 @@ async fn run() -> Result<()> {
     // waiting in the D-Bus name queue until the first instance exits.
     // If another process already owns it, report who it is before exiting.
     if let Err(e) = conn
-        .request_name_with_flags(
-            "org.freedesktop.secrets",
-            RequestNameFlags::DoNotQueue.into(),
-        )
+        .request_name_with_flags("org.freedesktop.secrets", RequestNameFlags::DO_NOT_QUEUE)
         .await
     {
         let owner_info = bus_name_owner_info(&conn, "org.freedesktop.secrets").await;
@@ -164,7 +161,7 @@ async fn run() -> Result<()> {
     if let Err(e) = conn
         .request_name_with_flags(
             "org.freedesktop.impl.portal.desktop.rosec",
-            RequestNameFlags::DoNotQueue.into(),
+            RequestNameFlags::DO_NOT_QUEUE,
         )
         .await
     {
@@ -750,8 +747,7 @@ async fn find_session_by_pid(system_bus: &zbus::Connection) -> Option<String> {
 
     // GetSessionByPID returns the object path of the session, e.g.
     // /org/freedesktop/login1/session/_33  (where _33 is the encoded session ID)
-    let session_path: zbus::zvariant::OwnedObjectPath =
-        proxy.call("GetSessionByPID", &(pid,)).await.ok()?;
+    let session_path: zbus::OwnedObjectPath = proxy.call("GetSessionByPID", &(pid,)).await.ok()?;
 
     // The session ID is the last path component, with systemd D-Bus encoding
     // reversed (_XX → char).  For the common numeric case this is a no-op.
@@ -784,7 +780,7 @@ async fn find_graphical_sessions(system_bus: &zbus::Connection) -> Vec<(String, 
     };
 
     // ListSessions returns a(susso): (session_id, uid, user_name, seat, object_path)
-    let sessions: Vec<(String, u32, String, String, zbus::zvariant::OwnedObjectPath)> =
+    let sessions: Vec<(String, u32, String, String, zbus::OwnedObjectPath)> =
         match proxy.call("ListSessions", &()).await {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -843,7 +839,7 @@ async fn is_graphical_session(system_bus: &zbus::Connection, obj_path: &str) -> 
     };
     // The User property is (uid, object_path).  We only need the uid.
     let sess_uid: u32 = match proxy
-        .get_property::<(u32, zbus::zvariant::OwnedObjectPath)>("User")
+        .get_property::<(u32, zbus::OwnedObjectPath)>("User")
         .await
     {
         Ok((u, _)) => u,
@@ -946,30 +942,30 @@ async fn logind_watcher(
     // PrepareForSleep — fires before suspend/hibernate (always honoured).
     let sleep_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.login1.Manager")?
-        .member("PrepareForSleep")?
-        .path("/org/freedesktop/login1")?
-        .build();
+        .interface("org.freedesktop.login1.Manager")
+        .member("PrepareForSleep")
+        .path("/org/freedesktop/login1")
+        .build()?;
     let mut sleep_stream =
         zbus::MessageStream::for_match_rule(sleep_rule, &system_bus, None).await?;
 
     // SessionRemoved — fires when any session ends (on_logout policy).
     let session_removed_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.login1.Manager")?
-        .member("SessionRemoved")?
-        .path("/org/freedesktop/login1")?
-        .build();
+        .interface("org.freedesktop.login1.Manager")
+        .member("SessionRemoved")
+        .path("/org/freedesktop/login1")
+        .build()?;
     let mut session_removed_stream =
         zbus::MessageStream::for_match_rule(session_removed_rule, &system_bus, None).await?;
 
     // SessionNew — fires when a session is created (dynamic tracking).
     let session_new_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.login1.Manager")?
-        .member("SessionNew")?
-        .path("/org/freedesktop/login1")?
-        .build();
+        .interface("org.freedesktop.login1.Manager")
+        .member("SessionNew")
+        .path("/org/freedesktop/login1")
+        .build()?;
     let mut session_new_stream =
         zbus::MessageStream::for_match_rule(session_new_rule, &system_bus, None).await?;
 
@@ -978,16 +974,16 @@ async fn logind_watcher(
     // number of per-session streams.
     let lock_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.login1.Session")?
-        .member("Lock")?
-        .build();
+        .interface("org.freedesktop.login1.Session")
+        .member("Lock")
+        .build()?;
     let mut lock_stream = zbus::MessageStream::for_match_rule(lock_rule, &system_bus, None).await?;
 
     let unlock_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.login1.Session")?
-        .member("Unlock")?
-        .build();
+        .interface("org.freedesktop.login1.Session")
+        .member("Unlock")
+        .build()?;
     let mut unlock_stream =
         zbus::MessageStream::for_match_rule(unlock_rule, &system_bus, None).await?;
 
@@ -1035,7 +1031,7 @@ async fn logind_watcher(
             msg = session_removed_stream.try_next() => {
                 match msg {
                     Ok(Some(msg)) => {
-                        if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
+                        if let Ok(body) = msg.body().deserialize::<(String, zbus::OwnedObjectPath)>() {
                             let removed_id = &body.0;
                             let removed_path = body.1.to_string();
 
@@ -1091,7 +1087,7 @@ async fn logind_watcher(
                 match msg {
                     Ok(Some(msg)) => {
                         // SessionNew(id: &str, path: OwnedObjectPath)
-                        if let Ok(body) = msg.body().deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
+                        if let Ok(body) = msg.body().deserialize::<(String, zbus::OwnedObjectPath)>() {
                             let new_id = &body.0;
                             let new_path = body.1.to_string();
                             if !session_locks.contains_key(&new_path)

@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes, meta_matches_query};
 use tracing::{debug, info};
+use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
-use zvariant::OwnedObjectPath;
 
 use crate::crypto::aes128_cbc_decrypt;
 use crate::error::SecretServiceError;
@@ -86,7 +86,7 @@ impl SecretCollection {
 
     async fn create_item(
         &self,
-        properties: HashMap<String, zvariant::Value<'_>>,
+        properties: HashMap<String, zbus::Variant<'_>>,
         secret: (OwnedObjectPath, Vec<u8>, Vec<u8>, String),
         replace: bool,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretServiceError> {
@@ -232,8 +232,8 @@ impl SecretCollection {
     }
 }
 
-fn extract_attributes_dict(value: &zvariant::Value<'_>) -> Option<HashMap<String, String>> {
-    let dict = value.downcast_ref::<zvariant::Dict>().ok()?;
+fn extract_attributes_dict(value: &zbus::Variant<'_>) -> Option<HashMap<String, String>> {
+    let dict = value.downcast_ref::<zbus::Dict>().ok()?;
     let mut result = HashMap::new();
     for (k, v) in dict.iter() {
         if let (Some(ks), Some(vs)) = (

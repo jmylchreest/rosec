@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use rosec_core::ProviderError;
 use uuid::Uuid;
+use zbus::Variant as Value;
 use zeroize::Zeroizing;
-use zvariant::Value;
 
 use crate::crypto::{SessionAlgorithm, derive_session_key, generate_dh_keypair};
 
