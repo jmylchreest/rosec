@@ -12,6 +12,11 @@ variable that can add trusted providers. The store paths are retained in the
 host closure. Nix authenticates substituted packages using its own cache trust;
 local builds derive trust from the selected source and build inputs.
 
+The `contrib/aur/PKGBUILD-git` recipe uses this mechanism with
+`/usr/lib/rosec/providers` install paths. It builds providers before the host
+and does not require `wasm_verify = "disabled"`. Users who previously set that workaround
+should remove it to restore verification for other providers.
+
 This trust is deliberately narrow:
 
 - Both WASM and policy hashes must match before any WASM executes.
