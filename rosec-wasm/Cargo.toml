@@ -51,3 +51,6 @@ sign = ["dep:minisign"]
 
 [dev-dependencies]
 minisign = { workspace = true }
+
+[build-dependencies]
+serde_json = { workspace = true }

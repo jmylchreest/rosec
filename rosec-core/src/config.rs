@@ -78,7 +78,7 @@ pub struct ServiceConfig {
     pub wasm_prefer: WasmPreference,
     /// Controls signature verification of WASM provider plugins.
     ///
-    /// - `"required"` (default) — reject plugins without a valid `.wasm.sig`
+    /// - `"required"` (default) — require embedded package hashes or a valid `.wasm.minisig`
     /// - `"disabled"` — skip all verification (local development only)
     #[serde(default)]
     pub wasm_verify: WasmVerify,
