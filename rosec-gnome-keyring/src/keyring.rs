@@ -621,3 +621,102 @@ fn skip_string(cur: &mut Cursor<&[u8]>, ctx: &'static str) -> Result<(), Keyring
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_preserves_unicode_secrets_and_typed_attributes() {
+        let data = "[keyring]\ndisplay-name=Test keyring\nctime=100\nmtime=200\n\
+                    [item7]\nid=42\ntype=2\ndisplay-name=Café\nsecret=synthetic=秘密\n\
+                    [item7:attribute0]\nname=username\nvalue=alice\n\
+                    [item7:attribute1]\nname=port\ntype=uint32\nvalue=443\n";
+        let keyring = parse_keyring_file(data.as_bytes(), &Zeroizing::new(String::new())).unwrap();
+        assert_eq!(keyring.name, "Test keyring");
+        assert_eq!((keyring.ctime, keyring.mtime), (100, 200));
+        assert_eq!(keyring.items.len(), 1);
+        let item = &keyring.items[0];
+        assert_eq!(item.id, 42);
+        assert_eq!(item.item_type, 2);
+        assert_eq!(item.display_name.as_str(), "Café");
+        assert_eq!(item.secret.as_slice(), "synthetic=秘密".as_bytes());
+        assert!(matches!(&item.attributes["username"], AttributeValue::String(s) if s == "alice"));
+        assert!(matches!(
+            item.attributes["port"],
+            AttributeValue::UInt32(443)
+        ));
+    }
+
+    #[test]
+    fn empty_plaintext_keyring_has_no_items() {
+        let keyring = parse_keyring_file(
+            b"[keyring]\ndisplay-name=Empty\n",
+            &Zeroizing::new(String::new()),
+        )
+        .unwrap();
+        assert_eq!(keyring.name, "Empty");
+        assert!(keyring.items.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_truncated_and_unsupported_headers() {
+        let password = Zeroizing::new(String::new());
+        for bytes in [b"".as_slice(), b"not a keyring"] {
+            assert!(matches!(
+                parse_keyring_file(bytes, &password),
+                Err(KeyringError::UnknownFormat)
+            ));
+        }
+        assert!(matches!(
+            parse_keyring_file(MAGIC, &password),
+            Err(KeyringError::TruncatedFile(_))
+        ));
+        let mut header = MAGIC.to_vec();
+        header.extend_from_slice(&[0, 1]);
+        assert!(matches!(
+            parse_keyring_file(&header, &password),
+            Err(KeyringError::UnsupportedVersion(1))
+        ));
+        header.truncate(MAGIC_LEN);
+        header.extend_from_slice(&[0, 0, 1]);
+        assert!(matches!(
+            parse_keyring_file(&header, &password),
+            Err(KeyringError::UnsupportedCrypto(1))
+        ));
+        header[MAGIC_LEN + 2] = 0;
+        header.push(1);
+        assert!(matches!(
+            parse_keyring_file(&header, &password),
+            Err(KeyringError::UnsupportedHash(1))
+        ));
+    }
+
+    #[test]
+    fn binary_secrets_preserve_non_utf8_and_null_bytes() {
+        let data = [0, 0, 0, 3, 0xff, 0, 0x80];
+        assert_eq!(
+            read_byte_array(&mut Cursor::new(data.as_slice()), "secret").unwrap(),
+            [0xff, 0, 0x80]
+        );
+        assert!(matches!(
+            read_string(&mut Cursor::new(data.as_slice()), "label"),
+            Err(KeyringError::Utf8Error(_))
+        ));
+        assert!(matches!(
+            read_byte_array(&mut Cursor::new(&data[..6]), "secret"),
+            Err(KeyringError::TruncatedFile("secret"))
+        ));
+        let null = [0xff; 4];
+        assert!(
+            read_byte_array(&mut Cursor::new(null.as_slice()), "secret")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            read_string(&mut Cursor::new(null.as_slice()), "label")
+                .unwrap()
+                .is_none()
+        );
+    }
+}
