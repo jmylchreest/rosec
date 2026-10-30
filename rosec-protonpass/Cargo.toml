@@ -46,8 +46,3 @@ rosec-core = { path = "../rosec-core" }
 rosec-wasm = { path = "../rosec-wasm" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
-
-# This standalone guest workspace also builds the native Extism test host.
-# Keep its cache security backport aligned with the root workspace.
-[patch.crates-io]
-wasmtime-internal-cache = { path = "../vendor/wasmtime-internal-cache" }
