@@ -197,7 +197,8 @@ fn to_wasm_item(
 
 // ── plugin_manifest ───────────────────────────────────────────────────────────
 
-#[plugin_fn]
+// Export the Extism ABI only on WASM; native unit tests have no Extism host.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
     Ok(Json(PluginManifest {
         kind: "gnome-keyring".into(),
@@ -223,7 +224,7 @@ pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
     let keyring_dir = req
         .options
@@ -285,7 +286,7 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
 
 // ── status ────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
     let guard = STATE.lock();
     let locked = guard.as_ref().map(|s| s.auth.is_none()).unwrap_or(true);
@@ -297,7 +298,7 @@ pub fn status(_: ()) -> FnResult<Json<StatusResponse>> {
 
 // ── unlock ────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> {
     let mut password = Zeroizing::new(req.password);
 
@@ -392,7 +393,7 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
 
 // ── lock ──────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
     let mut guard = STATE.lock();
     if let Some(state) = guard.as_mut() {
@@ -409,7 +410,7 @@ pub fn lock(_: ()) -> FnResult<Json<SimpleResponse>> {
 
 // ── list_items ────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
     let Some(state) = guard.as_ref() else {
@@ -450,7 +451,7 @@ pub fn list_items(_: ()) -> FnResult<Json<ItemListResponse>> {
 
 // ── search ────────────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>> {
     let guard = STATE.lock();
     let Some(state) = guard.as_ref() else {
@@ -496,7 +497,7 @@ pub fn search(Json(req): Json<SearchRequest>) -> FnResult<Json<ItemListResponse>
 
 // ── get_item_attributes ───────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_item_attributes(
     Json(req): Json<ItemIdRequest>,
 ) -> FnResult<Json<ItemAttributesResponse>> {
@@ -562,7 +563,7 @@ pub fn get_item_attributes(
 
 // ── get_secret_attr ───────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<SecretAttrResponse>> {
     let guard = STATE.lock();
     let Some(state) = guard.as_ref() else {
@@ -632,7 +633,7 @@ pub fn get_secret_attr(Json(req): Json<SecretAttrRequest>) -> FnResult<Json<Secr
 
 // ── capabilities ─────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
     // Read-only: no Sync, no Write, no SSH, no KeyWrapping, no PasswordChange.
     Ok(Json(CapabilitiesResponse {
@@ -642,7 +643,7 @@ pub fn capabilities(_: ()) -> FnResult<Json<CapabilitiesResponse>> {
 
 // ── attribute_descriptors ─────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn attribute_descriptors(_: ()) -> FnResult<Json<AttributeDescriptorsResponse>> {
     fn desc(
         name: &str,
@@ -717,7 +718,7 @@ pub fn attribute_descriptors(_: ()) -> FnResult<Json<AttributeDescriptorsRespons
 
 // ── auth_fields ───────────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn auth_fields(_: ()) -> FnResult<Json<AuthFieldsResponse>> {
     // The standard password field provided by the host is sufficient.
     // GNOME Keyring doesn't use 2FA or extra auth fields.
@@ -726,7 +727,7 @@ pub fn auth_fields(_: ()) -> FnResult<Json<AuthFieldsResponse>> {
 
 // ── registration_info ─────────────────────────────────────────────────────────
 
-#[plugin_fn]
+#[cfg_attr(target_family = "wasm", plugin_fn)]
 pub fn registration_info(_: ()) -> FnResult<Json<RegistrationInfoResponse>> {
     // No first-time registration needed — just a password.
     Ok(Json(RegistrationInfoResponse {
