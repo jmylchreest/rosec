@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-keepassxc-file"
-version = "0.0.36"
+version = "0.0.37"
 dependencies = [
  "base64 0.23.1",
  "chrono",

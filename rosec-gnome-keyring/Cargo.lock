@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-gnome-keyring"
-version = "0.0.36"
+version = "0.0.37"
 dependencies = [
  "aes",
  "base64 0.23.1",
