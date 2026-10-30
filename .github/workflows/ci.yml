@@ -97,6 +97,9 @@ jobs:
             rosec-keepassxc-file
             rosec-protonpass
 
+      - name: Verify AUR WASM build flag isolation
+        run: python3 tests/test_aur_wasm_flags.py
+
       - name: Build bitwarden-pm provider
         working-directory: rosec-bitwarden-pm
         run: cargo build --target wasm32-wasip1 --release
