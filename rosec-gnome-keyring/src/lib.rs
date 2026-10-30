@@ -776,3 +776,47 @@ fn collect_keyring_paths(config: &GuestConfig) -> Result<Vec<(String, String)>, 
     paths.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(paths)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_ids_roundtrip_and_reject_invalid_numbers() {
+        for name in ["login", "folder/keyring", "秘密"] {
+            assert_eq!(parse_item_id(&item_id(name, 42)), Some((name, 42)));
+        }
+        for id in [
+            "login",
+            "login/",
+            "login/-1",
+            "login/nope",
+            "login/4294967296",
+        ] {
+            assert!(parse_item_id(id).is_none());
+        }
+    }
+
+    #[test]
+    fn metadata_maps_attributes_without_exposing_the_secret() {
+        let keyring = keyring::parse_keyring_file(
+            b"[keyring]\n[item1]\ndisplay-name=Example\ntype=2\nsecret=synthetic-secret-marker\nctime=100\n[item1:attribute0]\nname=xdg:schema\nvalue=org.example.Login\n[item1:attribute1]\nname=port\ntype=uint32\nvalue=443\n",
+            &Zeroizing::new(String::new()),
+        ).unwrap();
+        let meta = to_wasm_item("test-provider", "login", &keyring.items[0]);
+        assert_eq!(meta.id, "login/1");
+        assert_eq!(meta.label, "Example");
+        assert_eq!(meta.attributes[ATTR_PROVIDER], "test-provider");
+        assert_eq!(meta.attributes[ATTR_KEYRING], "login");
+        assert_eq!(meta.attributes[ATTR_TYPE], "network");
+        assert_eq!(meta.attributes[ATTR_XDG_SCHEMA], "org.example.Login");
+        assert_eq!(meta.attributes["port"], "443");
+        assert_eq!(meta.created_epoch_secs, Some(100));
+        assert_eq!(meta.modified_epoch_secs, None);
+        assert!(
+            !serde_json::to_string(&meta)
+                .unwrap()
+                .contains("synthetic-secret-marker")
+        );
+    }
+}
