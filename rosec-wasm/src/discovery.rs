@@ -3,7 +3,7 @@
 //!
 //! # Search paths
 //!
-//! Providers are discovered from two locations (in order):
+//! Providers are discovered from the build-time package manifest, then:
 //!
 //! 1. **System-wide**: `/usr/lib/rosec/providers/` — for distro packages
 //! 2. **User-local**: `$XDG_DATA_HOME/rosec/providers/` (default
@@ -146,15 +146,36 @@ pub fn scan_plugins(
 
     let mut registry = PluginRegistry::default();
 
+    // Package closures may live outside /usr (e.g. Nix). Only exact embedded
+    // paths gain package trust; neighbouring files still require signatures.
+    let mut package_dirs = std::collections::BTreeSet::new();
+    for entry in crate::packaged::PROVIDERS {
+        if let Some(dir) = Path::new(entry.path).parent() {
+            package_dirs.insert(dir);
+        }
+    }
+    for dir in &package_dirs {
+        scan_directory(
+            dir,
+            &mut registry,
+            PluginSource::System,
+            preference,
+            verify,
+            user_keys,
+        );
+    }
+
     let system_dir = PathBuf::from(SYSTEM_PLUGIN_DIR);
-    scan_directory(
-        &system_dir,
-        &mut registry,
-        PluginSource::System,
-        preference,
-        verify,
-        user_keys,
-    );
+    if !package_dirs.contains(system_dir.as_path()) {
+        scan_directory(
+            &system_dir,
+            &mut registry,
+            PluginSource::System,
+            preference,
+            verify,
+            user_keys,
+        );
+    }
 
     if let Some(user_dir) = user_plugin_dir() {
         scan_directory(
@@ -236,6 +257,11 @@ fn scan_directory(
                 }
             };
         match &outcome {
+            VerifyOutcome::Verified(VerifiedBy::PackageDigest) => info!(
+                wasm = %wasm_name,
+                path = %path.display(),
+                "WASM plugin authenticated by embedded package hashes",
+            ),
             VerifyOutcome::Verified(VerifiedBy::ReleaseKey) => info!(
                 wasm = %wasm_name,
                 path = %path.display(),
@@ -394,6 +420,9 @@ pub struct PluginBundle {
 /// Which trust anchor accepted a bundle's signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifiedBy {
+    /// Exact path and both file hashes embedded by the distro at host build time.
+    /// This delegates authenticity to the package manager, not a release signature.
+    PackageDigest,
     /// One of the release keys embedded in this build
     /// ([`crate::keys::WASM_SIGNING_PUBKEYS`]).
     ReleaseKey,
@@ -405,6 +434,7 @@ pub enum VerifiedBy {
 impl std::fmt::Display for VerifiedBy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PackageDigest => write!(f, "embedded package hashes (package-manager trust)"),
             Self::ReleaseKey => write!(f, "embedded rosec release key"),
             Self::UserKey { name } => write!(f, "user-trusted key '{name}'"),
         }
@@ -451,17 +481,22 @@ impl PluginBundle {
     /// Verify the detached `.minisig` over `(wasm_bytes || policy_bytes)`
     /// against the embedded release keys.
     pub fn verify_signature(&self) -> Result<(), String> {
-        self.verify_signature_trusted(&[]).map(|_| ())
+        self.verify_against(crate::keys::WASM_SIGNING_PUBKEYS, &[])
+            .map(|_| ())
     }
 
-    /// Verify against the embedded release keys first, then any
+    /// Authenticate exact packaged paths/bytes against build-time hashes,
+    /// otherwise verify against the embedded release keys, then any
     /// user-configured trust anchors, reporting which one accepted the
-    /// signature. A user key is only consulted when its `kinds` scope is
+    /// bundle. A mismatched packaged hash fails closed. A user key is only consulted when its `kinds` scope is
     /// empty or contains this bundle's policy kind.
     pub fn verify_signature_trusted(
         &self,
         user_keys: &[WasmTrustedKey],
     ) -> Result<VerifiedBy, String> {
+        if crate::packaged::verify(self, crate::packaged::PROVIDERS)? {
+            return Ok(VerifiedBy::PackageDigest);
+        }
         self.verify_against(crate::keys::WASM_SIGNING_PUBKEYS, user_keys)
     }
 
@@ -576,9 +611,9 @@ impl PluginBundle {
 /// only bypasses the cryptographic signature check, never the declarative
 /// policy. There is no manifest-declared fallback path.
 ///
-/// - **`Required` (default)** — `.wasm.minisig` and `.wasm.policy.toml`
-///   must both exist. The signature covers `(wasm_bytes || policy_bytes)`;
-///   substitution of either file invalidates it.
+/// - **`Required` (default)** — authenticate exact package paths using embedded
+///   hashes of both files, or require a `.wasm.minisig` covering
+///   `(wasm_bytes || policy_bytes)`. A package hash mismatch fails closed.
 /// - **`Disabled` (dev)** — `.wasm.policy.toml` must exist; the
 ///   `.minisig` is not required and any signature verification is
 ///   skipped. A loud `warn!` is logged at scan time.

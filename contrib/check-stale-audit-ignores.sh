@@ -77,7 +77,7 @@ for id in "${ignored[@]}"; do
 done
 
 wasm_matched=""
-for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file; do
+for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass; do
   [[ -f "$crate/Cargo.lock" ]] || continue
   wasm_matched+=$'\n'$(matched "$repo_root/$crate/Cargo.lock")
 done
