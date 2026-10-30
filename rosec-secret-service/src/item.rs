@@ -6,7 +6,7 @@ use rosec_core::{Capability, ItemMeta, Provider, ProviderError};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
-use zvariant::{ObjectPath, OwnedObjectPath};
+use zbus::{ObjectPath, OwnedObjectPath};
 
 use crate::error::SecretServiceError;
 use crate::service::{SecretStruct, build_secret_value, to_object_path};
@@ -185,7 +185,7 @@ impl SecretItem {
                 Arc::clone(&self.state.service_state),
             );
             let conn = self.state.service_state.conn();
-            let _: bool = conn
+            let _ = conn
                 .object_server()
                 .at(prompt_path.clone(), prompt_obj)
                 .await
@@ -350,7 +350,7 @@ mod tests {
             .await;
         assert!(invalid.is_err());
 
-        let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
+        let session = match sessions.open_session("plain", &zbus::Variant::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
@@ -378,7 +378,7 @@ mod tests {
         };
         let item = SecretItem::new(state);
 
-        let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
+        let session = match sessions.open_session("plain", &zbus::Variant::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };
@@ -419,7 +419,7 @@ mod tests {
 
         assert!(!item.locked());
 
-        let session = match sessions.open_session("plain", &zvariant::Value::from("")) {
+        let session = match sessions.open_session("plain", &zbus::Variant::from("")) {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),
         };

@@ -16,7 +16,6 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 zbus = { workspace = true }
-zvariant = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 aes = { workspace = true }

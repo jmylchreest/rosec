@@ -2848,7 +2848,7 @@ mod tests {
         // Open session via SessionManager directly
         let session = match state
             .sessions
-            .open_session("plain", &zvariant::Value::from(""))
+            .open_session("plain", &zbus::Variant::from(""))
         {
             Ok((_, path)) => path,
             Err(err) => panic!("open_session failed: {err}"),

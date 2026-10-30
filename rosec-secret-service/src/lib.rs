@@ -27,7 +27,7 @@ mod tests {
     #[test]
     fn opens_plain_session() {
         let sessions = std::sync::Arc::new(crate::session::SessionManager::new());
-        let (output, path) = match sessions.open_session("plain", &zvariant::Value::from("")) {
+        let (output, path) = match sessions.open_session("plain", &zbus::Variant::from("")) {
             Ok(result) => result,
             Err(err) => panic!("open session failed: {err}"),
         };

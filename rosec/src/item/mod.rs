@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use crate::cli::{Format, ItemCommands, ItemListArgs};
 

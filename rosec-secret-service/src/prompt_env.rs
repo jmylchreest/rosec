@@ -67,7 +67,7 @@ fn discover_display_env_from_systemd(
             .await?;
         // The reply body is a VARIANT wrapping an array of strings (as).
         let body = reply.body();
-        let variant: zbus::zvariant::OwnedValue = body.deserialize()?;
+        let variant: zbus::OwnedVariant = body.deserialize()?;
         let env_strings: Vec<String> = variant.try_into().unwrap_or_default();
         Ok::<Vec<String>, zbus::Error>(env_strings)
     });

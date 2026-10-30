@@ -131,7 +131,7 @@ impl SecretPrompt {
     ) -> zbus::fdo::Result<()> {
         self.state.cancel_prompt(&self.path);
         // Dismissed result is an empty string per the Secret Service spec.
-        Self::completed(&ctxt, true, &zvariant::Value::from(""))
+        Self::completed(&ctxt, true, &zbus::Variant::from(""))
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("signal: {e}")))?;
         Ok(())
@@ -144,7 +144,7 @@ impl SecretPrompt {
     pub async fn completed(
         ctxt: &SignalEmitter<'_>,
         dismissed: bool,
-        result: &zvariant::Value<'_>,
+        result: &zbus::Variant<'_>,
     ) -> zbus::Result<()>;
 }
 
@@ -165,7 +165,7 @@ async fn run_prompt_task(
     // prompt object.  The signal MUST be emitted before the object is
     // deregistered so that D-Bus clients receive it.
     async fn dismiss_and_finish(state: &ServiceState, prompt_path: &str, ctxt: &SignalEmitter<'_>) {
-        if let Err(e) = SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await {
+        if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
         state.finish_prompt(prompt_path);
@@ -506,7 +506,7 @@ async fn on_unlock_success(
         Some(PendingOperation::Unlock) | None => {
             // Plain unlock — return ao (array of object paths) of the
             // unlocked collection, per the Secret Service spec.
-            Some(zvariant::Value::from(vec![to_object_path(
+            Some(zbus::Variant::from(vec![to_object_path(
                 "/org/freedesktop/secrets/collection/default",
             )]))
         }
@@ -521,7 +521,7 @@ async fn on_unlock_success(
         }
         None => {
             // Deferred operation failed after unlock — dismiss.
-            if let Err(e) = SecretPrompt::completed(ctxt, true, &zvariant::Value::from("")).await {
+            if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
                 tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
             }
         }
@@ -542,7 +542,7 @@ async fn execute_deferred_create(
     provider_id: &str,
     item: NewItem,
     replace: bool,
-) -> Option<zvariant::Value<'static>> {
+) -> Option<zbus::Variant<'static>> {
     let provider = state.provider_by_id(provider_id)?;
     let provider_for_spawn = Arc::clone(&provider);
     let item_clone = item.clone();
@@ -573,7 +573,7 @@ async fn execute_deferred_create(
         tracing::warn!(error = %e, "failed to register deferred item in cache");
     }
 
-    Some(zvariant::Value::from(to_object_path(&item_path)))
+    Some(zbus::Variant::from(to_object_path(&item_path)))
 }
 
 /// Execute a deferred `DeleteItem` after successful unlock.
@@ -584,7 +584,7 @@ async fn execute_deferred_delete(
     provider_id: &str,
     item_id: &str,
     item_path: &str,
-) -> Option<zvariant::Value<'static>> {
+) -> Option<zbus::Variant<'static>> {
     let provider = state.provider_by_id(provider_id)?;
     let id = item_id.to_string();
     let provider_for_spawn = Arc::clone(&provider);
@@ -609,7 +609,7 @@ async fn execute_deferred_delete(
 
     state.remove_deleted_item(item_path);
 
-    Some(zvariant::Value::from(to_object_path("/")))
+    Some(zbus::Variant::from(to_object_path("/")))
 }
 
 /// Resolve the calling process from the D-Bus message header.

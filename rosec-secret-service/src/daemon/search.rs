@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
-use zvariant::OwnedObjectPath;
 
 use super::log_dbus_caller;
 use crate::service::to_object_path;

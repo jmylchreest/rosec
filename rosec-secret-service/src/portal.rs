@@ -16,8 +16,8 @@ use zbus::Connection;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::message::Header;
+use zbus::{ObjectPath, OwnedVariant as OwnedValue};
 use zeroize::Zeroizing;
-use zvariant::{ObjectPath, OwnedValue};
 
 use rosec_core::{ItemType, NewItem, ProviderError, SecretBytes};
 
@@ -91,7 +91,7 @@ impl PortalSecret {
         &self,
         _handle: ObjectPath<'_>,
         app_id: &str,
-        fd: zvariant::OwnedFd,
+        fd: zbus::OwnedFd,
         _options: HashMap<String, OwnedValue>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &Connection,
@@ -348,7 +348,7 @@ impl PortalSecret {
     }
 
     /// Write the secret bytes to the file descriptor and close it.
-    fn write_to_fd(&self, fd: zvariant::OwnedFd, secret: &[u8]) -> Result<(), FdoError> {
+    fn write_to_fd(&self, fd: zbus::OwnedFd, secret: &[u8]) -> Result<(), FdoError> {
         use std::io::Write;
         use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -616,9 +616,9 @@ mod tests {
         let (r, w) = nix_pipe();
         let portal_secret = &[0xDE, 0xAD, 0xBE, 0xEF];
 
-        // Wrap the write fd as a zvariant::OwnedFd (same type D-Bus passes).
+        // Wrap the write fd as a zbus::OwnedFd (same type D-Bus passes).
         let owned: std::os::fd::OwnedFd = unsafe { std::os::fd::OwnedFd::from_raw_fd(w) };
-        let zvar_fd = zvariant::OwnedFd::from(owned);
+        let zvar_fd = zbus::OwnedFd::from(owned);
 
         {
             use std::io::Write;
