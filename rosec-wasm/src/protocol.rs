@@ -114,6 +114,7 @@ pub struct SimpleResponse {
 /// current provider.
 ///
 /// The host uses `prompt_kind` to decide how to collect the credential:
+/// - `"totp"` — six-digit numeric authenticator code (segmented GUI input).
 /// - `"text"` — prompt for a text string (TOTP code, email code, YubiKey OTP,
 ///   Duo passcode).
 /// - `"fido2"` — perform a FIDO2/WebAuthn ceremony on the host (requires

@@ -1007,7 +1007,7 @@ fn bitwarden_2fa_methods(providers: &[u8], email_hint: Option<&str>) -> Vec<TwoF
         .iter()
         .filter_map(|&code| {
             let (id, label, prompt_kind) = match code {
-                0 => ("0", "Authenticator app (TOTP)", "text"),
+                0 => ("0", "Authenticator app (TOTP)", "totp"),
                 1 => {
                     // Enhance label with email hint when available.
                     let label = match email_hint {

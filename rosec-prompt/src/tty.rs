@@ -144,7 +144,7 @@ pub(crate) fn run(request: PromptRequest) -> Result<()> {
             field.label.as_str()
         };
         let value: Zeroizing<String> = match field.kind {
-            FieldKind::Password | FieldKind::Secret => {
+            FieldKind::Password | FieldKind::Secret | FieldKind::Totp => {
                 let prompt = format!("{label}: ");
                 Zeroizing::new(
                     rpassword::prompt_password(&prompt)

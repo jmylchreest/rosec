@@ -1,5 +1,6 @@
 //! GUI mode dispatcher: picks the right Iced application for the request.
 
+mod otp;
 mod prompt;
 mod qr;
 mod select;
