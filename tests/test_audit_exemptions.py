@@ -11,7 +11,7 @@ ADVISORY = "RUSTSEC-2026-0001"
 
 
 class AuditExemptionTests(unittest.TestCase):
-    def run_check(self, report, status=0, provider_failure=False):
+    def run_check(self, report, status=0, provider_failure=False, proton_report=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q", directory], check=True)
@@ -20,6 +20,11 @@ class AuditExemptionTests(unittest.TestCase):
             (root / ".github/workflows").mkdir(parents=True)
             (root / ".github/workflows/audit.yml").write_text("")
             (root / "Cargo.lock").touch()
+            if proton_report is not None:
+                (root / ".cargo/audit.toml").write_text("ignore = []\n")
+                (root / ".github/workflows/audit.yml").write_text(f"--ignore {ADVISORY}\n")
+                (root / "rosec-protonpass").mkdir()
+                (root / "rosec-protonpass/Cargo.lock").touch()
             if provider_failure:
                 (root / "rosec-bitwarden-pm").mkdir()
                 (root / "rosec-bitwarden-pm/Cargo.lock").touch()
@@ -27,12 +32,14 @@ class AuditExemptionTests(unittest.TestCase):
                 '#!/usr/bin/env python3\nimport os, sys\n'
                 'if os.environ["PROVIDER_FAILURE"] == "1" and "rosec-bitwarden-pm" in sys.argv[3]:\n'
                 '    print("provider audit failed", file=sys.stderr)\n    sys.exit(2)\n'
-                'print(os.environ["AUDIT_REPORT"])\n'
+                'report = os.environ["PROTON_REPORT"] if "rosec-protonpass" in sys.argv[3] else os.environ["AUDIT_REPORT"]\n'
+                'print(report)\n'
                 'sys.exit(int(os.environ["AUDIT_STATUS"]))\n'
             )
             (root / "cargo").chmod(0o755)
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
                        AUDIT_REPORT=report, AUDIT_STATUS=str(status),
+                       PROTON_REPORT=proton_report or report,
                        PROVIDER_FAILURE=str(int(provider_failure)))
             return subprocess.run(["bash", str(SCRIPT)], cwd=root, env=env,
                                   text=True, capture_output=True)
@@ -42,6 +49,14 @@ class AuditExemptionTests(unittest.TestCase):
 
     def test_matching_advisory_accepts_audit_vulnerability_exit(self):
         result = self.run_check(self.matching_report(), status=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("All audit exemptions still apply", result.stdout)
+
+    def test_exemption_matching_only_protonpass_is_not_stale(self):
+        result = self.run_check(
+            '{"vulnerabilities": {"list": []}}',
+            proton_report=self.matching_report(),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("All audit exemptions still apply", result.stdout)
 
