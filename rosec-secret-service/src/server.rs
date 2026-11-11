@@ -168,6 +168,7 @@ async fn watch_session_owners(conn: &Connection, state: &Arc<ServiceState>) -> z
     let mut changes = proxy.receive_name_owner_changed().await?;
     let conn = conn.clone();
     let sessions = Arc::clone(&state.sessions);
+    let weak_state = Arc::downgrade(state);
     state.spawn_on_tokio(async move {
         let bus = conn.server_guid().to_string();
         loop {
@@ -181,6 +182,9 @@ async fn watch_session_owners(conn: &Connection, state: &Arc<ServiceState>) -> z
             if !args.name().as_str().starts_with(':') || args.new_owner().is_some() {
                 continue;
             }
+            if let Some(state) = weak_state.upgrade() {
+                state.cancel_owner_prompts(&bus, Some(args.name().as_str()));
+            }
             for path in sessions.remove_owner(&bus, Some(args.name().as_str())) {
                 let _ = conn
                     .object_server()
@@ -190,6 +194,9 @@ async fn watch_session_owners(conn: &Connection, state: &Arc<ServiceState>) -> z
         }
         // A closed bus cannot have any usable sessions, even if individual
         // NameOwnerChanged messages were lost during shutdown.
+        if let Some(state) = weak_state.upgrade() {
+            state.cancel_owner_prompts(&bus, None);
+        }
         for path in sessions.remove_owner(&bus, None) {
             let _ = conn
                 .object_server()

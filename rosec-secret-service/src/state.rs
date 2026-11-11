@@ -568,6 +568,51 @@ impl ServiceState {
         self.prompts.allocate_with_operation(provider_id, op)
     }
 
+    /// Register on the initiating connection, and close the disconnect race
+    /// between allocating state and publishing the object.
+    pub async fn register_prompt(
+        self: &Arc<Self>,
+        conn: &Connection,
+        owner: crate::session::SessionOwner,
+        provider_id: String,
+        op: crate::prompt::PendingOperation,
+    ) -> Result<String, FdoError> {
+        let path = self.prompts.allocate_owned(
+            op,
+            crate::prompt_manager::PromptRoute {
+                owner: owner.clone(),
+                conn: conn.clone(),
+            },
+        );
+        let object = crate::prompt::SecretPrompt::new(path.clone(), provider_id, Arc::clone(self));
+        if let Err(error) = conn.object_server().at(path.clone(), object).await {
+            self.prompts.remove(&path);
+            return Err(map_zbus_error(error));
+        }
+        let live = match zbus::fdo::DBusProxy::new(conn).await {
+            Ok(proxy) => match owner.name.as_str().try_into() {
+                Ok(name) => proxy.name_has_owner(name).await.unwrap_or(false),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        if !live || !self.prompts.contains_path(&path) {
+            self.cancel_prompt(&path);
+            let _ = conn
+                .object_server()
+                .remove::<crate::prompt::SecretPrompt, _>(path.as_str())
+                .await;
+            return Err(FdoError::Failed("prompt owner disconnected".into()));
+        }
+        Ok(path)
+    }
+
+    pub fn cancel_owner_prompts(&self, bus: &str, name: Option<&str>) {
+        for path in self.prompts.owner_paths(bus, name) {
+            self.cancel_prompt(&path);
+        }
+    }
+
     /// Retrieve and remove the pending operation for a completed prompt.
     pub fn take_pending_operation(
         &self,
@@ -583,6 +628,7 @@ impl ServiceState {
     /// Kill the active prompt subprocess (if any) and deregister the D-Bus
     /// object.  Safe to call after the child has exited.
     pub fn cancel_prompt(&self, prompt_path: &str) -> bool {
+        let route = self.prompts.route(prompt_path);
         let Some(pid) = self.prompts.remove_and_get_pid(prompt_path) else {
             return false;
         };
@@ -590,15 +636,25 @@ impl ServiceState {
             child.terminate();
             tracing::debug!(prompt = %prompt_path, pid = child.pid, "prompt child terminated");
         }
-        let conn = self.conn();
+        let conn = route
+            .as_ref()
+            .map(|route| route.conn.clone())
+            .unwrap_or_else(|| self.conn());
         let path = prompt_path.to_string();
         self.spawn_on_tokio(async move {
-            if let Ok(emitter) = zbus::object_server::SignalEmitter::new(&conn, path.as_str())
-                && let Err(error) =
+            if let Ok(mut emitter) = zbus::object_server::SignalEmitter::new(&conn, path.as_str()) {
+                if let Some(route) = &route {
+                    let Ok(destination) = route.owner.name.as_str().try_into() else {
+                        return;
+                    };
+                    emitter = emitter.set_destination(destination);
+                }
+                if let Err(error) =
                     crate::prompt::SecretPrompt::completed(&emitter, true, &zbus::Variant::from(""))
                         .await
-            {
-                tracing::debug!(%error, "failed to emit prompt cancellation");
+                {
+                    tracing::debug!(%error, "failed to emit prompt cancellation");
+                }
             }
             let _ = conn
                 .object_server()
@@ -610,12 +666,17 @@ impl ServiceState {
 
     /// Remove a completed prompt from the registry without killing the child.
     pub fn finish_prompt(&self, prompt_path: &str) {
-        self.prompts.remove(prompt_path);
-        self.deregister_prompt_object(prompt_path);
+        let conn = self
+            .prompts
+            .route(prompt_path)
+            .map(|route| route.conn)
+            .unwrap_or_else(|| self.conn());
+        self.finish_prompt_on(&conn, prompt_path);
     }
 
-    fn deregister_prompt_object(&self, prompt_path: &str) {
-        let conn = self.conn();
+    pub(crate) fn finish_prompt_on(&self, conn: &Connection, prompt_path: &str) {
+        self.prompts.remove(prompt_path);
+        let conn = conn.clone();
         let path = prompt_path.to_string();
         self.spawn_on_tokio(async move {
             if let Err(e) = conn

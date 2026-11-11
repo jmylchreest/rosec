@@ -67,7 +67,14 @@ impl PromptChild {
     }
 }
 
+#[derive(Clone)]
+pub struct PromptRoute {
+    pub owner: crate::session::SessionOwner,
+    pub conn: zbus::Connection,
+}
+
 struct PromptEntry {
+    route: Option<PromptRoute>,
     pid: Option<PromptChild>,
     tty_cancel_writer: Option<std::os::unix::net::UnixStream>,
     pending: Option<PendingOperation>,
@@ -102,6 +109,14 @@ impl PromptManager {
     }
 
     pub fn allocate_with_operation(&self, _provider_id: &str, op: PendingOperation) -> String {
+        self.allocate_inner(op, None)
+    }
+
+    pub fn allocate_owned(&self, op: PendingOperation, route: PromptRoute) -> String {
+        self.allocate_inner(op, Some(route))
+    }
+
+    fn allocate_inner(&self, op: PendingOperation, route: Option<PromptRoute>) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         let path = format!("/org/freedesktop/secrets/prompt/p{n}");
         self.active
@@ -110,6 +125,7 @@ impl PromptManager {
             .insert(
                 path.clone(),
                 PromptEntry {
+                    route,
                     pid: None,
                     tty_cancel_writer: None,
                     pending: Some(op),
@@ -119,6 +135,43 @@ impl PromptManager {
                 },
             );
         path
+    }
+
+    pub fn route(&self, path: &str) -> Option<PromptRoute> {
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)?
+            .route
+            .clone()
+    }
+
+    pub fn authorize(
+        &self,
+        path: &str,
+        caller: &crate::session::SessionOwner,
+    ) -> zbus::fdo::Result<PromptRoute> {
+        self.route(path)
+            .filter(|route| route.owner == *caller)
+            .ok_or_else(|| {
+                zbus::fdo::Error::AccessDenied(
+                    "prompt belongs to another caller or has completed".into(),
+                )
+            })
+    }
+
+    pub fn owner_paths(&self, bus: &str, name: Option<&str>) -> Vec<String> {
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, entry)| {
+                entry.route.as_ref().is_some_and(|route| {
+                    route.owner.bus == bus && name.is_none_or(|name| name == route.owner.name)
+                })
+            })
+            .map(|(path, _)| path.clone())
+            .collect()
     }
 
     /// Claim the one permitted execution of this prompt.
