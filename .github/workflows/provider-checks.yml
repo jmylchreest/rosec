@@ -7,10 +7,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Keep dependency installation on a known OS release rather than allowing
+# ubuntu-latest migrations to change the runner and APT repositories implicitly.
 jobs:
   provider:
     name: ${{ matrix.provider }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +30,7 @@ jobs:
       - name: Install host integration dependencies
         if: matrix.provider == 'rosec-protonpass' || matrix.provider == 'rosec-keepassxc-file'
         run: |
-          sudo apt-get update -qq
+          sudo apt-get -o APT::Update::Error-Mode=any update -qq
           sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
