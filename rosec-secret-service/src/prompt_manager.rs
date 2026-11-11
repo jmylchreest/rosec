@@ -197,6 +197,14 @@ impl PromptManager {
         entry.pending.take()
     }
 
+    pub(crate) fn unlock_targets(&self, path: &str) -> Option<Vec<String>> {
+        let active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        match active.get(path)?.pending.as_ref()? {
+            PendingOperation::UnlockTargets(paths) => Some(paths.clone()),
+            _ => None,
+        }
+    }
+
     pub fn take_pending_operation(&self, path: &str) -> Option<PendingOperation> {
         self.active
             .lock()
