@@ -89,6 +89,8 @@ impl SecretCollection {
         properties: HashMap<String, zbus::Variant<'_>>,
         secret: (OwnedObjectPath, Vec<u8>, Vec<u8>, String),
         replace: bool,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretServiceError> {
         debug!("CreateItem called (replace={replace})");
 
@@ -105,7 +107,10 @@ impl SecretCollection {
         let (session_path, parameters, secret_value, _content_type) = secret;
         let session_path = session_path.as_str().to_string();
 
-        let encoding = self.state.sessions.lookup(&session_path)?;
+        let encoding = self.state.sessions.lookup_for(
+            &session_path,
+            &crate::session::SessionOwner::from_request(conn, &header)?,
+        )?;
 
         // Hold plaintext only in zeroizing buffers — no intermediate plain Vec.
         let secret = if let Some(key) = encoding.aes_key() {

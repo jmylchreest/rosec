@@ -51,26 +51,54 @@ impl SecretService {
 
     async fn open_session(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
         algorithm: &str,
         input: zbus::Variant<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(zbus::Variant<'static>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "OpenSession", &header);
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| FdoError::Failed(e.to_string()))?;
         let (output, path) = self
             .state
             .sessions
-            .open_session(algorithm, &input)
+            .open_session_for(algorithm, &input, owner.clone())
             .map_err(map_provider_error)?;
 
         // Register the org.freedesktop.Secret.Session object at the session path
         let session_obj = SecretSession::new(path.clone(), Arc::clone(&self.state.sessions));
-        let conn = self.state.conn();
         let server = conn.object_server();
-        server
-            .at(path.clone(), session_obj)
-            .await
-            .map_err(map_zbus_error)?;
-
+        if let Err(error) = server.at(path.clone(), session_obj).await {
+            let _ = self.state.sessions.close_session(&path);
+            return Err(map_zbus_error(error));
+        }
+        // The watcher may have processed a disconnect before insertion or
+        // registration. Check after registration, then let the watcher own
+        // subsequent disconnects. Both cleanup paths are idempotent.
+        let live = match zbus::fdo::DBusProxy::new(conn).await {
+            Ok(proxy) => proxy
+                .name_has_owner(
+                    owner
+                        .name
+                        .as_str()
+                        .try_into()
+                        .map_err(|e: zbus::Error| FdoError::Failed(e.to_string()))?,
+                )
+                .await
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !live
+            || !self
+                .state
+                .sessions
+                .is_valid(&path)
+                .map_err(map_provider_error)?
+        {
+            let _ = self.state.sessions.close_session(&path);
+            let _ = server.remove::<SecretSession, _>(path.as_str()).await;
+            return Err(FdoError::Failed("session owner disconnected".into()));
+        }
         Ok((output, to_object_path(&path)))
     }
 
@@ -94,17 +122,20 @@ impl SecretService {
 
     async fn get_secrets(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
         items: Vec<OwnedObjectPath>,
         session: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, zbus::BoxDBusError> {
         log_dbus_caller("service", "GetSecrets", &header);
         self.state.touch_activity();
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| Box::new(e) as zbus::BoxDBusError)?;
         let session = session.as_str();
         let encoding = self
             .state
             .sessions
-            .lookup(session)
+            .lookup_for(session, &owner)
             .map_err(|error| Box::new(error) as zbus::BoxDBusError)?;
         let item_paths: Vec<String> = items.iter().map(|p| p.as_str().to_string()).collect();
         let resolved = self.state.resolve_items(None, Some(&item_paths)).await?;
@@ -146,16 +177,19 @@ impl SecretService {
         Ok(secrets)
     }
 
-    fn close_session(
+    async fn close_session(
         &self,
         session: zbus::ObjectPath<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<(), FdoError> {
-        log_dbus_caller("service", "CloseSession", &header);
-        self.state
-            .sessions
-            .close_session(session.as_str())
-            .map_err(map_provider_error)
+    ) -> Result<(), crate::error::SecretServiceError> {
+        let owner = crate::session::SessionOwner::from_request(conn, &header)?;
+        self.state.sessions.close_for(session.as_str(), &owner)?;
+        let _ = conn
+            .object_server()
+            .remove::<SecretSession, _>(session.as_str())
+            .await;
+        Ok(())
     }
 
     fn read_alias(
