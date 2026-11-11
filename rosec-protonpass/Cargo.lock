@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-core"
-version = "0.0.38"
+version = "0.0.39"
 dependencies = [
  "aes",
  "anyhow",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-protonpass"
-version = "0.0.38"
+version = "0.0.39"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-wasm"
-version = "0.0.38"
+version = "0.0.39"
 dependencies = [
  "aes",
  "anyhow",
