@@ -43,6 +43,10 @@ pub struct StatusResponse {
 /// Sent to `unlock`.
 #[derive(Serialize, Deserialize)]
 pub struct UnlockRequest {
+    /// Optional decrypted cache for authentication hints only; never unlocks the vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_blob_b64: Option<zeroize::Zeroizing<String>>,
+
     /// The user's master password.
     pub password: String,
     /// Additional registration fields (for first-time setup).
@@ -487,7 +491,7 @@ fn default_option_kind() -> String {
 /// Returned by `export_cache` — the guest serialises its current in-memory
 /// state into an opaque blob.  The host wraps this in an additional
 /// encryption layer before persisting to disk.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ExportCacheResponse {
     pub ok: bool,
     #[serde(default)]
@@ -496,15 +500,15 @@ pub struct ExportCacheResponse {
     pub error_kind: Option<ErrorKind>,
     /// Opaque cache blob, base64-encoded.
     #[serde(default)]
-    pub blob_b64: Option<String>,
+    pub blob_b64: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Sent to `restore_cache` — the host unwrapped the cache file and passes
 /// the inner blob back to the guest to restore its in-memory state.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RestoreCacheRequest {
     /// The same opaque blob that was returned by `export_cache`, base64.
-    pub blob_b64: String,
+    pub blob_b64: zeroize::Zeroizing<String>,
 }
 
 // ── Error classification ─────────────────────────────────────────

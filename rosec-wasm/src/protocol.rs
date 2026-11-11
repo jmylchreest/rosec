@@ -40,6 +40,10 @@ pub struct StatusResponse {
 /// `registration_fields`, and `auth_fields` (which may contain secrets).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UnlockRequest {
+    /// Optional decrypted cache for authentication hints only; never unlocks the vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_blob_b64: Option<zeroize::Zeroizing<String>>,
+
     /// The user's master password.
     pub password: String,
     /// Additional registration fields (for first-time setup).

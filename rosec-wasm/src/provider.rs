@@ -750,8 +750,42 @@ impl Provider for WasmProvider {
             return result;
         }
 
+        // Remembered 2FA is opt-in; decrypt hints with the supplied password.
+        let remember_days = self
+            .config
+            .options
+            .get("two_factor_remember_days")
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
+            .unwrap_or(0)
+            .min(30);
+        let cache_blob_b64 = if has_offline_cache && remember_days > 0 {
+            self.derive_and_store_cache_key(password_ref.as_str(), generation)
+                .await;
+            let guard = self.cache_key.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().and_then(|key| {
+                crate::cache::read_cache_file(
+                    &self.config.id,
+                    key,
+                    std::time::Duration::from_secs(remember_days * 24 * 60 * 60),
+                )
+                .ok()
+                .flatten()
+                .and_then(|(blob, _)| {
+                    std::str::from_utf8(&blob)
+                        .ok()
+                        .map(|s| Zeroizing::new(s.to_owned()))
+                })
+            })
+        } else {
+            None
+        };
+
         let req = match &input {
             UnlockInput::Password(pw) => UnlockRequest {
+                cache_blob_b64,
                 password: pw.as_str().to_owned(),
                 registration_fields: None,
                 auth_fields: None,
@@ -760,6 +794,7 @@ impl Provider for WasmProvider {
                 password,
                 registration_fields,
             } => UnlockRequest {
+                cache_blob_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: Some(fields_to_plain(registration_fields)),
                 auth_fields: None,
@@ -768,6 +803,7 @@ impl Provider for WasmProvider {
                 password,
                 auth_fields,
             } => UnlockRequest {
+                cache_blob_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: None,
                 auth_fields: Some(fields_to_plain(auth_fields)),
@@ -812,6 +848,7 @@ impl Provider for WasmProvider {
                             // whatever field names the provider registered with (e.g.
                             // "access_token" for SM, "client_id"/"client_secret" for PM).
                             let retry_req = UnlockRequest {
+                                cache_blob_b64: None,
                                 password: password_ref.as_str().to_owned(),
                                 registration_fields: Some(fields_to_plain(&stored_fields)),
                                 auth_fields: None,

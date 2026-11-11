@@ -918,3 +918,21 @@ all connection lifecycle — the guest only provides the URL and frame parsing.
 | `"password_change"` | `"PasswordChange"` | `Capability::PasswordChange` | `P` |
 | `"offline_cache"` | `"OfflineCache"` | `Capability::OfflineCache` | `C` |
 | `"notifications"` | `"Notifications"` | `Capability::Notifications` | `N` |
+
+### Optional authentication hints during unlock
+
+`UnlockRequest.cache_blob_b64` is an optional, sensitive base64 cache blob. The
+host supplies it for online unlock only when offline caching is enabled and the
+provider option `two_factor_remember_days` is positive (default 0, capped at 30).
+The host decrypts it using the supplied password and machine key, with a maximum
+cache age equal to that duration. Missing,
+corrupt or undecryptable caches provide no hints and do not prevent normal login.
+Older guests can ignore this additive field.
+
+The Bitwarden PM guest extracts only its remembered 2FA credential from this
+blob, validates account/server/device binding and token age, and still performs
+online authentication and password-based vault-key decryption. This field must
+never be treated as a successful offline restore or proof of online authentication.
+The token is an optional field in the existing version 2 cache envelope; old
+caches without it remain readable. Both the request field and decoded buffer are
+zeroized after use and excluded from debug output.

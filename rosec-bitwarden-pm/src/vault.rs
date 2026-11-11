@@ -764,6 +764,8 @@ pub struct CacheBlob {
     /// a refresh-based re-authentication.
     #[serde(default)]
     pub protected_key: Option<Zeroizing<String>>,
+    #[serde(default)]
+    pub remembered_two_factor: Option<crate::RememberedTwoFactor>,
 }
 
 fn default_cache_version() -> u32 {
@@ -788,6 +790,7 @@ impl CacheBlob {
             vault,
             refresh_token: None,
             protected_key: None,
+            remembered_two_factor: None,
         })
     }
 }
@@ -808,6 +811,8 @@ pub struct CacheBlobRef<'a> {
     pub refresh_token: Option<&'a Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protected_key: Option<&'a Zeroizing<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remembered_two_factor: Option<&'a crate::RememberedTwoFactor>,
 }
 
 impl<'a> CacheBlobRef<'a> {

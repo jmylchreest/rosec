@@ -39,6 +39,7 @@ kind = "bitwarden"
 [provider.options]
 email    = "user@example.com"
 # base_url = "https://vaultwarden.example.com"   # omit for bitwarden.com
+# two_factor_remember_days = 7  # optional; default 0, maximum 30
 ```
 
 > **Self-hosted with a private CA?** If your Vaultwarden instance uses a
@@ -127,7 +128,49 @@ If multiple methods are available, rosec shows a numbered list and lets you choo
 |--------|-------|
 | **FIDO2 / WebAuthn** | Requires host-side hardware key access; not yet implemented |
 | **Duo push / call** | Requires browser redirect; only passcode mode is supported |
-| **Remember token** | 30-day remember-me token caching is planned |
+
+### Remember two-factor login (optional)
+
+This corresponds to Bitwarden’s “Don’t ask again on this device for 30 days”
+option (also called “Remember me” in its help documentation).
+
+To remember a successful two-factor login, add this to your existing provider options
+and restart `rosecd`:
+
+```toml
+[provider.options]
+email = "user@example.com"
+two_factor_remember_days = 7
+```
+
+The default is `0` (disabled). Set a whole number of days; values above `30` are
+capped at `30`. Negative, fractional and non-numeric values are rejected.
+After you next complete two-factor authentication, rosec
+requests Bitwarden's remembered-device token. Subsequent full logins can use that
+token instead of prompting for a new code. Bitwarden controls its validity
+(normally up to 30 days); rosec also refuses tokens after your configured number
+of days, measured from the original receipt rather than the last use. Reducing
+the setting applies the shorter limit to existing tokens after restart. A
+self-hosted server may enforce a shorter period. Expired or rejected tokens fall
+back to the normal two-factor challenge.
+
+Your **master password is still required on every unlock**. rosec stores the
+server-issued token, never your TOTP seed or one-time code. The token is scoped to
+the account email, identity server URL and device ID. It is encrypted in the
+existing cache using a key derived from your master password and machine key.
+Persisting it across daemon restarts requires `offline_cache = true` (the default,
+set on `[[provider]]`, not in `[provider.options]`). With caching disabled, the
+token is held only in plugin memory and is lost when the plugin is recreated.
+
+Remembering 2FA trades fewer prompts for less frequent second-factor verification.
+Enable it only on a device you trust. This setting does not impose a periodic
+reauthentication schedule: existing refresh-token sessions and offline unlock
+continue to follow their existing rules.
+
+To stop using remembered tokens, remove `two_factor_remember_days` or set it to `0`, then
+restart `rosecd`. Subsequent cache writes omit the token. Disabling the option
+does not revoke existing sessions or server-issued tokens; use Bitwarden's session
+revocation controls if you need to revoke access.
 
 ### Example
 
