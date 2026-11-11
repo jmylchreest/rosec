@@ -40,7 +40,9 @@ pub struct StatusResponse {
 /// `registration_fields`, and `auth_fields` (which may contain secrets).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UnlockRequest {
-    /// Optional decrypted cache for authentication hints only; never unlocks the vault.
+    /// Optional base64-encoded provider cache, decrypted by the host.
+    /// Contents use the guest's opaque cache format and may supply authentication
+    /// hints; receiving the blob never constitutes a successful unlock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_blob_b64: Option<zeroize::Zeroizing<String>>,
 

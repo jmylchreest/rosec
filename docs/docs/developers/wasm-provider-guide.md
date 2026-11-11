@@ -921,18 +921,25 @@ all connection lifecycle — the guest only provides the URL and frame parsing.
 
 ### Optional authentication hints during unlock
 
-`UnlockRequest.cache_blob_b64` is an optional, sensitive base64 cache blob. The
-host supplies it for online unlock only when offline caching is enabled and the
-provider option `two_factor_remember_days` is positive (default 0, capped at 30).
-The host decrypts it using the supplied password and machine key, with a maximum
-cache age equal to that duration. Missing,
-corrupt or undecryptable caches provide no hints and do not prevent normal login.
-Older guests can ignore this additive field.
+`UnlockRequest.cache_blob_b64` is an optional, sensitive, base64-encoded provider
+cache blob. Its contents are opaque to the host and use the guest's cache format;
+the field is not specific to two-factor authentication. The host decrypts the
+persisted cache using the supplied password and machine key before passing it to
+the guest. Missing, corrupt or undecryptable caches provide no hints and do not
+prevent normal login. Older guests can ignore this additive field.
 
-The Bitwarden PM guest extracts only its remembered 2FA credential from this
-blob, validates account/server/device binding and token age, and still performs
-online authentication and password-based vault-key decryption. This field must
-never be treated as a successful offline restore or proof of online authentication.
-The token is an optional field in the existing version 2 cache envelope; old
-caches without it remain readable. Both the request field and decoded buffer are
-zeroized after use and excluded from debug output.
+Receiving this field does not constitute a successful offline restore or proof
+of online authentication. A guest must validate any authentication hints it
+extracts and complete its normal online authentication and vault-key decryption.
+
+Currently, the host supplies this field only when offline caching is enabled and
+`two_factor_remember_days` is positive, with the maximum cache age equal to that
+configured duration (capped at 30 days). This is the current Bitwarden PM
+integration policy, not a restriction on the blob format or a generic plugin
+option.
+
+The Bitwarden PM guest extracts only its remembered 2FA credential from the
+blob and validates account/server/device binding and token age. The token is an
+optional field in its existing version 2 cache envelope; old caches without it
+remain readable. Both the request field and decoded buffer are zeroized after
+use and excluded from debug output.
