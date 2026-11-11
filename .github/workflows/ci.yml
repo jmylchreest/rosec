@@ -79,6 +79,9 @@ jobs:
     name: Provider checks
     uses: ./.github/workflows/provider-checks.yml
 
+    needs:
+      - scope
+    if: needs.scope.outputs.providers == 'true'
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -147,6 +150,67 @@ jobs:
 
       - name: Build (strict — broken links + bad MDX fail the build)
         run: npm run build
+    needs:
+      - scope
+    if: needs.scope.outputs.docs == 'true'
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      providers: ${{ steps.scope.outputs.providers }}
+      docs: ${{ steps.scope.outputs.docs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo 'providers=true' >> "$GITHUB_OUTPUT"
+            echo 'docs=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only "$BASE" HEAD > "$RUNNER_TEMP/changed-files"
+          # Documentation-only changes cannot affect provider compilation or integration.
+          if grep -Ev '(^docs/|\.md$|^LICENSE$|^\.github/ISSUE_TEMPLATE/)' "$RUNNER_TEMP/changed-files" >/dev/null; then
+            echo 'providers=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'providers=false' >> "$GITHUB_OUTPUT"
+          fi
+          if grep -Eq '^(docs/|\.github/workflows/)' "$RUNNER_TEMP/changed-files"; then
+            echo 'docs=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'docs=false' >> "$GITHUB_OUTPUT"
+          fi
+  complete:
+    name: CI complete
+    runs-on: ubuntu-latest
+    needs:
+      - scope
+      - test
+      - clippy
+      - fmt
+      - providers
+      - msrv
+      - docs
+    if: always()
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          needs = json.loads(os.environ['RESULTS'])
+          for job in ('scope', 'test', 'clippy', 'fmt', 'msrv'):
+              assert needs[job]['result'] == 'success', f"{job} did not succeed"
+          for job in ('providers', 'docs'):
+              required = needs['scope']['outputs'].get(job) == 'true'
+              expected = 'success' if required else 'skipped'
+              assert needs[job]['result'] == expected, f"{job}: expected {expected}"
+          PYTHON
 concurrency:
   group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
