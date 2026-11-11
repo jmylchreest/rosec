@@ -426,4 +426,57 @@ mod tests {
         let error = request(&mut p, "https://denied.invalid/?token=synthetic-secret").unwrap_err();
         assert!(!error.to_string().contains("synthetic-secret"));
     }
+
+    #[test]
+    fn override_keeps_consecutive_response_bodies_separate() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            // Chunk framing and trailers must not leak into either body when
+            // the same guest makes consecutive requests.
+            for response in [
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nfi\r\n3\r\nrst\r\n0\r\nX-Fixture: done\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecond",
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 8192);
+                }
+                socket.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let mut p = plugin(64, std::time::Duration::from_secs(5));
+        assert_eq!(request(&mut p, &url).unwrap(), b"first");
+        assert_eq!(request(&mut p, &url).unwrap(), b"second");
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn override_does_not_follow_redirect_to_disallowed_host() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://denied.invalid/\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmoved",
+            ).unwrap();
+        });
+        let mut p = plugin(64, std::time::Duration::from_secs(2));
+        assert_eq!(request(&mut p, &url).unwrap(), b"moved");
+        task.join().unwrap();
+    }
 }
