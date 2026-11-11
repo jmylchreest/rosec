@@ -40,7 +40,7 @@ const MODP1024_PRIME_BYTES: &[u8] = &[
 /// Generator for the MODP-1024 group.
 const MODP1024_GENERATOR: u64 = 2;
 
-/// Expected byte length of a MODP-1024 public key (1024 bits = 128 bytes).
+/// Byte width of the MODP-1024 group (1024 bits = 128 bytes).
 const DH_KEY_BYTES: usize = 128;
 
 const AES128_KEY_BYTES: usize = 16;
@@ -111,9 +111,17 @@ pub fn derive_session_key(
     keypair: &DhKeypair,
     client_pubkey_bytes: &[u8],
 ) -> Result<Zeroizing<[u8; AES128_KEY_BYTES]>, ProviderError> {
-    if client_pubkey_bytes.len() != DH_KEY_BYTES {
+    // The Secret Service API encodes public keys as unsigned big-endian
+    // integers, not fixed-width buffers. libsecret may omit leading zeroes
+    // or include a leading zero when the most significant bit is set.
+    let first_nonzero = client_pubkey_bytes
+        .iter()
+        .position(|&byte| byte != 0)
+        .unwrap_or(client_pubkey_bytes.len());
+    let client_pubkey_bytes = &client_pubkey_bytes[first_nonzero..];
+    if client_pubkey_bytes.len() > DH_KEY_BYTES {
         return Err(ProviderError::Unavailable(format!(
-            "client DH public key must be {DH_KEY_BYTES} bytes, got {}",
+            "client DH public key exceeds {DH_KEY_BYTES} significant bytes, got {}",
             client_pubkey_bytes.len()
         )));
     }
@@ -287,13 +295,41 @@ mod tests {
     }
 
     #[test]
-    fn invalid_client_pubkey_wrong_length_rejected() {
+    fn client_pubkey_encodings_derive_same_key() {
         let server_kp = generate_dh_keypair().unwrap();
-        let short = vec![0u8; 64];
-        assert!(matches!(
-            derive_session_key(&server_kp, &short),
-            Err(ProviderError::Unavailable(_))
-        ));
+        for width in [1, 127, 128] {
+            let mut minimal = vec![0u8; width];
+            minimal[0] = 0x80;
+            let fixed_width = pad_to_128(minimal.clone());
+            let expected = derive_session_key(&server_kp, &fixed_width).unwrap();
+            let mut zero_prefixed = vec![0];
+            zero_prefixed.extend_from_slice(&minimal);
+
+            for encoding in [&minimal, &zero_prefixed] {
+                let actual = derive_session_key(&server_kp, encoding).unwrap();
+                assert_eq!(actual.as_ref(), expected.as_ref());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_client_pubkey_range_rejected() {
+        let server_kp = generate_dh_keypair().unwrap();
+        let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
+        for encoding in [
+            vec![],
+            vec![0],
+            vec![1],
+            (&p - BigUint::from(1u32)).to_bytes_be(),
+            p.to_bytes_be(),
+            (&p + BigUint::from(1u32)).to_bytes_be(),
+            vec![1; DH_KEY_BYTES + 1],
+        ] {
+            assert!(matches!(
+                derive_session_key(&server_kp, &encoding),
+                Err(ProviderError::Unavailable(_))
+            ));
+        }
     }
 
     #[test]
