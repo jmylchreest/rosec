@@ -6,7 +6,25 @@ use uuid::Uuid;
 use zbus::Variant as Value;
 use zeroize::Zeroizing;
 
+use crate::error::SecretServiceError;
+
 use crate::crypto::{SessionAlgorithm, derive_session_key, generate_dh_keypair};
+
+/// A validated snapshot of the negotiated encoding. Closing the session cannot
+/// turn an in-flight encrypted transfer into a plaintext transfer.
+pub enum SessionEncoding {
+    Plain,
+    Dh(Zeroizing<[u8; 16]>),
+}
+
+impl SessionEncoding {
+    pub fn aes_key(&self) -> Option<&[u8; 16]> {
+        match self {
+            Self::Plain => None,
+            Self::Dh(key) => Some(key),
+        }
+    }
+}
 
 /// Information stored per open session.
 struct SessionInfo {
@@ -151,22 +169,31 @@ impl SessionManager {
         }
     }
 
-    /// Return a copy of the AES-128 session key for a DH-encrypted session.
-    ///
-    /// Returns `None` for plain sessions or unknown session paths.
-    pub fn get_session_key(
-        &self,
-        path: &str,
-    ) -> Result<Option<Zeroizing<[u8; 16]>>, ProviderError> {
+    /// Resolve the session and its encoding under one lock. Missing sessions
+    /// are errors, never an instruction to send or accept plaintext.
+    pub fn lookup(&self, path: &str) -> Result<SessionEncoding, SecretServiceError> {
         let sessions = self
             .sessions
             .lock()
-            .map_err(|_| ProviderError::Unavailable("session lock poisoned".to_string()))?;
-        let info = match sessions.get(path) {
-            Some(i) => i,
-            None => return Ok(None),
-        };
-        Ok(info.aes_key.as_ref().map(|k| Zeroizing::new(**k)))
+            .map_err(|_| SecretServiceError::Failed("session lock poisoned".to_string()))?;
+        let info = sessions
+            .get(path)
+            .ok_or_else(|| SecretServiceError::NoSession("invalid session".to_string()))?;
+        Ok(match &info.aes_key {
+            Some(key) => SessionEncoding::Dh(Zeroizing::new(**key)),
+            None => SessionEncoding::Plain,
+        })
+    }
+
+    /// Return the negotiated key; only a valid plain session returns `None`.
+    pub fn get_session_key(
+        &self,
+        path: &str,
+    ) -> Result<Option<Zeroizing<[u8; 16]>>, SecretServiceError> {
+        Ok(match self.lookup(path)? {
+            SessionEncoding::Plain => None,
+            SessionEncoding::Dh(key) => Some(key),
+        })
     }
 
     pub fn count(&self) -> Result<usize, ProviderError> {
@@ -395,10 +422,31 @@ mod tests {
     }
 
     #[test]
-    fn get_session_key_unknown_path_returns_none() {
+    fn get_session_key_unknown_path_is_rejected() {
         let mgr = SessionManager::new();
-        let key = mgr.get_session_key("/nonexistent").unwrap();
-        assert!(key.is_none());
+        assert!(matches!(
+            mgr.get_session_key("/nonexistent"),
+            Err(SecretServiceError::NoSession(_))
+        ));
+    }
+
+    #[test]
+    fn closing_session_does_not_downgrade_an_acquired_encoding() {
+        let mgr = SessionManager::new();
+        let client = generate_dh_keypair().unwrap();
+        let (_, path) = mgr
+            .open_session(
+                "dh-ietf1024-sha256-aes128-cbc-pkcs7",
+                &dh_input(&client.public_bytes),
+            )
+            .unwrap();
+        let encoding = mgr.lookup(&path).unwrap();
+        mgr.close_session(&path).unwrap();
+        assert!(encoding.aes_key().is_some());
+        assert!(matches!(
+            mgr.lookup(&path),
+            Err(SecretServiceError::NoSession(_))
+        ));
     }
 
     #[test]

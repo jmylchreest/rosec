@@ -2136,6 +2136,7 @@ impl ServiceState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn ensure_session(&self, session: &str) -> Result<(), FdoError> {
         self.sessions.validate(session).map_err(map_provider_error)
     }

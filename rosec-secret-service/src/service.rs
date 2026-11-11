@@ -97,16 +97,15 @@ impl SecretService {
         items: Vec<OwnedObjectPath>,
         session: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, FdoError> {
+    ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, zbus::BoxDBusError> {
         log_dbus_caller("service", "GetSecrets", &header);
         self.state.touch_activity();
         let session = session.as_str();
-        self.state.ensure_session(session)?;
-        let aes_key = self
+        let encoding = self
             .state
             .sessions
-            .get_session_key(session)
-            .map_err(map_provider_error)?;
+            .lookup(session)
+            .map_err(|error| Box::new(error) as zbus::BoxDBusError)?;
         let item_paths: Vec<String> = items.iter().map(|p| p.as_str().to_string()).collect();
         let resolved = self.state.resolve_items(None, Some(&item_paths)).await?;
         let mut secrets = HashMap::new();
@@ -139,9 +138,9 @@ impl SecretService {
                 Err(ProviderError::Other(_)) => continue,
                 Err(ProviderError::NotFound) => continue,
                 Err(ProviderError::Locked) => continue,
-                Err(e) => return Err(map_provider_error(e)),
+                Err(e) => return Err(map_provider_error(e).into()),
             };
-            let value = build_secret_value(session, &secret, aes_key.as_deref())?;
+            let value = build_secret_value(session, &secret, encoding.aes_key())?;
             secrets.insert(to_object_path(&path), value);
         }
         Ok(secrets)
