@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    tracing_subscriber::fmt().with_env_filter("warn").init();
+    init_tracing();
 
     use rosec_core::limits::MAX_PROMPT_REQUEST_BYTES;
     let mut raw = String::new();
@@ -120,5 +120,50 @@ fn main() -> Result<()> {
     } else {
         sandbox::restrict(sandbox::Mode::Tty);
         tty::run(request)
+    }
+}
+
+// Stdout is the JSON response channel consumed by the daemon.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter("warn")
+        .with_writer(io::stderr)
+        .init();
+}
+
+#[cfg(test)]
+mod logging_tests {
+    #[test]
+    fn warnings_do_not_contaminate_json_stdout() {
+        const MARKER: &str = "rosec-fixture-display-warning";
+        const CHILD: &str = "ROSEC_PROMPT_LOGGING_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::init_tracing();
+            tracing::warn!("{MARKER}");
+            println!("{{\"password\":\"fixture\"}}");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging_tests::warnings_do_not_contaminate_json_stdout",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !stdout.contains(MARKER),
+            "diagnostic entered the JSON response channel"
+        );
+        assert!(stderr.contains(MARKER), "diagnostic was lost");
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == r#"{"password":"fixture"}"#)
+        );
     }
 }
