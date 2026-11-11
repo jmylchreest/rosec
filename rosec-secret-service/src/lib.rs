@@ -36,3 +36,6 @@ mod tests {
         assert!(sessions.is_valid(&path).unwrap_or(false));
     }
 }
+
+#[cfg(test)]
+mod prompt_subprocess_tests;

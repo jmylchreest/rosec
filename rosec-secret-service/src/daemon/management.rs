@@ -544,7 +544,7 @@ impl RosecManagement {
     ///
     /// Used by the `rosec` CLI (and other clients) to cleanly cancel a running
     /// `rosec-prompt` child when the user presses Ctrl+C.  After killing the
-    /// child, the Prompt object is responsible for emitting `Completed(true, "")`.
+    /// child, cancellation emits `Completed(true, "")` before removing the object.
     ///
     /// Returns `true` if a matching prompt was found and cancelled, `false` if
     /// the path was not in the active-prompt registry (already completed or invalid).
@@ -554,12 +554,7 @@ impl RosecManagement {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<bool, FdoError> {
         log_dbus_caller("management", "CancelPrompt", &header);
-        // cancel_prompt() sends SIGTERM to the child and removes it from the registry.
-        // We check whether the path existed before calling it.
-        let prompt_path = prompt_path.as_str();
-        let existed = self.state.prompts.contains_path(prompt_path);
-        self.state.cancel_prompt(prompt_path);
-        Ok(existed)
+        Ok(self.state.cancel_prompt(prompt_path.as_str()))
     }
 
     /// Change the unlock password for a provider.
