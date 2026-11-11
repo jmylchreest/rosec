@@ -21,6 +21,9 @@ pub enum SecretServiceError {
     /// locked and must be unlocked before this operation can proceed.
     IsLocked(String),
 
+    /// The requested transfer session does not exist or has been closed.
+    NoSession(String),
+
     /// Generic failure (maps to `org.freedesktop.Secret.Error.Failed`).
     Failed(String),
 

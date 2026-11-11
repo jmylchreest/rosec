@@ -11,7 +11,7 @@ use zbus::{ObjectPath, OwnedObjectPath};
 use crate::error::SecretServiceError;
 use crate::service::{SecretStruct, build_secret_value, to_object_path};
 use crate::session::SessionManager;
-use crate::state::{map_provider_error, map_provider_error_ss};
+use crate::state::map_provider_error_ss;
 
 #[derive(Clone)]
 pub struct ItemState {
@@ -105,16 +105,10 @@ impl SecretItem {
         use wildmatch::WildMatch;
 
         let session = session.as_str();
-        ensure_session(&self.state.sessions, session)?;
+        let encoding = self.state.sessions.lookup(session)?;
         if self.is_locked() {
             return Err(SecretServiceError::IsLocked("item is locked".to_string()));
         }
-        let aes_key = self
-            .state
-            .sessions
-            .get_session_key(session)
-            .map_err(map_provider_error)?;
-
         let provider = Arc::clone(&self.state.provider);
         let item_id = self.state.meta.id.clone();
         let patterns = self.state.return_attr_patterns.clone();
@@ -145,7 +139,7 @@ impl SecretItem {
             .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?
             .map_err(map_provider_error_ss)?;
 
-        Ok((build_secret_value(session, &secret, aes_key.as_deref())?,))
+        Ok((build_secret_value(session, &secret, encoding.aes_key())?,))
     }
 
     fn set_secret(&self, _secret: SecretStruct) -> Result<(), SecretServiceError> {
@@ -213,10 +207,6 @@ impl SecretItem {
         // No prompt needed — return "/" per the spec.
         Ok(to_object_path("/"))
     }
-}
-
-fn ensure_session(sessions: &SessionManager, session: &str) -> Result<(), FdoError> {
-    sessions.validate(session).map_err(map_provider_error)
 }
 
 #[cfg(test)]

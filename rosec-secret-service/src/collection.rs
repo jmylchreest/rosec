@@ -105,14 +105,10 @@ impl SecretCollection {
         let (session_path, parameters, secret_value, _content_type) = secret;
         let session_path = session_path.as_str().to_string();
 
-        let aes_key = self
-            .state
-            .sessions
-            .get_session_key(&session_path)
-            .map_err(map_provider_error)?;
+        let encoding = self.state.sessions.lookup(&session_path)?;
 
         // Hold plaintext only in zeroizing buffers — no intermediate plain Vec.
-        let secret = if let Some(key) = aes_key.as_deref() {
+        let secret = if let Some(key) = encoding.aes_key() {
             let plaintext =
                 aes128_cbc_decrypt(key, &parameters, &secret_value).map_err(map_provider_error)?;
             SecretBytes::from_zeroizing(plaintext)
