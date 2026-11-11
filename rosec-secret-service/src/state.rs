@@ -576,21 +576,36 @@ impl ServiceState {
         self.prompts.take_pending_operation(prompt_path)
     }
 
-    pub fn set_prompt_pid(&self, prompt_path: &str, pid: u32) {
-        self.prompts.set_pid(prompt_path, pid);
+    pub fn set_prompt_pid(&self, prompt_path: &str, pid: u32) -> bool {
+        self.prompts.set_pid(prompt_path, pid)
     }
 
     /// Kill the active prompt subprocess (if any) and deregister the D-Bus
     /// object.  Safe to call after the child has exited.
-    pub fn cancel_prompt(&self, prompt_path: &str) {
-        if let Some(pid) = self.prompts.remove_and_get_pid(prompt_path) {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-            tracing::debug!(prompt = %prompt_path, pid, "prompt child terminated");
+    pub fn cancel_prompt(&self, prompt_path: &str) -> bool {
+        let Some(pid) = self.prompts.remove_and_get_pid(prompt_path) else {
+            return false;
+        };
+        if let Some(child) = pid {
+            child.terminate();
+            tracing::debug!(prompt = %prompt_path, pid = child.pid, "prompt child terminated");
         }
-        self.deregister_prompt_object(prompt_path);
+        let conn = self.conn();
+        let path = prompt_path.to_string();
+        self.spawn_on_tokio(async move {
+            if let Ok(emitter) = zbus::object_server::SignalEmitter::new(&conn, path.as_str())
+                && let Err(error) =
+                    crate::prompt::SecretPrompt::completed(&emitter, true, &zbus::Variant::from(""))
+                        .await
+            {
+                tracing::debug!(%error, "failed to emit prompt cancellation");
+            }
+            let _ = conn
+                .object_server()
+                .remove::<crate::prompt::SecretPrompt, _>(path.as_str())
+                .await;
+        });
+        true
     }
 
     /// Remove a completed prompt from the registry without killing the child.
@@ -757,7 +772,11 @@ impl ServiceState {
             };
 
             let pid = child.id();
-            self.set_prompt_pid(&prompt_path, pid);
+            if !self.set_prompt_pid(&prompt_path, pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FdoError::Failed("prompt cancelled".into()));
+            }
 
             // Read exactly one line from stdout into a zeroizing buffer.
             let password = {
@@ -781,8 +800,10 @@ impl ServiceState {
                 line
             };
 
-            let status = wait_with_timeout(&mut child)
-                .map_err(|e| FdoError::Failed(format!("SSH_ASKPASS wait error: {e}")))?;
+            let status = wait_with_timeout(&mut child);
+            self.prompts.clear_pid(&prompt_path, pid);
+            let status =
+                status.map_err(|e| FdoError::Failed(format!("SSH_ASKPASS wait error: {e}")))?;
 
             if !status.success() || password.is_empty() {
                 return Err(FdoError::Failed(
@@ -843,7 +864,11 @@ impl ServiceState {
             match cmd.spawn() {
                 Ok(mut child) => {
                     let pid = child.id();
-                    self.set_prompt_pid(&prompt_path, pid);
+                    if !self.set_prompt_pid(&prompt_path, pid) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(FdoError::Failed("prompt cancelled".into()));
+                    }
 
                     if let Some(mut stdin) = child.stdin.take() {
                         use std::io::Write as _;
@@ -867,8 +892,10 @@ impl ServiceState {
                         line
                     };
 
-                    let status = wait_with_timeout(&mut child)
-                        .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
+                    let status = wait_with_timeout(&mut child);
+                    self.prompts.clear_pid(&prompt_path, pid);
+                    let status =
+                        status.map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
 
                     if !status.success() {
                         return Err(FdoError::Failed("prompt cancelled".to_string()));
@@ -925,7 +952,7 @@ impl ServiceState {
         // read_hidden() — the same code path used by UnlockWithTty, minus
         // the D-Bus fd-passing overhead.
         if has_tty {
-            return self.builtin_tty_prompt(provider_id, label);
+            return self.builtin_tty_prompt(&prompt_path, provider_id, label);
         }
         tracing::debug!(
             %provider_id,
@@ -1032,7 +1059,11 @@ impl ServiceState {
 
         let pid = child.id();
         let prompt_path_owned = prompt_path.to_string();
-        self.set_prompt_pid(&prompt_path_owned, pid);
+        if !self.set_prompt_pid(&prompt_path_owned, pid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(FdoError::Failed("prompt cancelled".into()));
+        }
 
         // Write the request; stdin drops at scope end → EOF to the child.
         if let Some(mut stdin) = child.stdin.take() {
@@ -1056,8 +1087,9 @@ impl ServiceState {
             line
         };
 
-        let status = wait_with_timeout(&mut child)
-            .map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
+        let status = wait_with_timeout(&mut child);
+        self.prompts.clear_pid(&prompt_path_owned, pid);
+        let status = status.map_err(|e| FdoError::Failed(format!("rosec-prompt wait: {e}")))?;
 
         if !status.success() {
             return Err(FdoError::Failed("prompt cancelled".to_string()));
@@ -1088,6 +1120,7 @@ impl ServiceState {
     ///   error paths.
     fn builtin_tty_prompt(
         &self,
+        prompt_path: &str,
         provider_id: &str,
         label: &str,
     ) -> Result<Zeroizing<String>, FdoError> {
@@ -1114,7 +1147,11 @@ impl ServiceState {
             let _ = w.flush();
         }
 
-        let password = crate::tty::read_hidden(fd, None)
+        let cancellation = self
+            .prompts
+            .tty_cancel_reader(prompt_path)
+            .map_err(|e| FdoError::Failed(format!("TTY prompt cancellation: {e}")))?;
+        let password = crate::tty::read_hidden(fd, Some(cancellation.as_raw_fd()))
             .map_err(|e| FdoError::Failed(format!("built-in TTY prompt read error: {e}")))?;
 
         if password.is_empty() {

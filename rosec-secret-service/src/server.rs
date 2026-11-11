@@ -146,12 +146,16 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
     // must resolve to the default collection.  Most clients (including
     // secret-tool from libsecret) access the default collection via this
     // alias path rather than calling ReadAlias first.
-    server
-        .at(
-            "/org/freedesktop/secrets/aliases/default",
-            SecretCollection::new(collection_state),
-        )
-        .await?;
+    // ReadAlias also advertises "login". Both aliases must expose the same
+    // virtual collection, including its shared item cache and provider state.
+    for alias in ["default", "login"] {
+        server
+            .at(
+                format!("/org/freedesktop/secrets/aliases/{alias}"),
+                SecretCollection::new(collection_state.clone()),
+            )
+            .await?;
+    }
 
     Ok(())
 }
