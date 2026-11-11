@@ -1,6 +1,20 @@
 name: Security Audit
+run-name: ${{ inputs.fallback_of && format('fallback:{0}', inputs.fallback_of) || github.workflow }}
 
 on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Runner backend
+        type: choice
+        options: [hosted, arc]
+        default: hosted
+      source_sha:
+        description: Exact source commit supplied by the fallback router
+        type: string
+      fallback_of:
+        description: Parent run ID supplied by the fallback router
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -16,10 +30,14 @@ env:
 jobs:
   audit:
     name: cargo audit
-    runs-on: ubuntu-latest
+    if: ${{ !inputs.source_sha || inputs.source_sha == github.workflow_sha }}
+    runs-on: ${{ github.event_name != 'pull_request' && inputs.backend == 'arc' && 'rosec-linux' || 'ubuntu-latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
 
       - name: Test audit exemption checker
         run: python3 tests/test_audit_exemptions.py
