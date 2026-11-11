@@ -109,6 +109,7 @@ fn parse_two_factor_remember_days(value: Option<&serde_json::Value>) -> Result<u
 
 /// Server-issued credential, scoped to the account, server and device.
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RememberedTwoFactor {
     token: Zeroizing<String>,
     issued_at: u64,
@@ -1444,24 +1445,12 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
         _ => None,
     };
 
-    // Import only the remembered credential; cached vault contents do not grant online unlock.
-    if state.remembered_two_factor.is_none()
-        && state.config.two_factor_remember_days > 0
-        && let Some(encoded) = &req.cache_blob_b64
-    {
-        use base64::Engine;
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()) {
-            let bytes = Zeroizing::new(bytes);
-            // Ignore vault data entirely on the online path.
-            #[derive(serde::Deserialize)]
-            struct AuthHints {
-                #[serde(default)]
-                remembered_two_factor: Option<RememberedTwoFactor>,
-            }
-            if let Ok(cache) = serde_json::from_slice::<AuthHints>(&bytes) {
-                state.remembered_two_factor = cache.remembered_two_factor;
-            }
-        }
+    // Only auth state is accepted here. The offline vault cache is never read.
+    if state.remembered_two_factor.is_none() {
+        state.remembered_two_factor = req
+            .auth_state_b64
+            .as_ref()
+            .and_then(|s| decode_auth_state(s, &state.config, to_epoch_secs(SystemTime::now())));
     }
     let now = to_epoch_secs(SystemTime::now());
     if !state
@@ -2152,6 +2141,66 @@ pub fn readiness_probes(_input: ()) -> FnResult<Json<ReadinessProbesResponse>> {
     }))
 }
 
+fn decode_auth_state(encoded: &str, config: &GuestConfig, now: u64) -> Option<RememberedTwoFactor> {
+    use base64::Engine;
+    if config.two_factor_remember_days == 0 || encoded.len() > 16 * 1024 {
+        return None;
+    }
+    let bytes = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()?,
+    );
+    let token: RememberedTwoFactor = serde_json::from_slice(&bytes).ok()?;
+    token.valid_for(config, now).then_some(token)
+}
+
+fn encode_auth_state(
+    token: &RememberedTwoFactor,
+    days: u64,
+) -> Result<ExportAuthStateResponse, serde_json::Error> {
+    use base64::Engine;
+    let bytes = Zeroizing::new(serde_json::to_vec(token)?);
+    Ok(ExportAuthStateResponse {
+        state_b64: Some(Zeroizing::new(
+            base64::engine::general_purpose::STANDARD.encode(&*bytes),
+        )),
+        expires_at_epoch_secs: Some(token.issued_at.saturating_add(days.min(30) * 86400)),
+    })
+}
+
+/// Generic auth-cache policy; only this guest knows the Bitwarden option name.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
+pub fn auth_cache_policy(_: ()) -> FnResult<Json<AuthCachePolicy>> {
+    let guard = STATE.lock();
+    let max_age_secs = guard
+        .as_ref()
+        .map(|s| s.config.two_factor_remember_days * 86400)
+        .unwrap_or(0);
+    Ok(Json(AuthCachePolicy { max_age_secs }))
+}
+
+/// Export authentication metadata only, including after a rejected login so
+/// the host can persist deletion of a rejected/expired credential.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
+pub fn export_auth_state(_: ()) -> FnResult<Json<ExportAuthStateResponse>> {
+    let guard = STATE.lock();
+    let token = guard.as_ref().and_then(|state| {
+        state
+            .remembered_two_factor
+            .as_ref()
+            .filter(|r| r.valid_for(&state.config, to_epoch_secs(SystemTime::now())))
+            .map(|r| (r, state.config.two_factor_remember_days))
+    });
+    match token {
+        Some((token, days)) => Ok(Json(encode_auth_state(token, days)?)),
+        None => Ok(Json(ExportAuthStateResponse {
+            state_b64: None,
+            expires_at_epoch_secs: None,
+        })),
+    }
+}
+
 // ── Offline cache ────────────────────────────────────────────────
 
 /// Export the current vault state as an opaque cache blob.
@@ -2218,7 +2267,6 @@ pub fn export_cache(_input: ()) -> FnResult<Json<ExportCacheResponse>> {
         vault: &auth.vault,
         refresh_token: auth.refresh_token.as_ref(),
         protected_key: protected_key_ref,
-        remembered_two_factor: state.remembered_two_factor.as_ref(),
     };
 
     match blob_ref.to_bytes() {
@@ -2304,10 +2352,6 @@ pub fn restore_cache(Json(input): Json<RestoreCacheRequest>) -> FnResult<Json<Si
             two_factor_methods: None,
         }));
     };
-
-    state.remembered_two_factor = cache_blob
-        .remembered_two_factor
-        .filter(|r| r.valid_for(&state.config, to_epoch_secs(SystemTime::now())));
 
     // Restore auth state from the cache blob.  If the blob includes
     // session tokens (v2+), the provider can attempt token refresh when
@@ -2730,5 +2774,50 @@ mod remember_tests {
         })
         .unwrap();
         assert_eq!(token.unwrap().issued_at, 100);
+    }
+    #[test]
+    fn auth_payload_contains_only_allowlisted_auth_fields() {
+        use base64::Engine;
+        let r = encode_auth_state(&remembered(), 7).unwrap();
+        let encoded = r.state_b64.unwrap();
+        let bytes = Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .unwrap(),
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut keys: Vec<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["device_id", "email", "identity_url", "issued_at", "token"]
+        );
+        assert_eq!(r.expires_at_epoch_secs, Some(100 + 7 * 86400));
+        assert!(decode_auth_state(&encoded, &config(), 100).is_some());
+    }
+
+    #[test]
+    fn auth_import_rejects_vault_blobs_extra_fields_and_expiry() {
+        use base64::Engine;
+        let r = encode_auth_state(&remembered(), 30).unwrap();
+        let encoded = r.state_b64.unwrap();
+        let mut value = serde_json::to_value(remembered()).unwrap();
+        value["vault"] = serde_json::json!({"password": "VAULT-PASSWORD-MARKER"});
+        let extra =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&value).unwrap());
+        assert!(decode_auth_state(&extra, &config(), 100).is_none());
+        let vault = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"version":2,"vault":{"password":"VAULT-PASSWORD-MARKER"}}"#);
+        assert!(decode_auth_state(&vault, &config(), 100).is_none());
+        assert!(decode_auth_state(&encoded, &config(), 100 + 30 * 86400).is_none());
+        assert!(decode_auth_state("not base64!", &config(), 100).is_none());
+        let mut disabled = config();
+        disabled.two_factor_remember_days = 0;
+        assert!(decode_auth_state(&encoded, &disabled, 100).is_none());
     }
 }

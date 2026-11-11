@@ -62,6 +62,34 @@ const MAX_CACHE_BYTES: usize = 50 * 1024 * 1024;
 /// Domain-separates cache keys from WASM credential keys.
 const KDF_DOMAIN: &[u8] = b"rosec-provider-cache-v2";
 
+/// Separate paths, key purposes and bounds for vault data and authentication state.
+#[derive(Clone, Copy)]
+pub(crate) enum StoreKind {
+    Vault,
+    Auth,
+}
+
+impl StoreKind {
+    fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Vault => KDF_DOMAIN,
+            Self::Auth => b"rosec-provider-auth-v1",
+        }
+    }
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Vault => "cache",
+            Self::Auth => "auth-cache",
+        }
+    }
+    fn max_bytes(self) -> usize {
+        match self {
+            Self::Vault => MAX_CACHE_BYTES,
+            Self::Auth => 24 * 1024,
+        }
+    }
+}
+
 /// Default maximum cache age (10 days).
 pub const DEFAULT_MAX_CACHE_AGE: Duration = Duration::from_secs(10 * 24 * 60 * 60);
 
@@ -103,6 +131,15 @@ pub fn derive_cache_key(
     password: &str,
     provider_id: &str,
 ) -> Result<CacheKey, ProviderError> {
+    derive_store_key(machine_key, password, provider_id, StoreKind::Vault)
+}
+
+pub(crate) fn derive_store_key(
+    machine_key: &[u8],
+    password: &str,
+    provider_id: &str,
+    kind: StoreKind,
+) -> Result<CacheKey, ProviderError> {
     let _guard = crate::wasm_cred::KDF_LOCK
         .lock()
         .map_err(|_| ProviderError::Unavailable("Cache KDF unavailable".into()))?;
@@ -118,7 +155,7 @@ pub fn derive_cache_key(
     .map_err(|_| ProviderError::Unavailable("Invalid cache KDF".into()))?;
     // The random installation key is Argon2's secret; a stable domain/provider
     // salt allows derivation before opening the cache, without storing a password.
-    let salt = Sha256::digest([KDF_DOMAIN, provider_id.as_bytes()].concat());
+    let salt = Sha256::digest([kind.domain(), provider_id.as_bytes()].concat());
     let mut key_bytes = Zeroizing::new([0u8; 64]);
     argon
         .hash_password_into_with_memory(password.as_bytes(), &salt, key_bytes.as_mut(), &mut memory)
@@ -135,10 +172,19 @@ pub fn write_cache_file(
     key: &CacheKey,
     plaintext: &[u8],
 ) -> Result<SystemTime, ProviderError> {
-    if plaintext.len() > MAX_CACHE_BYTES - 128 {
+    write_store_file(provider_id, key, plaintext, StoreKind::Vault)
+}
+
+pub(crate) fn write_store_file(
+    provider_id: &str,
+    key: &CacheKey,
+    plaintext: &[u8],
+    kind: StoreKind,
+) -> Result<SystemTime, ProviderError> {
+    if plaintext.len() > kind.max_bytes() - 128 {
         return Err(ProviderError::Unavailable("Cache too large".into()));
     }
-    let path = cache_file_path(provider_id)?;
+    let path = store_file_path(provider_id, kind)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -193,7 +239,7 @@ pub fn write_cache_file(
         provider = %provider_id,
         path = %path.display(),
         size = ct_len,
-        "wrote offline cache file"
+        "wrote encrypted provider cache file"
     );
 
     Ok(now)
@@ -215,7 +261,16 @@ pub fn read_cache_file(
     key: &CacheKey,
     max_age: Duration,
 ) -> Result<Option<CacheContents>, ProviderError> {
-    let path = cache_file_path(provider_id)?;
+    read_store_file(provider_id, key, max_age, StoreKind::Vault)
+}
+
+pub(crate) fn read_store_file(
+    provider_id: &str,
+    key: &CacheKey,
+    max_age: Duration,
+    kind: StoreKind,
+) -> Result<Option<CacheContents>, ProviderError> {
+    let path = store_file_path(provider_id, kind)?;
 
     if !path.exists() {
         return Ok(None);
@@ -224,10 +279,10 @@ pub fn read_cache_file(
     let file = std::fs::File::open(&path)
         .map_err(|_| ProviderError::Unavailable("Cannot read cache file".into()))?;
     let mut raw = Vec::new();
-    file.take((MAX_CACHE_BYTES + 1) as u64)
+    file.take((kind.max_bytes() + 1) as u64)
         .read_to_end(&mut raw)
         .map_err(|_| ProviderError::Unavailable("Cannot read cache file".into()))?;
-    if raw.len() > MAX_CACHE_BYTES {
+    if raw.len() > kind.max_bytes() {
         return Err(ProviderError::Unavailable("Cache too large".into()));
     }
 
@@ -313,7 +368,7 @@ pub fn read_cache_file(
             .duration_since(cache_time)
             .unwrap_or(Duration::ZERO)
             .as_secs(),
-        "read offline cache file"
+        "read encrypted provider cache file"
     );
 
     Ok(Some((result, cache_time)))
@@ -323,7 +378,11 @@ pub fn read_cache_file(
 ///
 /// Called when a provider is detached.  Returns `true` if a file was removed.
 pub fn delete_cache_file(provider_id: &str) -> Result<bool, ProviderError> {
-    let path = cache_file_path(provider_id)?;
+    delete_store_file(provider_id, StoreKind::Vault)
+}
+
+pub(crate) fn delete_store_file(provider_id: &str, kind: StoreKind) -> Result<bool, ProviderError> {
+    let path = store_file_path(provider_id, kind)?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| {
             ProviderError::Other(anyhow::anyhow!(
@@ -331,7 +390,7 @@ pub fn delete_cache_file(provider_id: &str) -> Result<bool, ProviderError> {
                 path.display()
             ))
         })?;
-        debug!(provider = %provider_id, "deleted offline cache file");
+        debug!(provider = %provider_id, "deleted encrypted provider cache file");
         Ok(true)
     } else {
         Ok(false)
@@ -339,7 +398,15 @@ pub fn delete_cache_file(provider_id: &str) -> Result<bool, ProviderError> {
 }
 
 /// Return the path to the cache file for a provider.
+#[cfg(test)]
 fn cache_file_path(provider_id: &str) -> Result<PathBuf, ProviderError> {
+    store_file_path(provider_id, StoreKind::Vault)
+}
+
+pub(crate) fn store_file_path(
+    provider_id: &str,
+    kind: StoreKind,
+) -> Result<PathBuf, ProviderError> {
     if provider_id.is_empty()
         || !provider_id
             .bytes()
@@ -360,7 +427,7 @@ fn cache_file_path(provider_id: &str) -> Result<PathBuf, ProviderError> {
     };
     Ok(base
         .join("rosec")
-        .join("cache")
+        .join(kind.directory())
         .join(format!("{provider_id}.bin")))
 }
 

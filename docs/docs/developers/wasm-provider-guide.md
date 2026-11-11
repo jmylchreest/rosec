@@ -919,27 +919,48 @@ all connection lifecycle — the guest only provides the URL and frame parsing.
 | `"offline_cache"` | `"OfflineCache"` | `Capability::OfflineCache` | `C` |
 | `"notifications"` | `"Notifications"` | `Capability::Notifications` | `N` |
 
-### Optional authentication hints during unlock
+### Separate provider authentication cache
 
-`UnlockRequest.cache_blob_b64` is an optional, sensitive, base64-encoded provider
-cache blob. Its contents are opaque to the host and use the guest's cache format;
-the field is not specific to two-factor authentication. The host decrypts the
-persisted cache using the supplied password and machine key before passing it to
-the guest. Missing, corrupt or undecryptable caches provide no hints and do not
-prevent normal login. Older guests can ignore this additive field.
+Authentication state and offline vault state have separate interfaces and stores.
+`UnlockRequest.auth_state_b64` is an optional, sensitive, base64-encoded auth-only
+record. It must never contain vault items, notes, passwords or vault decryption
+keys. The host does not read or decrypt the offline vault cache on this path.
+The existing `export_cache` / `restore_cache` interface and vault-cache format
+remain unchanged.
 
-Receiving this field does not constitute a successful offline restore or proof
-of online authentication. A guest must validate any authentication hints it
-extracts and complete its normal online authentication and vault-key decryption.
+Guests opt in using two optional no-input exports:
 
-Currently, the host supplies this field only when offline caching is enabled and
-`two_factor_remember_days` is positive, with the maximum cache age equal to that
-configured duration (capped at 30 days). This is the current Bitwarden PM
-integration policy, not a restriction on the blob format or a generic plugin
-option.
+| Export | Response | Contract |
+| --- | --- | --- |
+| `auth_cache_policy` | `AuthCachePolicy { max_age_secs }` | Zero disables persistence and requests deletion; the host caps positive durations at 30 days. |
+| `export_auth_state` | `ExportAuthStateResponse { state_b64, expires_at_epoch_secs }` | Auth-only state with an absolute expiry; `state_b64: null` requests deletion. |
 
-The Bitwarden PM guest extracts only its remembered 2FA credential from the
-blob and validates account/server/device binding and token age. The token is an
-optional field in its existing version 2 cache envelope; old caches without it
-remain readable. Both the request field and decoded buffer are zeroized after
-use and excluded from debug output.
+Both exports must exist to enable this interface. Older guests receive no auth
+state. Provider-specific options such as Bitwarden's `two_factor_remember_days`
+are interpreted exclusively by the guest. This store is independent of
+`offline_cache` and the `OfflineCache` capability.
+
+The host uses a separate `rosec/auth-cache/<provider-id>.bin` file and a distinct
+Argon2id key-derivation domain (`rosec-provider-auth-v1`), bound to the password,
+machine key and provider ID. It reuses the existing encrypt-then-MAC envelope,
+atomic replacement and `0600` permissions. Auth files are bounded to 24 KiB, with
+a 16 KiB limit on the encoded guest payload. Absolute expiry and policy age are
+checked before passing a credential to the guest; malformed, tampered or
+undecryptable records supply no credential and normal online login can proceed.
+There is no migration that reads a vault cache to recover an auth token.
+
+After online unlock, the host calls `export_auth_state` even when the guest
+returns a 2FA challenge. A successful login may save a new record. A failed login
+may only delete an existing record if it was authenticated with the supplied
+password; it cannot replace it or erase it following a failed decryption. This
+persists rejected-token removal without letting a mistyped password destroy a
+valid record. Storage failures are surfaced rather than silently retaining a
+rejected credential. Disabled policies and provider removal delete only the auth
+record, leaving vault retention rules unchanged.
+
+The Bitwarden PM payload contains only `token`, `issued_at`, `email`,
+`identity_url` and `device_id`. It rejects unknown fields and validates scope and
+age before reuse. Neither token rotation nor reuse extends the issuance time.
+Receiving auth state is not proof of online authentication: the guest must still
+perform online login and password-based vault-key decryption. Sensitive request,
+response and decoded buffers are zeroized and excluded from debug output.

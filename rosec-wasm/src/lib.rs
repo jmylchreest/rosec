@@ -26,11 +26,14 @@
 //! | `attribute_descriptors`  | *(empty)*                | `AttributeDescriptorsResponse` |
 //! | `readiness_probes`       | *(empty)*                | `ReadinessProbesResponse`    |
 //! | `capabilities`           | *(empty)*                | `CapabilitiesResponse`       |
+//! | `auth_cache_policy`      | *(empty)*                | `AuthCachePolicy`            |
+//! | `export_auth_state`      | *(empty)*                | `ExportAuthStateResponse`    |
 //! | `export_cache`           | *(empty)*                | `ExportCacheResponse`        |
 //! | `restore_cache`          | `RestoreCacheRequest`    | `SimpleResponse`             |
 //! | `get_notification_config`| *(empty)*                | `NotificationConfigResponse` |
 //! | `parse_notification`     | `NotificationFrame`      | `NotificationAction`         |
 
+pub mod auth_cache;
 pub mod cache;
 pub mod discovery;
 pub(crate) mod host_file;

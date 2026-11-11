@@ -156,11 +156,18 @@ back to the normal two-factor challenge.
 
 Your **master password is still required on every unlock**. rosec stores the
 server-issued token, never your TOTP seed or one-time code. The token is scoped to
-the account email, identity server URL and device ID. It is encrypted in the
-existing cache using a key derived from your master password and machine key.
-Persisting it across daemon restarts requires `offline_cache = true` (the default,
-set on `[[provider]]`, not in `[provider.options]`). With caching disabled, the
-token is held only in plugin memory and is lost when the plugin is recreated.
+the account email, identity server URL and device ID. It is stored in a small,
+separate encrypted authentication record under
+`$XDG_DATA_HOME/rosec/auth-cache/<provider-id>.bin` (normally
+`~/.local/share/rosec/auth-cache/`). The encryption key is derived from your master
+password and machine key, bound to the provider, and uses a distinct purpose from
+the offline vault-cache key. Files are written atomically with mode `0600`.
+
+This record contains only the remember token and its account/server/device and
+expiry metadata. It contains no vault passwords, notes, items or decryption keys.
+Online unlock reads only this authentication record; the full vault cache is
+reserved for offline restoration. Remembering 2FA works independently of
+`offline_cache`, including when offline vault caching is disabled.
 
 Remembering 2FA trades fewer prompts for less frequent second-factor verification.
 Enable it only on a device you trust. This setting does not impose a periodic
@@ -168,7 +175,10 @@ reauthentication schedule: existing refresh-token sessions and offline unlock
 continue to follow their existing rules.
 
 To stop using remembered tokens, remove `two_factor_remember_days` or set it to `0`, then
-restart `rosecd`. Subsequent cache writes omit the token. Disabling the option
+restart `rosecd`. The next online unlock deletes the saved authentication record.
+Expired or rejected tokens are also removed when the plugin requests a fresh
+second factor; a wrong password cannot erase a valid saved record. Removing the
+provider deletes its auth record. Disabling the option
 does not revoke existing sessions or server-issued tokens; use Bitwarden's session
 revocation controls if you need to revoke access.
 

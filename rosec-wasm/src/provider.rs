@@ -82,6 +82,13 @@ pub struct WasmProviderConfig {
     pub unlock_timeout_secs: u64,
 }
 
+/// Per-attempt auth-cache key; never retained across lock/unlock.
+struct AuthCacheContext {
+    key: crate::cache::CacheKey,
+    authenticated: bool,
+    max_age_secs: u64,
+}
+
 /// A `Provider` backed by an Extism WASM plugin.
 ///
 /// All plugin calls go through a `Mutex<Plugin>` because `extism::Plugin`
@@ -569,6 +576,94 @@ impl WasmProvider {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// Ask the guest for its auth-only persistence policy. No vault cache is read.
+    async fn prepare_auth_cache(
+        &self,
+        password: &str,
+        generation: u64,
+    ) -> Result<(Option<AuthCacheContext>, Option<Zeroizing<String>>), ProviderError> {
+        use crate::protocol::AuthCachePolicy;
+        let policy: Option<AuthCachePolicy> = self
+            .worker
+            .call_for_generation(generation, |plugin| {
+                if !plugin.function_exists("auth_cache_policy")
+                    || !plugin.function_exists("export_auth_state")
+                {
+                    return (Ok(None), CallOutcome::Clean);
+                }
+                let (result, outcome) =
+                    call_guest_json_no_input::<AuthCachePolicy>(plugin, "auth_cache_policy");
+                (result.map(Some), outcome)
+            })
+            .await?;
+        let Some(policy) = policy else {
+            return Ok((None, None));
+        };
+        let max_age_secs = policy.max_age_secs.min(crate::auth_cache::MAX_AGE_SECS);
+        let id = self.config.id.to_owned();
+        if max_age_secs == 0 {
+            tokio::task::spawn_blocking(move || crate::auth_cache::clear(&id))
+                .await
+                .map_err(|_| ProviderError::Unavailable("Auth cache cleanup failed".into()))??;
+            return Ok((None, None));
+        }
+        let password = Zeroizing::new(password.to_owned());
+        let result = tokio::task::spawn_blocking(move || {
+            let machine = rosec_core::machine_key::load_or_create().map_err(|_| {
+                ProviderError::Unavailable("Cannot load auth cache machine key".into())
+            })?;
+            let key = crate::auth_cache::derive_key(&machine, &password, &id)?;
+            // A wrong password, corrupt record or absent record provides no
+            // authority to delete an existing credential on a failed login.
+            let (authenticated, state) =
+                crate::auth_cache::load_for_unlock(&id, &key, max_age_secs)
+                    .unwrap_or((false, None));
+            Ok::<_, ProviderError>((
+                Some(AuthCacheContext {
+                    key,
+                    authenticated,
+                    max_age_secs,
+                }),
+                state,
+            ))
+        })
+        .await
+        .map_err(|_| ProviderError::Unavailable("Auth cache loading failed".into()))??;
+        self.worker.check_generation(generation)?;
+        Ok(result)
+    }
+
+    /// Persist auth state even on a 2FA challenge, so rejected tokens are removed.
+    async fn persist_auth_cache(
+        &self,
+        context: AuthCacheContext,
+        login_ok: bool,
+        generation: u64,
+    ) -> Result<(), ProviderError> {
+        use crate::protocol::ExportAuthStateResponse;
+        let state: ExportAuthStateResponse = self
+            .worker
+            .call_for_generation(generation, |plugin| {
+                call_guest_json_no_input(plugin, "export_auth_state")
+            })
+            .await?;
+        self.worker.check_generation(generation)?;
+        let id = self.config.id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::auth_cache::apply_update(
+                &id,
+                &context.key,
+                &state,
+                context.max_age_secs,
+                login_ok,
+                context.authenticated,
+            )
+        })
+        .await
+        .map_err(|_| ProviderError::Unavailable("Auth cache saving failed".into()))??;
+        self.worker.check_generation(generation)
+    }
+
     /// Derive the cache key from `password` + machine key + provider ID and
     /// store it in `self.cache_key`.
     ///
@@ -750,42 +845,12 @@ impl Provider for WasmProvider {
             return result;
         }
 
-        // Remembered 2FA is opt-in; decrypt hints with the supplied password.
-        let remember_days = self
-            .config
-            .options
-            .get("two_factor_remember_days")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-            })
-            .unwrap_or(0)
-            .min(30);
-        let cache_blob_b64 = if has_offline_cache && remember_days > 0 {
-            self.derive_and_store_cache_key(password_ref.as_str(), generation)
-                .await;
-            let guard = self.cache_key.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().and_then(|key| {
-                crate::cache::read_cache_file(
-                    &self.config.id,
-                    key,
-                    std::time::Duration::from_secs(remember_days * 24 * 60 * 60),
-                )
-                .ok()
-                .flatten()
-                .and_then(|(blob, _)| {
-                    std::str::from_utf8(&blob)
-                        .ok()
-                        .map(|s| Zeroizing::new(s.to_owned()))
-                })
-            })
-        } else {
-            None
-        };
+        let (auth_cache, auth_state_b64) =
+            self.prepare_auth_cache(password_ref, generation).await?;
 
         let req = match &input {
             UnlockInput::Password(pw) => UnlockRequest {
-                cache_blob_b64,
+                auth_state_b64,
                 password: pw.as_str().to_owned(),
                 registration_fields: None,
                 auth_fields: None,
@@ -794,7 +859,7 @@ impl Provider for WasmProvider {
                 password,
                 registration_fields,
             } => UnlockRequest {
-                cache_blob_b64,
+                auth_state_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: Some(fields_to_plain(registration_fields)),
                 auth_fields: None,
@@ -803,7 +868,7 @@ impl Provider for WasmProvider {
                 password,
                 auth_fields,
             } => UnlockRequest {
-                cache_blob_b64,
+                auth_state_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: None,
                 auth_fields: Some(fields_to_plain(auth_fields)),
@@ -848,7 +913,7 @@ impl Provider for WasmProvider {
                             // whatever field names the provider registered with (e.g.
                             // "access_token" for SM, "client_id"/"client_secret" for PM).
                             let retry_req = UnlockRequest {
-                                cache_blob_b64: None,
+                                auth_state_b64: None,
                                 password: password_ref.as_str().to_owned(),
                                 registration_fields: Some(fields_to_plain(&stored_fields)),
                                 auth_fields: None,
@@ -904,6 +969,10 @@ impl Provider for WasmProvider {
 
         let resp = result?;
         self.worker.check_generation(generation)?;
+        if let Some(context) = auth_cache {
+            self.persist_auth_cache(context, resp.ok, generation)
+                .await?;
+        }
         if resp.ok {
             // If registration fields were provided, persist them for next time.
             if has_registration

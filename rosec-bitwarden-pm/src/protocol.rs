@@ -43,11 +43,10 @@ pub struct StatusResponse {
 /// Sent to `unlock`.
 #[derive(Serialize, Deserialize)]
 pub struct UnlockRequest {
-    /// Optional base64-encoded provider cache, decrypted by the host.
-    /// Contents use the guest's opaque cache format and may supply authentication
-    /// hints; receiving the blob never constitutes a successful unlock.
+    /// Optional base64-encoded provider authentication state from its separate
+    /// encrypted auth store. Must never contain vault items or vault keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_blob_b64: Option<zeroize::Zeroizing<String>>,
+    pub auth_state_b64: Option<zeroize::Zeroizing<String>>,
 
     /// The user's master password.
     pub password: String,
@@ -574,4 +573,19 @@ pub enum NotificationActionKind {
     Sync,
     Lock,
     Ignore,
+}
+
+/// Optional guest policy for its separate authentication cache. Zero disables it.
+/// The host caps this at 30 days; provider-specific options stay in the guest.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthCachePolicy {
+    pub max_age_secs: u64,
+}
+
+/// Authentication state only, never offline vault contents. None requests deletion.
+/// No Debug implementation: this response contains a credential.
+#[derive(Serialize, Deserialize)]
+pub struct ExportAuthStateResponse {
+    pub state_b64: Option<zeroize::Zeroizing<String>>,
+    pub expires_at_epoch_secs: Option<u64>,
 }
