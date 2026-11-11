@@ -21,12 +21,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get -o APT::Update::Error-Mode=any update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -44,12 +42,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get -o APT::Update::Error-Mode=any update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -91,12 +87,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get -o APT::Update::Error-Mode=any update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Read declared MSRV from Cargo.toml
         id: msrv
