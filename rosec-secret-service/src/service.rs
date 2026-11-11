@@ -63,7 +63,10 @@ impl SecretService {
             .state
             .sessions
             .open_session_for(algorithm, &input, owner.clone())
-            .map_err(map_provider_error)?;
+            .map_err(|error| match error {
+                ProviderError::InvalidInput(reason) => FdoError::InvalidArgs(reason.to_string()),
+                other => map_provider_error(other),
+            })?;
 
         // Register the org.freedesktop.Secret.Session object at the session path
         let session_obj = SecretSession::new(path.clone(), Arc::clone(&self.state.sessions));
