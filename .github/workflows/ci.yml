@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -146,3 +147,6 @@ jobs:
 
       - name: Build (strict — broken links + bad MDX fail the build)
         run: npm run build
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true

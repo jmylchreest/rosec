@@ -67,3 +67,6 @@ jobs:
       # of its own output — so re-run with the ignore list out of scope.
       - name: Check for stale audit exemptions
         run: ./contrib/check-stale-audit-ignores.sh
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
