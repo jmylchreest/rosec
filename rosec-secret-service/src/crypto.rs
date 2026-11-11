@@ -199,8 +199,9 @@ pub fn aes128_cbc_decrypt(
 
 /// Zero-pad a big-endian byte vector to exactly 128 bytes.
 ///
-/// `BigUint::to_bytes_be()` omits leading zeros; the DH public key and shared
-/// secret must be exactly 128 bytes for the spec to work correctly.
+/// `BigUint::to_bytes_be()` omits leading zeros. We emit fixed-width public
+/// keys while accepting variable-width unsigned encodings from clients.
+/// The shared secret is padded to the group width before key derivation.
 fn pad_to_128(mut bytes: Vec<u8>) -> Vec<u8> {
     // Mod-p values never exceed 128 bytes; nothing to pad.
     if bytes.len() >= DH_KEY_BYTES {
@@ -325,10 +326,30 @@ mod tests {
             (&p + BigUint::from(1u32)).to_bytes_be(),
             vec![1; DH_KEY_BYTES + 1],
         ] {
-            assert!(matches!(
-                derive_session_key(&server_kp, &encoding),
-                Err(ProviderError::Unavailable(_))
-            ));
+            for prefix_len in [0, 1, 3] {
+                let mut prefixed = vec![0; prefix_len];
+                prefixed.extend_from_slice(&encoding);
+                assert!(matches!(
+                    derive_session_key(&server_kp, &prefixed),
+                    Err(ProviderError::Unavailable(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn client_pubkey_range_boundaries_accepted_with_zero_prefixes() {
+        let server_kp = generate_dh_keypair().unwrap();
+        let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
+        for value in [BigUint::from(2u32), &p - BigUint::from(2u32)] {
+            let minimal = value.to_bytes_be();
+            let expected = derive_session_key(&server_kp, &minimal).unwrap();
+            for prefix_len in [1, 3, DH_KEY_BYTES] {
+                let mut prefixed = vec![0; prefix_len];
+                prefixed.extend_from_slice(&minimal);
+                let actual = derive_session_key(&server_kp, &prefixed).unwrap();
+                assert_eq!(actual.as_ref(), expected.as_ref());
+            }
         }
     }
 
