@@ -83,6 +83,7 @@ struct GuestState {
     /// `grant_type=password` login.  This prevents Bitwarden's server from
     /// invalidating other clients' sessions on every lock/unlock cycle.
     cached_session: Option<CachedSession>,
+    remembered_two_factor: Option<RememberedTwoFactor>,
 }
 
 /// One-time configuration injected by `init`.
@@ -91,6 +92,43 @@ struct GuestConfig {
     email: String,
     urls: ServerUrls,
     device_id: String,
+    two_factor_remember_days: u64,
+}
+
+/// Accept numeric TOML values and text values from the provider-add prompt.
+fn parse_two_factor_remember_days(value: Option<&serde_json::Value>) -> Result<u64, &'static str> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+        .map(|days| days.min(30))
+        .ok_or("two_factor_remember_days must be a non-negative whole number")
+}
+
+/// Server-issued credential, scoped to the account, server and device.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RememberedTwoFactor {
+    token: Zeroizing<String>,
+    issued_at: u64,
+    email: String,
+    identity_url: String,
+    device_id: String,
+}
+
+impl RememberedTwoFactor {
+    fn valid_for(&self, config: &GuestConfig, now: u64) -> bool {
+        config.two_factor_remember_days > 0
+            && self.email == config.email
+            && self.identity_url == config.urls.identity_url
+            && self.device_id == config.device_id
+            && !self.token.is_empty()
+            && now
+                .checked_sub(self.issued_at)
+                .is_some_and(|age| age < config.two_factor_remember_days.min(30) * 24 * 60 * 60)
+    }
 }
 
 /// Authenticated state — populated by `unlock`, cleared by `lock`.
@@ -846,6 +884,7 @@ fn authenticate(
     password: &str,
     two_factor: Option<TwoFactorSubmission>,
     cached_session: Option<CachedSession>,
+    remembered: &mut Option<RememberedTwoFactor>,
 ) -> Result<AuthState, BitwardenError> {
     let email = &config.email;
     let api = ApiClient::new(config.urls.clone(), config.device_id.clone());
@@ -873,15 +912,31 @@ fn authenticate(
                     extism_pdk::info!(
                         "refresh token expired or rejected, falling back to password login: {e}"
                     );
-                    full_password_login(&api, email, password, &master_key, None)?
+                    full_password_login(
+                        &api,
+                        email,
+                        password,
+                        &master_key,
+                        None,
+                        config,
+                        remembered,
+                    )?
                 }
             }
         } else {
-            full_password_login(&api, email, password, &master_key, None)?
+            full_password_login(&api, email, password, &master_key, None, config, remembered)?
         }
     } else {
         // 2FA requires a full password login.
-        full_password_login(&api, email, password, &master_key, two_factor)?
+        full_password_login(
+            &api,
+            email,
+            password,
+            &master_key,
+            two_factor,
+            config,
+            remembered,
+        )?
     };
 
     // Step 4: Initialize vault state from protected key.
@@ -913,10 +968,14 @@ fn full_password_login(
     password: &str,
     master_key: &[u8],
     two_factor: Option<TwoFactorSubmission>,
+    config: &GuestConfig,
+    remembered: &mut Option<RememberedTwoFactor>,
 ) -> Result<LoginTokens, BitwardenError> {
     let password_hash = crypto::derive_password_hash(master_key, password.as_bytes());
-    let hash_b64 = crypto::b64_encode(&password_hash);
-    let login_resp = api.login_password(email, &hash_b64, two_factor)?;
+    let hash_b64 = Zeroizing::new(crypto::b64_encode(&password_hash));
+    let login_resp = login_with_remembered(config, two_factor, remembered, |submission| {
+        api.login_password(email, &hash_b64, submission)
+    })?;
 
     let protected_key = login_resp
         .key
@@ -927,6 +986,53 @@ fn full_password_login(
         login_resp.refresh_token,
         protected_key,
     ))
+}
+
+/// A rejected remember token is discarded before retrying the ordinary login challenge.
+fn login_with_remembered(
+    config: &GuestConfig,
+    two_factor: Option<TwoFactorSubmission>,
+    remembered: &mut Option<RememberedTwoFactor>,
+    mut login: impl FnMut(Option<TwoFactorSubmission>) -> Result<api::LoginResponse, BitwardenError>,
+) -> Result<api::LoginResponse, BitwardenError> {
+    let using_remembered = two_factor.is_none() && remembered.is_some();
+    let submission = two_factor.or_else(|| {
+        remembered.as_ref().map(|r| TwoFactorSubmission {
+            token: Zeroizing::new(r.token.to_string()),
+            provider: 5,
+            remember: false,
+        })
+    });
+    let result = login(submission);
+    let mut login_resp = match result {
+        Err(BitwardenError::TwoFactorRequired { .. } | BitwardenError::Auth(_))
+            if using_remembered =>
+        {
+            *remembered = None;
+            login(None)?
+        }
+        other => other?,
+    };
+    if config.two_factor_remember_days > 0
+        && let Some(token) = login_resp.two_factor_token.take()
+    {
+        *remembered = Some(RememberedTwoFactor {
+            token,
+            issued_at: if using_remembered {
+                remembered
+                    .as_ref()
+                    .map(|r| r.issued_at)
+                    .unwrap_or_else(|| to_epoch_secs(SystemTime::now()))
+            } else {
+                to_epoch_secs(SystemTime::now())
+            },
+            email: config.email.to_owned(),
+            identity_url: config.urls.identity_url.to_owned(),
+            device_id: config.device_id.to_owned(),
+        });
+    }
+
+    Ok(login_resp)
 }
 
 /// Re-sync the vault using the existing access token.
@@ -1095,6 +1201,12 @@ pub fn plugin_manifest(_: ()) -> FnResult<Json<PluginManifest>> {
                 kind: "text".to_string(),
             },
             PluginOptionDescriptor {
+                key: "two_factor_remember_days".to_string(),
+                description: "Days to remember two-factor login (default 0; capped at 30)"
+                    .to_string(),
+                kind: "text".to_string(),
+            },
+            PluginOptionDescriptor {
                 key: "collection".to_string(),
                 description:
                     "Label stamped on all items as the 'collection' attribute (e.g. 'work')"
@@ -1181,11 +1293,23 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
         },
     };
 
+    let two_factor_remember_days =
+        match parse_two_factor_remember_days(req.options.get("two_factor_remember_days")) {
+            Ok(days) => days,
+            Err(error) => {
+                return Ok(Json(InitResponse {
+                    ok: false,
+                    error: Some(error.into()),
+                }));
+            }
+        };
+
     let config = GuestConfig {
         provider_id: req.provider_id,
         email,
         urls,
         device_id,
+        two_factor_remember_days,
     };
 
     extism_pdk::info!(
@@ -1198,6 +1322,7 @@ pub fn init(Json(req): Json<InitRequest>) -> FnResult<Json<InitResponse>> {
         config,
         auth: None,
         cached_session: None,
+        remembered_two_factor: None,
     });
 
     Ok(Json(InitResponse {
@@ -1312,17 +1437,40 @@ pub fn unlock(Json(req): Json<UnlockRequest>) -> FnResult<Json<SimpleResponse>> 
                 }));
             };
             Some(TwoFactorSubmission {
-                token: token.clone(),
+                token: Zeroizing::new(token.to_owned()),
                 provider,
+                remember: state.config.two_factor_remember_days > 0,
             })
         }
         _ => None,
     };
 
+    // Only auth state is accepted here. The offline vault cache is never read.
+    if state.remembered_two_factor.is_none() {
+        state.remembered_two_factor = req
+            .auth_state_b64
+            .as_ref()
+            .and_then(|s| decode_auth_state(s, &state.config, to_epoch_secs(SystemTime::now())));
+    }
+    let now = to_epoch_secs(SystemTime::now());
+    if !state
+        .remembered_two_factor
+        .as_ref()
+        .is_some_and(|r| r.valid_for(&state.config, now))
+    {
+        state.remembered_two_factor = None;
+    }
+
     // Take the cached session so it can be consumed by authenticate().
     let cached_session = state.cached_session.take();
 
-    match authenticate(&state.config, &req.password, two_factor, cached_session) {
+    match authenticate(
+        &state.config,
+        &req.password,
+        two_factor,
+        cached_session,
+        &mut state.remembered_two_factor,
+    ) {
         Ok(auth) => {
             let ciphers = auth.vault.ciphers().len();
             state.auth = Some(auth);
@@ -1993,6 +2141,66 @@ pub fn readiness_probes(_input: ()) -> FnResult<Json<ReadinessProbesResponse>> {
     }))
 }
 
+fn decode_auth_state(encoded: &str, config: &GuestConfig, now: u64) -> Option<RememberedTwoFactor> {
+    use base64::Engine;
+    if config.two_factor_remember_days == 0 || encoded.len() > 16 * 1024 {
+        return None;
+    }
+    let bytes = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()?,
+    );
+    let token: RememberedTwoFactor = serde_json::from_slice(&bytes).ok()?;
+    token.valid_for(config, now).then_some(token)
+}
+
+fn encode_auth_state(
+    token: &RememberedTwoFactor,
+    days: u64,
+) -> Result<ExportAuthStateResponse, serde_json::Error> {
+    use base64::Engine;
+    let bytes = Zeroizing::new(serde_json::to_vec(token)?);
+    Ok(ExportAuthStateResponse {
+        state_b64: Some(Zeroizing::new(
+            base64::engine::general_purpose::STANDARD.encode(&*bytes),
+        )),
+        expires_at_epoch_secs: Some(token.issued_at.saturating_add(days.min(30) * 86400)),
+    })
+}
+
+/// Generic auth-cache policy; only this guest knows the Bitwarden option name.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
+pub fn auth_cache_policy(_: ()) -> FnResult<Json<AuthCachePolicy>> {
+    let guard = STATE.lock();
+    let max_age_secs = guard
+        .as_ref()
+        .map(|s| s.config.two_factor_remember_days * 86400)
+        .unwrap_or(0);
+    Ok(Json(AuthCachePolicy { max_age_secs }))
+}
+
+/// Export authentication metadata only, including after a rejected login so
+/// the host can persist deletion of a rejected/expired credential.
+#[cfg_attr(target_family = "wasm", plugin_fn)]
+pub fn export_auth_state(_: ()) -> FnResult<Json<ExportAuthStateResponse>> {
+    let guard = STATE.lock();
+    let token = guard.as_ref().and_then(|state| {
+        state
+            .remembered_two_factor
+            .as_ref()
+            .filter(|r| r.valid_for(&state.config, to_epoch_secs(SystemTime::now())))
+            .map(|r| (r, state.config.two_factor_remember_days))
+    });
+    match token {
+        Some((token, days)) => Ok(Json(encode_auth_state(token, days)?)),
+        None => Ok(Json(ExportAuthStateResponse {
+            state_b64: None,
+            expires_at_epoch_secs: None,
+        })),
+    }
+}
+
 // ── Offline cache ────────────────────────────────────────────────
 
 /// Export the current vault state as an opaque cache blob.
@@ -2063,7 +2271,8 @@ pub fn export_cache(_input: ()) -> FnResult<Json<ExportCacheResponse>> {
 
     match blob_ref.to_bytes() {
         Ok(blob) => {
-            let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+            let blob = Zeroizing::new(blob);
+            let blob_b64 = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*blob));
             Ok(Json(ExportCacheResponse {
                 ok: true,
                 error: None,
@@ -2108,8 +2317,8 @@ pub fn export_cache(_input: ()) -> FnResult<Json<ExportCacheResponse>> {
 pub fn restore_cache(Json(input): Json<RestoreCacheRequest>) -> FnResult<Json<SimpleResponse>> {
     use base64::Engine;
 
-    let blob = match base64::engine::general_purpose::STANDARD.decode(&input.blob_b64) {
-        Ok(b) => b,
+    let blob = match base64::engine::general_purpose::STANDARD.decode(input.blob_b64.as_bytes()) {
+        Ok(b) => Zeroizing::new(b),
         Err(e) => {
             return Ok(Json(SimpleResponse {
                 ok: false,
@@ -2372,4 +2581,243 @@ pub fn parse_notification(
     }
 
     Ok(Json(protocol::NotificationAction { action: result }))
+}
+
+#[cfg(test)]
+mod remember_tests {
+    use super::*;
+
+    fn config() -> GuestConfig {
+        GuestConfig {
+            provider_id: "test".into(),
+            email: "test@example.com".into(),
+            urls: ServerUrls::official_us(),
+            device_id: "device".into(),
+            two_factor_remember_days: 30,
+        }
+    }
+
+    fn remembered() -> RememberedTwoFactor {
+        let c = config();
+        RememberedTwoFactor {
+            token: Zeroizing::new("remember-secret".into()),
+            issued_at: 100,
+            email: c.email,
+            identity_url: c.urls.identity_url,
+            device_id: c.device_id,
+        }
+    }
+
+    fn response(token: Option<&str>) -> api::LoginResponse {
+        api::LoginResponse {
+            access_token: Zeroizing::new("access".into()),
+            refresh_token: None,
+            key: None,
+            two_factor_token: token.map(|s| Zeroizing::new(s.into())),
+        }
+    }
+
+    #[test]
+    fn expiry_and_clock_rollback_fail_closed() {
+        let token = remembered();
+        let c = config();
+        assert!(token.valid_for(&c, 100));
+        assert!(token.valid_for(&c, 100 + 30 * 86400 - 1));
+        assert!(!token.valid_for(&c, 100 + 30 * 86400));
+        assert!(!token.valid_for(&c, 99));
+    }
+
+    #[test]
+    fn token_is_bound_to_account_server_device_and_opt_in() {
+        let token = remembered();
+        let mut c = config();
+        c.two_factor_remember_days = 0;
+        assert!(!token.valid_for(&c, 100));
+        c = config();
+        c.email = "other@example.com".into();
+        assert!(!token.valid_for(&c, 100));
+        c = config();
+        c.urls = ServerUrls::official_eu();
+        assert!(!token.valid_for(&c, 100));
+        c = config();
+        c.device_id = "another-device".into();
+        assert!(!token.valid_for(&c, 100));
+    }
+
+    #[test]
+    fn rejected_token_retries_without_it_and_surfaces_challenge() {
+        let mut token = Some(remembered());
+        let mut calls = 0;
+        let result = login_with_remembered(&config(), None, &mut token, |submission| {
+            calls += 1;
+            if calls == 1 {
+                let submission = submission.unwrap();
+                assert_eq!(submission.provider, 5);
+                assert_eq!(submission.token.as_str(), "remember-secret");
+                assert!(!submission.remember);
+                Err(BitwardenError::Auth("rejected".into()))
+            } else {
+                assert!(submission.is_none());
+                Err(BitwardenError::TwoFactorRequired {
+                    providers: vec![0],
+                    email_hint: None,
+                })
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(BitwardenError::TwoFactorRequired { .. })
+        ));
+        assert_eq!(calls, 2);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn network_failure_does_not_retry_or_discard_token() {
+        let mut token = Some(remembered());
+        let mut calls = 0;
+        let result = login_with_remembered(&config(), None, &mut token, |_| {
+            calls += 1;
+            Err(BitwardenError::Http("offline".into()))
+        });
+        assert!(matches!(result, Err(BitwardenError::Http(_))));
+        assert_eq!(calls, 1);
+        assert!(token.is_some());
+    }
+
+    #[test]
+    fn explicit_totp_takes_precedence_and_replaces_token() {
+        let mut token = Some(remembered());
+        let submission = TwoFactorSubmission {
+            token: Zeroizing::new("123456".into()),
+            provider: 0,
+            remember: true,
+        };
+        login_with_remembered(&config(), Some(submission), &mut token, |s| {
+            let s = s.unwrap();
+            assert_eq!(s.provider, 0);
+            assert!(s.remember);
+            Ok(response(Some("new-secret")))
+        })
+        .unwrap();
+        assert_eq!(token.unwrap().token.as_str(), "new-secret");
+    }
+
+    #[test]
+    fn successful_reuse_does_not_extend_local_expiry() {
+        let mut token = Some(remembered());
+        login_with_remembered(&config(), None, &mut token, |_| Ok(response(None))).unwrap();
+        assert_eq!(token.unwrap().issued_at, 100);
+    }
+
+    #[test]
+    fn disabled_setting_does_not_save_server_token() {
+        let mut c = config();
+        c.two_factor_remember_days = 0;
+        let mut token = None;
+        login_with_remembered(&c, None, &mut token, |_| Ok(response(Some("ignored")))).unwrap();
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn remembered_credential_round_trip_preserves_scope_and_expiry() {
+        let token = remembered();
+        let bytes = Zeroizing::new(serde_json::to_vec(&token).unwrap());
+        let restored: RememberedTwoFactor = serde_json::from_slice(&bytes).unwrap();
+        assert!(restored.valid_for(&config(), 100));
+        assert_eq!(restored.token.as_str(), token.token.as_str());
+        assert_eq!(restored.issued_at, token.issued_at);
+    }
+    #[test]
+    fn remember_days_default_cap_and_invalid_values() {
+        use serde_json::json;
+        assert_eq!(parse_two_factor_remember_days(None), Ok(0));
+        for (value, expected) in [
+            (json!(0), 0),
+            (json!(7), 7),
+            (json!(30), 30),
+            (json!(31), 30),
+            (json!(u64::MAX), 30),
+            (json!("7"), 7),
+            (json!("90"), 30),
+        ] {
+            assert_eq!(parse_two_factor_remember_days(Some(&value)), Ok(expected));
+        }
+        for value in [
+            json!(-1),
+            json!(1.5),
+            json!(true),
+            json!("false"),
+            json!("-1"),
+            json!(null),
+        ] {
+            assert!(parse_two_factor_remember_days(Some(&value)).is_err());
+        }
+    }
+
+    #[test]
+    fn shorter_duration_expires_from_original_issue_time() {
+        let token = remembered();
+        let mut c = config();
+        c.two_factor_remember_days = 7;
+        assert!(token.valid_for(&c, 100 + 7 * 86400 - 1));
+        assert!(!token.valid_for(&c, 100 + 7 * 86400));
+        c.two_factor_remember_days = 0;
+        assert!(!token.valid_for(&c, 100));
+    }
+
+    #[test]
+    fn server_rotation_does_not_extend_local_expiry() {
+        let mut token = Some(remembered());
+        login_with_remembered(&config(), None, &mut token, |_| {
+            Ok(response(Some("rotated")))
+        })
+        .unwrap();
+        assert_eq!(token.unwrap().issued_at, 100);
+    }
+    #[test]
+    fn auth_payload_contains_only_allowlisted_auth_fields() {
+        use base64::Engine;
+        let r = encode_auth_state(&remembered(), 7).unwrap();
+        let encoded = r.state_b64.unwrap();
+        let bytes = Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .unwrap(),
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut keys: Vec<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["device_id", "email", "identity_url", "issued_at", "token"]
+        );
+        assert_eq!(r.expires_at_epoch_secs, Some(100 + 7 * 86400));
+        assert!(decode_auth_state(&encoded, &config(), 100).is_some());
+    }
+
+    #[test]
+    fn auth_import_rejects_vault_blobs_extra_fields_and_expiry() {
+        use base64::Engine;
+        let r = encode_auth_state(&remembered(), 30).unwrap();
+        let encoded = r.state_b64.unwrap();
+        let mut value = serde_json::to_value(remembered()).unwrap();
+        value["vault"] = serde_json::json!({"password": "VAULT-PASSWORD-MARKER"});
+        let extra =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&value).unwrap());
+        assert!(decode_auth_state(&extra, &config(), 100).is_none());
+        let vault = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"version":2,"vault":{"password":"VAULT-PASSWORD-MARKER"}}"#);
+        assert!(decode_auth_state(&vault, &config(), 100).is_none());
+        assert!(decode_auth_state(&encoded, &config(), 100 + 30 * 86400).is_none());
+        assert!(decode_auth_state("not base64!", &config(), 100).is_none());
+        let mut disabled = config();
+        disabled.two_factor_remember_days = 0;
+        assert!(decode_auth_state(&encoded, &disabled, 100).is_none());
+    }
 }

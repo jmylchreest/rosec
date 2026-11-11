@@ -153,12 +153,15 @@ impl ApiClient {
         params.push(("password", password_hash_b64.to_string()));
 
         if let Some(tf) = two_factor {
-            params.push(("twoFactorToken", tf.token));
+            params.push(("twoFactorToken", tf.token.to_string()));
             params.push(("twoFactorProvider", tf.provider.to_string()));
-            params.push(("twoFactorRemember", "0".to_string()));
+            params.push((
+                "twoFactorRemember",
+                if tf.remember { "1" } else { "0" }.to_string(),
+            ));
         }
 
-        let mut form_body = url_encode_form(&params);
+        let mut form_body = Zeroizing::new(url_encode_form(&params));
         // Zeroize sensitive params before proceeding.
         for (_, v) in &mut params {
             v.zeroize();
@@ -178,11 +181,12 @@ impl ApiClient {
         form_body.zeroize();
 
         let status = resp.status_code();
-        let body = resp.body();
-        let body_str = String::from_utf8_lossy(&body);
+        let body = Zeroizing::new(resp.body());
+        let body_str = std::str::from_utf8(&body)
+            .map_err(|_| BitwardenError::Api("invalid login response encoding".into()))?;
 
         if !(200..300).contains(&status) {
-            if let Ok(err_resp) = serde_json::from_str::<LoginErrorResponse>(&body_str) {
+            if let Ok(err_resp) = serde_json::from_str::<LoginErrorResponse>(body_str) {
                 // Device not registered
                 if err_resp.error.as_deref() == Some("device_error") {
                     return Err(BitwardenError::DeviceVerificationRequired);
@@ -210,12 +214,10 @@ impl ApiClient {
                     });
                 }
             }
-            return Err(BitwardenError::Auth(format!(
-                "login failed ({status}): {body_str}"
-            )));
+            return Err(BitwardenError::Auth(format!("login failed ({status})")));
         }
 
-        let login: LoginResponse = serde_json::from_str(&body_str)
+        let login: LoginResponse = serde_json::from_str(body_str)
             .map_err(|e| BitwardenError::Api(format!("login response parse: {e}")))?;
 
         extism_pdk::debug!("login successful");
@@ -420,8 +422,9 @@ struct PreloginResponse {
 /// Two-factor authentication submission.
 #[derive(Clone)]
 pub struct TwoFactorSubmission {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub provider: u8,
+    pub remember: bool,
 }
 
 impl std::fmt::Debug for TwoFactorSubmission {
@@ -454,6 +457,13 @@ where
 /// Login response — tokens and the protected vault key are all sensitive.
 #[derive(Deserialize)]
 pub struct LoginResponse {
+    #[serde(
+        default,
+        rename = "TwoFactorToken",
+        alias = "twoFactorToken",
+        deserialize_with = "deser_opt_zeroizing_string"
+    )]
+    pub two_factor_token: Option<Zeroizing<String>>,
     #[serde(deserialize_with = "deser_zeroizing_string")]
     pub access_token: Zeroizing<String>,
     #[serde(default, deserialize_with = "deser_opt_zeroizing_string")]
@@ -765,7 +775,7 @@ pub struct SyncField {
 
 #[cfg(test)]
 mod tests {
-    use super::LoginErrorResponse;
+    use super::{LoginErrorResponse, LoginResponse};
 
     /// Bitwarden SaaS returns provider codes as JSON strings: `["0","7","3"]`.
     #[test]
@@ -941,5 +951,22 @@ mod tests {
             .and_then(|v| v.get("Email"))
             .and_then(|v| v.as_str());
         assert_eq!(email, None);
+    }
+    #[test]
+    fn remember_response_accepts_server_casing_and_redacts_secrets() {
+        for field in ["TwoFactorToken", "twoFactorToken"] {
+            let payload =
+                format!(r#"{{"access_token":"access-secret","{field}":"remember-secret"}}"#);
+            let response: LoginResponse = serde_json::from_str(&payload).unwrap();
+            assert_eq!(
+                response.two_factor_token.as_ref().unwrap().as_str(),
+                "remember-secret"
+            );
+            let debug = format!("{response:?}");
+            assert!(!debug.contains("remember-secret"));
+            assert!(!debug.contains("access-secret"));
+        }
+        let response: LoginResponse = serde_json::from_str(r#"{"access_token":"access"}"#).unwrap();
+        assert!(response.two_factor_token.is_none());
     }
 }

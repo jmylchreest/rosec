@@ -24,6 +24,9 @@ pub async fn run(id: &str) -> Result<()> {
         .map(expand_tilde);
 
     config_edit::remove_provider(&cfg, id)?;
+    // Auth-only state must not survive detaching a provider. Vault cache and
+    // vault files have separate retention rules.
+    rosec_wasm::auth_cache::clear(id)?;
     println!("Removed provider '{id}' from {}", cfg.display());
 
     if let Some(ref path) = vault_path

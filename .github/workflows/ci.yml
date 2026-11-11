@@ -11,20 +11,20 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Keep dependency installation on a known OS release rather than allowing
+# ubuntu-latest migrations to change the runner and APT repositories implicitly.
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,17 +37,15 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,7 +60,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -84,17 +82,15 @@ jobs:
     if: needs.scope.outputs.providers == 'true'
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
+      # zbus is pure Rust; libdbus development packages are not required.
+      # pkg-config is supplied by the pinned GitHub runner image.
+      - name: Verify runner build tools
+        run: pkg-config --version
 
       - name: Read declared MSRV from Cargo.toml
         id: msrv
@@ -127,7 +123,7 @@ jobs:
 
   docs:
     name: Docusaurus
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: docs
@@ -154,7 +150,7 @@ jobs:
       - scope
     if: needs.scope.outputs.docs == 'true'
   scope:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       providers: ${{ steps.scope.outputs.providers }}
       docs: ${{ steps.scope.outputs.docs }}
@@ -187,7 +183,7 @@ jobs:
           fi
   complete:
     name: CI complete
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - scope
       - test

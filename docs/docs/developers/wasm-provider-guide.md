@@ -918,3 +918,49 @@ all connection lifecycle — the guest only provides the URL and frame parsing.
 | `"password_change"` | `"PasswordChange"` | `Capability::PasswordChange` | `P` |
 | `"offline_cache"` | `"OfflineCache"` | `Capability::OfflineCache` | `C` |
 | `"notifications"` | `"Notifications"` | `Capability::Notifications` | `N` |
+
+### Separate provider authentication cache
+
+Authentication state and offline vault state have separate interfaces and stores.
+`UnlockRequest.auth_state_b64` is an optional, sensitive, base64-encoded auth-only
+record. It must never contain vault items, notes, passwords or vault decryption
+keys. The host does not read or decrypt the offline vault cache on this path.
+The existing `export_cache` / `restore_cache` interface and vault-cache format
+remain unchanged.
+
+Guests opt in using two optional no-input exports:
+
+| Export | Response | Contract |
+| --- | --- | --- |
+| `auth_cache_policy` | `AuthCachePolicy { max_age_secs }` | Zero disables persistence and requests deletion; the host caps positive durations at 30 days. |
+| `export_auth_state` | `ExportAuthStateResponse { state_b64, expires_at_epoch_secs }` | Auth-only state with an absolute expiry; `state_b64: null` requests deletion. |
+
+Both exports must exist to enable this interface. Older guests receive no auth
+state. Provider-specific options such as Bitwarden's `two_factor_remember_days`
+are interpreted exclusively by the guest. This store is independent of
+`offline_cache` and the `OfflineCache` capability.
+
+The host uses a separate `rosec/auth-cache/<provider-id>.bin` file and a distinct
+Argon2id key-derivation domain (`rosec-provider-auth-v1`), bound to the password,
+machine key and provider ID. It reuses the existing encrypt-then-MAC envelope,
+atomic replacement and `0600` permissions. Auth files are bounded to 24 KiB, with
+a 16 KiB limit on the encoded guest payload. Absolute expiry and policy age are
+checked before passing a credential to the guest; malformed, tampered or
+undecryptable records supply no credential and normal online login can proceed.
+There is no migration that reads a vault cache to recover an auth token.
+
+After online unlock, the host calls `export_auth_state` even when the guest
+returns a 2FA challenge. A successful login may save a new record. A failed login
+may only delete an existing record if it was authenticated with the supplied
+password; it cannot replace it or erase it following a failed decryption. This
+persists rejected-token removal without letting a mistyped password destroy a
+valid record. Storage failures are surfaced rather than silently retaining a
+rejected credential. Disabled policies and provider removal delete only the auth
+record, leaving vault retention rules unchanged.
+
+The Bitwarden PM payload contains only `token`, `issued_at`, `email`,
+`identity_url` and `device_id`. It rejects unknown fields and validates scope and
+age before reuse. Neither token rotation nor reuse extends the issuance time.
+Receiving auth state is not proof of online authentication: the guest must still
+perform online login and password-based vault-key decryption. Sensitive request,
+response and decoded buffers are zeroized and excluded from debug output.

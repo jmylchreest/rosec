@@ -40,6 +40,11 @@ pub struct StatusResponse {
 /// `registration_fields`, and `auth_fields` (which may contain secrets).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UnlockRequest {
+    /// Optional base64-encoded provider authentication state from its separate
+    /// encrypted auth store. Must never contain vault items or vault keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state_b64: Option<zeroize::Zeroizing<String>>,
+
     /// The user's master password.
     pub password: String,
     /// Additional registration fields (for first-time setup).
@@ -658,4 +663,19 @@ pub enum NotificationActionKind {
     Lock,
     /// Ignore this frame (ping, ack, handshake response, unknown).
     Ignore,
+}
+
+/// Optional guest policy for its separate authentication cache. Zero disables it.
+/// The host caps this at 30 days; provider-specific options stay in the guest.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthCachePolicy {
+    pub max_age_secs: u64,
+}
+
+/// Authentication state only, never offline vault contents. None requests deletion.
+/// No Debug implementation: this response contains a credential.
+#[derive(Serialize, Deserialize)]
+pub struct ExportAuthStateResponse {
+    pub state_b64: Option<zeroize::Zeroizing<String>>,
+    pub expires_at_epoch_secs: Option<u64>,
 }
