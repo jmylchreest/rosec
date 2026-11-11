@@ -86,6 +86,11 @@ impl SecretPrompt {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<()> {
+        let Some(cancelled) = self.state.prompts.start(&self.path) else {
+            return Err(zbus::fdo::Error::Failed(
+                "prompt already started or completed".into(),
+            ));
+        };
         tracing::debug!(
             prompt_path = %self.path,
             provider = %self.provider_id,
@@ -115,8 +120,11 @@ impl SecretPrompt {
         state
             .run_on_tokio(async move {
                 tokio::spawn(async move {
-                    run_prompt_task(state2, prompt_path, provider_id, label, ctxt_owned, caller)
-                        .await;
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.notified() => {},
+                        _ = run_prompt_task(state2, prompt_path, provider_id, label, ctxt_owned, caller) => {},
+                    }
                 });
             })
             .await?;
@@ -125,15 +133,8 @@ impl SecretPrompt {
     }
 
     /// Dismiss the prompt (cancel).  Kills the child subprocess if still running.
-    async fn dismiss(
-        &self,
-        #[zbus(signal_emitter)] ctxt: SignalEmitter<'_>,
-    ) -> zbus::fdo::Result<()> {
+    async fn dismiss(&self) -> zbus::fdo::Result<()> {
         self.state.cancel_prompt(&self.path);
-        // Dismissed result is an empty string per the Secret Service spec.
-        Self::completed(&ctxt, true, &zbus::Variant::from(""))
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("signal: {e}")))?;
         Ok(())
     }
 
@@ -165,6 +166,9 @@ async fn run_prompt_task(
     // prompt object.  The signal MUST be emitted before the object is
     // deregistered so that D-Bus clients receive it.
     async fn dismiss_and_finish(state: &ServiceState, prompt_path: &str, ctxt: &SignalEmitter<'_>) {
+        if !state.prompts.remove(prompt_path) {
+            return;
+        }
         if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
@@ -477,6 +481,10 @@ async fn on_unlock_success(
 
     tracing::debug!(provider = %provider_id, "provider unlocked via Prompt");
 
+    let Some(pending) = state.prompts.claim_commit(prompt_path) else {
+        return;
+    };
+
     // Opportunistic sweep: try the same password against all other locked
     // providers (detached — does not block the Completed signal).
     {
@@ -491,19 +499,18 @@ async fn on_unlock_success(
 
     // Execute any deferred operation that was stashed when the prompt was
     // created (e.g. CreateItem on a locked collection).
-    let pending = state.take_pending_operation(prompt_path);
     let result_value = match pending {
-        Some(PendingOperation::CreateItem {
+        PendingOperation::CreateItem {
             provider_id: pid,
             item,
             replace,
-        }) => execute_deferred_create(state, &pid, item, replace).await,
-        Some(PendingOperation::DeleteItem {
+        } => execute_deferred_create(state, &pid, item, replace).await,
+        PendingOperation::DeleteItem {
             provider_id: pid,
             item_id,
             item_path,
-        }) => execute_deferred_delete(state, &pid, &item_id, &item_path).await,
-        Some(PendingOperation::Unlock) | None => {
+        } => execute_deferred_delete(state, &pid, &item_id, &item_path).await,
+        PendingOperation::Unlock => {
             // Plain unlock — return ao (array of object paths) of the
             // unlocked collection, per the Secret Service spec.
             Some(zbus::Variant::from(vec![to_object_path(
