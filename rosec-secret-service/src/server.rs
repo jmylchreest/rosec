@@ -102,6 +102,7 @@ pub async fn re_register_top_level_objects(
 /// through this function, so adding a new interface only requires changing
 /// one place.
 async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> zbus::Result<()> {
+    watch_session_owners(conn, state).await?;
     let server = conn.object_server();
 
     server
@@ -156,5 +157,45 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
             .await?;
     }
 
+    Ok(())
+}
+
+/// Subscribe before exposing OpenSession so a caller cannot disappear between
+/// opening a session and installation of disconnect cleanup.
+async fn watch_session_owners(conn: &Connection, state: &Arc<ServiceState>) -> zbus::Result<()> {
+    use futures_util::StreamExt;
+    let proxy = zbus::fdo::DBusProxy::new(conn).await?;
+    let mut changes = proxy.receive_name_owner_changed().await?;
+    let conn = conn.clone();
+    let sessions = Arc::clone(&state.sessions);
+    state.spawn_on_tokio(async move {
+        let bus = conn.server_guid().to_string();
+        loop {
+            let change = tokio::select! {
+                _ = conn.closed() => break,
+                change = changes.next() => match change { Some(change) => change, None => break },
+            };
+            let Ok(args) = change.args() else {
+                continue;
+            };
+            if !args.name().as_str().starts_with(':') || args.new_owner().is_some() {
+                continue;
+            }
+            for path in sessions.remove_owner(&bus, Some(args.name().as_str())) {
+                let _ = conn
+                    .object_server()
+                    .remove::<crate::session_iface::SecretSession, _>(path.as_str())
+                    .await;
+            }
+        }
+        // A closed bus cannot have any usable sessions, even if individual
+        // NameOwnerChanged messages were lost during shutdown.
+        for path in sessions.remove_owner(&bus, None) {
+            let _ = conn
+                .object_server()
+                .remove::<crate::session_iface::SecretSession, _>(path.as_str())
+                .await;
+        }
+    });
     Ok(())
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use zbus::fdo::Error as FdoError;
+use crate::error::SecretServiceError;
 use zbus::interface;
 
 use crate::session::SessionManager;
@@ -24,9 +24,17 @@ impl SecretSession {
 
 #[interface(name = "org.freedesktop.Secret.Session")]
 impl SecretSession {
-    fn close(&self) -> Result<(), FdoError> {
-        self.sessions
-            .close_session(&self.path)
-            .map_err(|e| FdoError::Failed(e.to_string()))
+    async fn close(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<(), SecretServiceError> {
+        let owner = crate::session::SessionOwner::from_request(conn, &header)?;
+        self.sessions.close_for(&self.path, &owner)?;
+        let _ = conn
+            .object_server()
+            .remove::<Self, _>(self.path.as_str())
+            .await;
+        Ok(())
     }
 }

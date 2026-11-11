@@ -26,8 +26,31 @@ impl SessionEncoding {
     }
 }
 
+/// Unique names are scoped to a bus, not to the daemon process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionOwner {
+    pub bus: String,
+    pub name: String,
+}
+
+impl SessionOwner {
+    pub fn from_request(
+        conn: &zbus::Connection,
+        header: &zbus::message::Header<'_>,
+    ) -> Result<Self, SecretServiceError> {
+        let name = header
+            .sender()
+            .ok_or_else(|| SecretServiceError::NoSession("missing caller".into()))?;
+        Ok(Self {
+            bus: conn.server_guid().to_string(),
+            name: name.to_string(),
+        })
+    }
+}
+
 /// Information stored per open session.
 struct SessionInfo {
+    owner: Option<SessionOwner>,
     /// The negotiated algorithm for this session.
     /// Retained for debug output and future per-algorithm policy decisions.
     #[allow(dead_code)]
@@ -72,10 +95,29 @@ impl SessionManager {
     /// * For `"dh-ietf1024-sha256-aes128-cbc-pkcs7"` sessions: `input` must be
     ///   a `Vec<u8>` (the client DH public key, unsigned big-endian).  The
     ///   server performs DH and returns `(server_pubkey_bytes, path)`.
+    #[cfg(test)]
     pub fn open_session(
         &self,
         algorithm: &str,
         input: &Value<'_>,
+    ) -> Result<(Value<'static>, String), ProviderError> {
+        self.open_session_inner(algorithm, input, None)
+    }
+
+    pub fn open_session_for(
+        &self,
+        algorithm: &str,
+        input: &Value<'_>,
+        owner: SessionOwner,
+    ) -> Result<(Value<'static>, String), ProviderError> {
+        self.open_session_inner(algorithm, input, Some(owner))
+    }
+
+    fn open_session_inner(
+        &self,
+        algorithm: &str,
+        input: &Value<'_>,
+        owner: Option<SessionOwner>,
     ) -> Result<(Value<'static>, String), ProviderError> {
         let algo = SessionAlgorithm::parse(algorithm)?;
 
@@ -85,6 +127,7 @@ impl SessionManager {
         match algo {
             SessionAlgorithm::Plain => {
                 let info = SessionInfo {
+                    owner,
                     algorithm: algo,
                     aes_key: None,
                 };
@@ -115,6 +158,7 @@ impl SessionManager {
 
                 let server_pubkey = server_kp.public_bytes.clone();
                 let info = SessionInfo {
+                    owner,
                     algorithm: algo,
                     aes_key: Some(aes_key),
                 };
@@ -171,7 +215,24 @@ impl SessionManager {
 
     /// Resolve the session and its encoding under one lock. Missing sessions
     /// are errors, never an instruction to send or accept plaintext.
+    #[cfg(test)]
     pub fn lookup(&self, path: &str) -> Result<SessionEncoding, SecretServiceError> {
+        self.lookup_inner(path, None)
+    }
+
+    pub fn lookup_for(
+        &self,
+        path: &str,
+        owner: &SessionOwner,
+    ) -> Result<SessionEncoding, SecretServiceError> {
+        self.lookup_inner(path, Some(owner))
+    }
+
+    fn lookup_inner(
+        &self,
+        path: &str,
+        owner: Option<&SessionOwner>,
+    ) -> Result<SessionEncoding, SecretServiceError> {
         let sessions = self
             .sessions
             .lock()
@@ -179,6 +240,9 @@ impl SessionManager {
         let info = sessions
             .get(path)
             .ok_or_else(|| SecretServiceError::NoSession("invalid session".to_string()))?;
+        if info.owner.as_ref() != owner {
+            return Err(SecretServiceError::NoSession("invalid session".into()));
+        }
         Ok(match &info.aes_key {
             Some(key) => SessionEncoding::Dh(Zeroizing::new(**key)),
             None => SessionEncoding::Plain,
@@ -186,6 +250,7 @@ impl SessionManager {
     }
 
     /// Return the negotiated key; only a valid plain session returns `None`.
+    #[cfg(test)]
     pub fn get_session_key(
         &self,
         path: &str,
@@ -194,6 +259,35 @@ impl SessionManager {
             SessionEncoding::Plain => None,
             SessionEncoding::Dh(key) => Some(key),
         })
+    }
+
+    pub fn close_for(&self, path: &str, owner: &SessionOwner) -> Result<(), SecretServiceError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SecretServiceError::Failed("session lock poisoned".into()))?;
+        if sessions.get(path).and_then(|info| info.owner.as_ref()) != Some(owner) {
+            return Err(SecretServiceError::NoSession("invalid session".into()));
+        }
+        sessions.remove(path);
+        Ok(())
+    }
+
+    pub fn remove_owner(&self, bus: &str, name: Option<&str>) -> Vec<String> {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+        let mut removed = Vec::new();
+        sessions.retain(|path, info| {
+            let matches = info.owner.as_ref().is_some_and(|owner| {
+                owner.bus == bus && name.is_none_or(|name| name == owner.name)
+            });
+            if matches {
+                removed.push(path.clone());
+            }
+            !matches
+        });
+        removed
     }
 
     pub fn count(&self) -> Result<usize, ProviderError> {

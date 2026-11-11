@@ -101,54 +101,12 @@ impl SecretItem {
     async fn get_secret(
         &self,
         session: ObjectPath<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(SecretStruct,), SecretServiceError> {
-        use wildmatch::WildMatch;
-
-        let session = session.as_str();
-        let encoding = self.state.sessions.lookup(session)?;
-        if self.is_locked() {
-            return Err(SecretServiceError::IsLocked("item is locked".to_string()));
-        }
-        let provider = Arc::clone(&self.state.provider);
-        let item_id = self.state.meta.id.clone();
-        let patterns = self.state.return_attr_patterns.clone();
-
-        let secret = self
-            .state
-            .tokio_handle
-            .spawn(async move {
-                match provider.get_item_attributes(&item_id).await {
-                    Ok(ia) => {
-                        for pattern in &patterns {
-                            let wm = WildMatch::new(pattern);
-                            if let Some(matched) = ia.secret_names.iter().find(|n| wm.matches(n)) {
-                                match provider.get_secret_attr(&item_id, matched).await {
-                                    Ok(s) => return Ok(s),
-                                    Err(ProviderError::NotFound) => continue,
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                        }
-                        // No pattern matched — fall back to primary_secret.
-                        rosec_core::primary_secret(&*provider, &item_id).await
-                    }
-                    Err(e) => Err(e),
-                }
-            })
-            .await
-            .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?
-            .map_err(map_provider_error_ss)?;
-
-        Ok((build_secret_value(session, &secret, encoding.aes_key())?,))
-    }
-
-    fn set_secret(&self, _secret: SecretStruct) -> Result<(), SecretServiceError> {
-        if self.is_locked() {
-            return Err(SecretServiceError::IsLocked("item is locked".to_string()));
-        }
-        Err(SecretServiceError::NotSupported(
-            "use CreateItem with replace=true".to_string(),
-        ))
+        let owner = crate::session::SessionOwner::from_request(conn, &header)?;
+        let encoding = self.state.sessions.lookup_for(session.as_str(), &owner)?;
+        self.read_secret(session.as_str(), encoding).await
     }
 
     async fn delete(&self) -> Result<OwnedObjectPath, SecretServiceError> {
@@ -206,6 +164,68 @@ impl SecretItem {
 
         // No prompt needed — return "/" per the spec.
         Ok(to_object_path("/"))
+    }
+
+    fn set_secret(&self, _secret: SecretStruct) -> Result<(), SecretServiceError> {
+        if self.is_locked() {
+            return Err(SecretServiceError::IsLocked("item is locked".to_string()));
+        }
+        Err(SecretServiceError::NotSupported(
+            "use CreateItem with replace=true".to_string(),
+        ))
+    }
+}
+
+impl SecretItem {
+    #[cfg(test)]
+    async fn get_secret_for_test(
+        &self,
+        session: ObjectPath<'_>,
+    ) -> Result<(SecretStruct,), SecretServiceError> {
+        let encoding = self.state.sessions.lookup(session.as_str())?;
+        self.read_secret(session.as_str(), encoding).await
+    }
+
+    async fn read_secret(
+        &self,
+        session: &str,
+        encoding: crate::session::SessionEncoding,
+    ) -> Result<(SecretStruct,), SecretServiceError> {
+        use wildmatch::WildMatch;
+        if self.is_locked() {
+            return Err(SecretServiceError::IsLocked("item is locked".to_string()));
+        }
+        let provider = Arc::clone(&self.state.provider);
+        let item_id = self.state.meta.id.clone();
+        let patterns = self.state.return_attr_patterns.clone();
+
+        let secret = self
+            .state
+            .tokio_handle
+            .spawn(async move {
+                match provider.get_item_attributes(&item_id).await {
+                    Ok(ia) => {
+                        for pattern in &patterns {
+                            let wm = WildMatch::new(pattern);
+                            if let Some(matched) = ia.secret_names.iter().find(|n| wm.matches(n)) {
+                                match provider.get_secret_attr(&item_id, matched).await {
+                                    Ok(s) => return Ok(s),
+                                    Err(ProviderError::NotFound) => continue,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                        // No pattern matched — fall back to primary_secret.
+                        rosec_core::primary_secret(&*provider, &item_id).await
+                    }
+                    Err(e) => Err(e),
+                }
+            })
+            .await
+            .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?
+            .map_err(map_provider_error_ss)?;
+
+        Ok((build_secret_value(session, &secret, encoding.aes_key())?,))
     }
 }
 
@@ -336,7 +356,7 @@ mod tests {
         let item = SecretItem::new(state);
 
         let invalid = item
-            .get_secret(ObjectPath::try_from("/invalid").unwrap())
+            .get_secret_for_test(ObjectPath::try_from("/invalid").unwrap())
             .await;
         assert!(invalid.is_err());
 
@@ -345,7 +365,7 @@ mod tests {
             Err(err) => panic!("open_session failed: {err}"),
         };
         let valid = item
-            .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
+            .get_secret_for_test(ObjectPath::try_from(session.as_str()).unwrap())
             .await;
         assert!(valid.is_ok());
     }
@@ -373,7 +393,7 @@ mod tests {
             Err(err) => panic!("open_session failed: {err}"),
         };
         let result = item
-            .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
+            .get_secret_for_test(ObjectPath::try_from(session.as_str()).unwrap())
             .await;
         assert!(result.is_err());
     }
@@ -414,7 +434,7 @@ mod tests {
             Err(err) => panic!("open_session failed: {err}"),
         };
         let result = item
-            .get_secret(ObjectPath::try_from(session.as_str()).unwrap())
+            .get_secret_for_test(ObjectPath::try_from(session.as_str()).unwrap())
             .await;
         assert!(result.is_ok());
     }
