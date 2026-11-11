@@ -52,7 +52,7 @@ impl SessionManager {
     ///
     /// * For `"plain"` sessions: `input` is ignored; returns `("", path)`.
     /// * For `"dh-ietf1024-sha256-aes128-cbc-pkcs7"` sessions: `input` must be
-    ///   a `Vec<u8>` (the client DH public key, 128 bytes big-endian).  The
+    ///   a `Vec<u8>` (the client DH public key, unsigned big-endian).  The
     ///   server performs DH and returns `(server_pubkey_bytes, path)`.
     pub fn open_session(
         &self,
@@ -247,10 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn dh_session_key_matches_client_derived_key() {
+    fn dh_session_zero_prefixed_key_matches_client_derived_key() {
         let mgr = SessionManager::new();
         let client_kp = generate_dh_keypair().unwrap();
-        let input = dh_input(&client_kp.public_bytes);
+        let mut client_pubkey = vec![0];
+        client_pubkey.extend_from_slice(&client_kp.public_bytes);
+        let input = dh_input(&client_pubkey);
 
         let (output, path) = mgr
             .open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
@@ -282,7 +284,7 @@ mod tests {
     #[test]
     fn dh_session_invalid_pubkey_rejected() {
         let mgr = SessionManager::new();
-        // Wrong-length public key (64 bytes instead of 128)
+        // Zero is outside the valid public-key range, regardless of width.
         let input = dh_input(&[0u8; 64]);
         assert!(
             mgr.open_session("dh-ietf1024-sha256-aes128-cbc-pkcs7", &input)
