@@ -4,6 +4,7 @@
 //! `--help` shows full help including examples (long_about + after_long_help).
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 // Top-level
 #[derive(Parser)]
 #[command(
@@ -38,8 +39,8 @@ EXAMPLES:
     rosec provider add local                                create a new local vault
     rosec provider add bitwarden email=you@example.com      add Bitwarden (ID auto-generated)
     rosec provider attach --path /mnt/shared/team.vault     attach an existing vault file
-    rosec provider auth personal                            unlock a provider
-    rosec provider add-password personal --label laptop     add a second unlock password
+    rosec provider personal unlock                            unlock a provider
+    rosec provider personal password add --label laptop     add a second unlock password
 
   Searching & reading:
     rosec search type=login username=alice                  combine filters (AND)
@@ -65,6 +66,9 @@ EXAMPLES:
     rosec enable --mask                                     activate + suppress gnome-keyring",
 )]
 pub struct Cli {
+    /// Reject deprecated command syntax before performing any operation
+    #[arg(long, global = true)]
+    pub deny_deprecated: bool,
     /// Read and edit this user config file instead of the XDG default
     #[arg(long, short = 'c', global = true)]
     pub config: Option<std::path::PathBuf>,
@@ -75,8 +79,14 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Manage providers
-    #[command(alias = "providers")]
+    #[command(
+        alias = "providers",
+        after_help = "Instance operations:\n  <id> status\n  <id> unlock [--force]\n  <id> sync\n  <id> password <add|remove|list|change>\n\nUse --id <id> before an operation for IDs that match management command names."
+    )]
     Provider {
+        /// Explicit provider ID, including names which collide with commands
+        #[arg(long)]
+        id: Option<String>,
         #[command(subcommand)]
         action: Option<ProviderCommands>,
     },
@@ -387,6 +397,8 @@ pub struct DisableArgs {
 // provider subcommands
 #[derive(Subcommand)]
 pub enum ProviderCommands {
+    #[command(external_subcommand)]
+    Instance(Vec<OsString>),
     /// Restore an encrypted native-vault snapshot (stop the daemon first)
     RestoreSnapshot {
         #[arg(long)]
@@ -460,8 +472,8 @@ EXAMPLES:
     /// Add a new unlock password to a local vault provider
     #[command(after_long_help = "\
 EXAMPLES:
-    rosec provider add-password personal
-    rosec provider add-password personal --label laptop")]
+    rosec provider personal password add
+    rosec provider personal password add --label laptop")]
     AddPassword(ProviderAddPasswordArgs),
 
     /// Remove a password from a local vault provider
@@ -751,4 +763,50 @@ pub struct ItemImportArgs {
     /// fails with `already exists` if a match is found.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Typed instance operations shared by modern and legacy command spellings.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProviderRequest {
+    pub id: String,
+    pub operation: ProviderOperation,
+}
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum ProviderOperation {
+    /// Show this provider's state
+    Status,
+    /// Authenticate/unlock this provider
+    Unlock {
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Sync this provider
+    Sync,
+    /// Manage this provider's unlock passwords
+    Password {
+        #[command(subcommand)]
+        action: PasswordOperation,
+    },
+}
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum PasswordOperation {
+    Add {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    Remove {
+        entry_id: String,
+    },
+    List,
+    Change,
+}
+#[derive(Parser)]
+#[command(name = "rosec provider <id>")]
+pub struct InstanceCli {
+    #[arg(long, short = 'c', global = true)]
+    pub config: Option<std::path::PathBuf>,
+    #[arg(long, global = true)]
+    pub deny_deprecated: bool,
+    #[command(subcommand)]
+    pub operation: ProviderOperation,
 }
