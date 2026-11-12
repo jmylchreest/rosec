@@ -252,6 +252,22 @@ async fn run() -> Result<()> {
         }
     }
 
+    if let Some(manager) = &totp_manager {
+        let state = Arc::downgrade(&state);
+        let manager = Arc::clone(manager);
+        let revisions = state.upgrade().map(|s| s.events.subscribe());
+        if let Some(revisions) = revisions {
+            tokio::spawn(rosec_events::run_consumer(revisions, move || {
+                let state = state.clone();
+                let manager = Arc::clone(&manager);
+                async move {
+                    let state = state.upgrade()?;
+                    Some(manager.rebuild(&state.providers_ordered()).await)
+                }
+            }));
+        }
+    }
+
     // FIDO2 virtual authenticator: connect to the broker, take the device, and
     // serve CTAP2 ceremonies. Retries the broker handshake so the daemon
     // survives the broker being (re)started; each loop returns when the device
@@ -1202,26 +1218,20 @@ async fn logind_watcher(
 fn wire_items_changed_callback(
     state: &Arc<rosec_secret_service::ServiceState>,
     _ssh_manager: &Option<Arc<ssh::SshManager>>,
-    totp_manager: &Option<Arc<totp::TotpManager>>,
+    _totp_manager: &Option<Arc<totp::TotpManager>>,
     fido2_registry: &Option<Arc<fido2::Fido2Registry>>,
 ) {
-    let totp = totp_manager.clone();
     let fido2 = fido2_registry.clone();
-    if totp.is_none() && fido2.is_none() {
+    if fido2.is_none() {
         return;
     }
     let cb_state = Arc::clone(state);
     // The callback fires on zbus's async-io executor; hop onto Tokio to rebuild.
     let handle = tokio::runtime::Handle::current();
     state.set_items_changed_callback(Arc::new(move || {
-        let tm = totp.clone();
         let fr = fido2.clone();
         let s = Arc::clone(&cb_state);
         handle.spawn(async move {
-            let providers = s.providers_ordered();
-            if let Some(ref tm) = tm {
-                tm.rebuild(&providers).await;
-            }
             // A passkey written while already unlocked (e.g. makeCredential)
             // must appear immediately, not wait for the next lock/unlock/sync.
             if let Some(ref fr) = fr {
@@ -1267,15 +1277,12 @@ fn wire_provider_callbacks(
         let ssh_unlocked = ssh_manager.clone();
         let ssh_locked = ssh_manager.clone();
         let totp_unlocked = totp_manager.clone();
-        let totp_synced = totp_manager.clone();
         let totp_locked = totp_manager.clone();
         let fido2_unlocked = fido2_registry.clone();
         let fido2_synced = fido2_registry.clone();
         let fido2_locked = fido2_registry.clone();
         let providers_for_unlock = Arc::clone(state);
         let providers_for_sync = Arc::clone(state);
-        let totp_providers_for_unlock = Arc::clone(state);
-        let totp_providers_for_sync = Arc::clone(state);
         let fido2_providers_for_unlock = Arc::clone(state);
         let fido2_providers_for_sync = Arc::clone(state);
         let locked_id = provider_id.clone();
@@ -1308,15 +1315,9 @@ fn wire_provider_callbacks(
                     fr.activate_provider(&provider);
                 }
                 providers_for_unlock.mark_provider_unlocked_in_cache(provider.id());
-                let tm = totp_unlocked.clone();
-                let ts = Arc::clone(&totp_providers_for_unlock);
                 let fr = fido2_unlocked.clone();
                 let fs = Arc::clone(&fido2_providers_for_unlock);
                 tokio::spawn(async move {
-                    if let Some(ref tm) = tm {
-                        let providers = ts.providers_ordered();
-                        tm.rebuild(&providers).await;
-                    }
                     if let Some(ref fr) = fr {
                         // Live read of the fido2-capable providers — never a
                         // snapshot captured at an earlier point.
@@ -1361,15 +1362,9 @@ fn wire_provider_callbacks(
                 providers_for_sync
                     .events
                     .confirm_content_changed(&synced_id);
-                let tm = totp_synced.clone();
-                let ts = Arc::clone(&totp_providers_for_sync);
                 let fr = fido2_synced.clone();
                 let fs = Arc::clone(&fido2_providers_for_sync);
                 tokio::spawn(async move {
-                    if let Some(ref tm) = tm {
-                        let providers = ts.providers_ordered();
-                        tm.rebuild(&providers).await;
-                    }
                     if let Some(ref fr) = fr {
                         fr.rebuild(&fs.fido2_providers()).await;
                     }

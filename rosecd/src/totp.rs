@@ -101,18 +101,19 @@ impl TotpManager {
     ///
     /// Iterates all unlocked providers that declare `Totp`, fetches
     /// TOTP seeds, parses them, and updates the FUSE snapshot.
-    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) -> bool {
         // Nothing consumes TOTP entries until the filesystem is mounted.
         if !self.ensure_mounted() {
-            return;
+            return false;
         }
 
-        self.rebuild_entries(providers).await;
+        self.rebuild_entries(providers).await
     }
 
-    async fn rebuild_entries(&self, providers: &[Arc<dyn Provider>]) {
+    async fn rebuild_entries(&self, providers: &[Arc<dyn Provider>]) -> bool {
         let (epoch, providers) = self.gate.begin(providers);
         let mut entries = Vec::new();
+        let mut complete = true;
 
         for provider in &providers {
             if !provider.capabilities().contains(&Capability::Totp) {
@@ -127,6 +128,7 @@ impl TotpManager {
                         error = %e,
                         "TOTP rebuild: status check failed, skipping"
                     );
+                    complete = false;
                     continue;
                 }
             };
@@ -143,6 +145,7 @@ impl TotpManager {
                         error = %e,
                         "TOTP rebuild: list_items failed, skipping"
                     );
+                    complete = false;
                     continue;
                 }
             };
@@ -159,7 +162,10 @@ impl TotpManager {
 
                 let seed = match provider.get_secret_attr(&item.id, "totp").await {
                     Ok(s) => s,
-                    Err(_) => continue,
+                    Err(_) => {
+                        complete = false;
+                        continue;
+                    }
                 };
 
                 let params = match rosec_core::totp::parse_totp_input(seed.as_slice()) {
@@ -186,11 +192,12 @@ impl TotpManager {
         }
 
         let count = entries.len();
-        self.gate.publish(epoch, || {
+        let published = self.gate.publish(epoch, || {
             *self.entries.lock().unwrap_or_else(|e| e.into_inner()) = entries;
             self.refresh_snapshot();
         });
         debug!(items = count, "TOTP FUSE snapshot refreshed");
+        published && complete
     }
 
     /// Remove all entries and refresh with an empty snapshot.
