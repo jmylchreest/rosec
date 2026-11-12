@@ -120,10 +120,13 @@ pub fn derive_session_key(
         .unwrap_or(client_pubkey_bytes.len());
     let client_pubkey_bytes = &client_pubkey_bytes[first_nonzero..];
     if client_pubkey_bytes.len() > DH_KEY_BYTES {
-        return Err(ProviderError::Unavailable(format!(
-            "client DH public key exceeds {DH_KEY_BYTES} significant bytes, got {}",
-            client_pubkey_bytes.len()
-        )));
+        return Err(ProviderError::InvalidInput(
+            format!(
+                "client DH public key exceeds {DH_KEY_BYTES} significant bytes, got {}",
+                client_pubkey_bytes.len()
+            )
+            .into(),
+        ));
     }
 
     let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
@@ -133,8 +136,8 @@ pub fn derive_session_key(
     let two = BigUint::from(2u32);
     let p_minus_two = &p - &two;
     if client_pub < two || client_pub > p_minus_two {
-        return Err(ProviderError::Unavailable(
-            "client DH public key out of valid range".to_string(),
+        return Err(ProviderError::InvalidInput(
+            "client DH public key out of valid range".into(),
         ));
     }
 
@@ -280,7 +283,7 @@ mod tests {
         let zero = vec![0u8; DH_KEY_BYTES];
         assert!(matches!(
             derive_session_key(&server_kp, &zero),
-            Err(ProviderError::Unavailable(_))
+            Err(ProviderError::InvalidInput(_))
         ));
     }
 
@@ -291,7 +294,7 @@ mod tests {
         *one.last_mut().unwrap() = 1;
         assert!(matches!(
             derive_session_key(&server_kp, &one),
-            Err(ProviderError::Unavailable(_))
+            Err(ProviderError::InvalidInput(_))
         ));
     }
 
@@ -331,7 +334,7 @@ mod tests {
                 prefixed.extend_from_slice(&encoding);
                 assert!(matches!(
                     derive_session_key(&server_kp, &prefixed),
-                    Err(ProviderError::Unavailable(_))
+                    Err(ProviderError::InvalidInput(_))
                 ));
             }
         }

@@ -2433,6 +2433,8 @@ fn extract_cert_reason(msg: &str) -> Option<&str> {
 pub(crate) fn map_provider_error_ss(err: ProviderError) -> crate::error::SecretServiceError {
     use crate::error::SecretServiceError;
     match err {
+        ProviderError::NotFound => SecretServiceError::NoSuchObject("item not found".into()),
+        ProviderError::InvalidInput(reason) => SecretServiceError::InvalidArgs(reason.to_string()),
         ProviderError::Locked => SecretServiceError::IsLocked("item is locked".to_string()),
         ProviderError::NotSupported => {
             SecretServiceError::NotSupported("not supported".to_string())
@@ -2707,6 +2709,37 @@ mod tests {
             conn,
             tokio::runtime::Handle::current(),
         ))
+    }
+
+    #[test]
+    fn standard_error_mapping_preserves_extension_sentinels() {
+        use zbus::DBusError;
+        assert_eq!(
+            map_provider_error_ss(ProviderError::NotFound)
+                .name()
+                .as_str(),
+            "org.freedesktop.Secret.Error.NoSuchObject"
+        );
+        assert_eq!(
+            map_provider_error_ss(ProviderError::InvalidInput("fixture".into()))
+                .name()
+                .as_str(),
+            "org.freedesktop.DBus.Error.InvalidArgs"
+        );
+        for (error, sentinel) in [
+            (ProviderError::Locked, "locked"),
+            (ProviderError::NotFound, "not found"),
+            (ProviderError::AuthFailed, "auth_failed"),
+            (ProviderError::RegistrationRequired, "registration_required"),
+            (
+                ProviderError::TwoFactorRequired { methods: vec![] },
+                "two_factor_required",
+            ),
+        ] {
+            let mapped = map_provider_error(error);
+            assert_eq!(mapped.name().as_str(), "org.freedesktop.DBus.Error.Failed");
+            assert_eq!(mapped.description(), Some(sentinel));
+        }
     }
 
     #[tokio::test]

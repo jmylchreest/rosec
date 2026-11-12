@@ -112,8 +112,8 @@ impl SecretCollection {
 
         // Hold plaintext only in zeroizing buffers — no intermediate plain Vec.
         let secret = if let Some(key) = encoding.aes_key() {
-            let plaintext =
-                aes128_cbc_decrypt(key, &parameters, &secret_value).map_err(map_provider_error)?;
+            let plaintext = aes128_cbc_decrypt(key, &parameters, &secret_value)
+                .map_err(|_| SecretServiceError::InvalidArgs("invalid encrypted secret".into()))?;
             SecretBytes::from_zeroizing(plaintext)
         } else {
             SecretBytes::new(secret_value)

@@ -141,14 +141,14 @@ impl SessionManager {
                         .iter()
                         .map(|v| match v {
                             Value::U8(b) => Ok(*b),
-                            _ => Err(ProviderError::Unavailable(
-                                "DH input must be Array<Byte>".to_string(),
+                            _ => Err(ProviderError::InvalidInput(
+                                "DH input must be Array<Byte>".into(),
                             )),
                         })
                         .collect::<Result<Vec<u8>, _>>()?,
                     _ => {
-                        return Err(ProviderError::Unavailable(
-                            "DH session requires Array<Byte> input (client public key)".to_string(),
+                        return Err(ProviderError::InvalidInput(
+                            "DH session requires Array<Byte> input (client public key)".into(),
                         ));
                     }
                 };
