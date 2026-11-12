@@ -22,7 +22,7 @@ sha2 = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }
 hkdf = { workspace = true }
-num-bigint = { workspace = true }
+crypto-bigint = { version = "=0.7.11", features = ["zeroize"] }
 rand = { workspace = true }
 futures-util = { workspace = true }
 libc = { workspace = true }
@@ -30,5 +30,6 @@ wildmatch = { workspace = true }
 wait-timeout = { workspace = true }
 
 [dev-dependencies]
+num-bigint = { workspace = true }
 rosec-vault = { path = "../rosec-vault" }
 tempfile = { workspace = true }
