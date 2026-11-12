@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+pub mod changes;
 pub mod config;
 pub mod config_edit;
 pub mod config_load;
@@ -339,7 +340,7 @@ pub struct ProviderStatus {
     pub last_cache_write: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemMeta {
     pub id: String,
     pub provider_id: String,
