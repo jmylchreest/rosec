@@ -41,6 +41,7 @@ struct MountState {
 
 /// Manages the SSH agent and FUSE filesystem on behalf of `rosecd`.
 pub struct SshManager {
+    gate: crate::consumer_gate::ConsumerGate,
     store: Arc<RwLock<KeyStore>>,
     /// Lazily-mounted FUSE export; the agent serves keys from `store`, so it
     /// still works while this is unmounted.
@@ -58,6 +59,13 @@ impl std::fmt::Debug for SshManager {
 }
 
 impl SshManager {
+    pub fn register_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.register(provider);
+    }
+    pub fn activate_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.activate(provider);
+    }
+
     /// Start the SSH agent and FUSE filesystem.
     ///
     /// The agent socket is placed at `$XDG_RUNTIME_DIR/rosec/agent.sock`;
@@ -116,6 +124,7 @@ impl SshManager {
         info!(sock = %agent_sock.display(), "SSH agent ready");
 
         Some(Self {
+            gate: Default::default(),
             store,
             fuse: Mutex::new(MountState {
                 handle: None,
@@ -170,11 +179,12 @@ impl SshManager {
     /// with a debug log.  After all providers are processed the FUSE snapshot
     /// is refreshed atomically.
     pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+        let (epoch, providers) = self.gate.begin(providers);
         self.ensure_mounted();
 
         let mut new_entries = Vec::new();
 
-        for provider in providers {
+        for provider in &providers {
             // Only providers declaring Ssh contribute keys — matches the
             // TOTP/Sync rebuild loops and makes the declared capability
             // authoritative. Result-equivalent today: every provider that
@@ -267,55 +277,52 @@ impl SshManager {
             }
         }
 
-        // Atomically replace the store contents.
-        match self.store.write() {
-            Ok(mut guard) => {
-                guard.clear();
-                for entry in new_entries {
-                    guard.insert(entry);
+        self.gate.publish(epoch, || {
+            match self.store.write() {
+                Ok(mut guard) => {
+                    guard.clear();
+                    for entry in new_entries {
+                        guard.insert(entry);
+                    }
                 }
-                debug!(
-                    entries = guard.len(),
-                    unique_keys = guard.unique_count(),
-                    "SSH key store rebuilt"
-                );
+                Err(e) => {
+                    warn!("SSH key store lock poisoned during rebuild: {e}");
+                    return;
+                }
             }
-            Err(e) => {
-                warn!("SSH key store lock poisoned during rebuild: {e}");
-                return;
-            }
-        }
-
-        self.refresh_fuse();
+            self.refresh_fuse();
+        });
     }
 
-    /// Remove all keys belonging to `provider_id` from the store and refresh FUSE.
-    ///
-    /// Called when a provider is locked or hot-removed.
+    /// Revoke pending work before removing this provider's cached key material.
     pub fn remove_provider(&self, provider_id: &str) {
-        match self.store.write() {
-            Ok(mut guard) => guard.remove_provider(provider_id),
-            Err(e) => {
-                warn!("SSH key store lock poisoned in remove_provider: {e}");
-                return;
+        self.gate.revoke(Some(provider_id), || {
+            match self.store.write() {
+                Ok(mut guard) => guard.remove_provider(provider_id),
+                Err(e) => {
+                    warn!("SSH key store lock poisoned during eviction: {e}");
+                    return;
+                }
             }
-        }
-        self.refresh_fuse();
+            self.refresh_fuse();
+        });
     }
 
     /// Clear all keys from the store and refresh FUSE.
     ///
     /// Called on global auto-lock.
     pub fn clear(&self) {
-        match self.store.write() {
-            Ok(mut guard) => guard.clear(),
-            Err(e) => {
-                warn!("SSH key store lock poisoned in clear: {e}");
-                return;
+        self.gate.revoke(None, || {
+            match self.store.write() {
+                Ok(mut guard) => guard.clear(),
+                Err(e) => {
+                    warn!("SSH key store lock poisoned in clear: {e}");
+                    return;
+                }
             }
-        }
-        info!("SSH key store cleared");
-        self.refresh_fuse();
+            info!("SSH key store cleared");
+            self.refresh_fuse();
+        });
     }
 
     /// Rebuild the FUSE snapshot from the current store contents.  No-op while
@@ -519,4 +526,49 @@ pub fn build_confirm_callback(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use crate::fido2::tests::DelayedProvider;
+    #[tokio::test]
+    async fn revoked_material_cannot_be_restored_by_pending_rebuild() {
+        let manager = Arc::new(SshManager {
+            gate: Default::default(),
+            store: KeyStore::new(),
+            fuse: Mutex::new(MountState {
+                handle: None,
+                last_attempt: Some(Instant::now()),
+            }),
+            ssh_dir: PathBuf::new(),
+            agent_sock: PathBuf::new(),
+        });
+        let provider = Arc::new(DelayedProvider {
+            locked: false.into(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let source: Arc<dyn Provider> = provider.clone();
+        manager.register_provider(&source);
+        let task = {
+            let manager = manager.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                manager.rebuild(&[source]).await;
+            })
+        };
+        provider.entered.notified().await;
+        manager.remove_provider("local");
+        provider.release.notify_one();
+        task.await.unwrap();
+        assert!(manager.store.read().unwrap().is_empty());
+        // Successful fresh unlock still loads the same data.
+        manager.activate_provider(&source);
+        provider.release.notify_one();
+        manager.rebuild(&[source]).await;
+        assert!(!(manager.store.read().unwrap().is_empty()));
+        manager.clear();
+        assert!(manager.store.read().unwrap().is_empty());
+    }
 }

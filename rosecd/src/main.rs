@@ -1,5 +1,6 @@
 #[cfg(feature = "private-socket")]
 mod bus;
+mod consumer_gate;
 mod fido2;
 mod fido2_ceremony;
 mod ssh;
@@ -1239,6 +1240,16 @@ fn wire_provider_callbacks(
 
     for provider in state.providers_ordered() {
         let provider_id = provider.id().to_string();
+        if let Some(sm) = ssh_manager {
+            sm.register_provider(&provider);
+        }
+        if let Some(tm) = totp_manager {
+            tm.register_provider(&provider);
+        }
+        if let Some(fr) = fido2_registry {
+            fr.register_provider(&provider);
+        }
+        let unlocked_provider = Arc::downgrade(&provider);
 
         let ssh_unlocked = ssh_manager.clone();
         let ssh_synced = ssh_manager.clone();
@@ -1252,10 +1263,8 @@ fn wire_provider_callbacks(
         let providers_for_unlock = Arc::clone(state);
         let providers_for_sync = Arc::clone(state);
         let totp_providers_for_unlock = Arc::clone(state);
-        let totp_providers_for_lock = Arc::clone(state);
         let totp_providers_for_sync = Arc::clone(state);
         let fido2_providers_for_unlock = Arc::clone(state);
-        let fido2_providers_for_lock = Arc::clone(state);
         let fido2_providers_for_sync = Arc::clone(state);
         let locked_id = provider_id.clone();
         let synced_id = provider_id.clone();
@@ -1268,6 +1277,18 @@ fn wire_provider_callbacks(
 
         let callbacks = ProviderCallbacks {
             on_unlocked: Some(Arc::new(move || {
+                let Some(provider) = unlocked_provider.upgrade() else {
+                    return;
+                };
+                if let Some(sm) = &ssh_unlocked {
+                    sm.activate_provider(&provider);
+                }
+                if let Some(tm) = &totp_unlocked {
+                    tm.activate_provider(&provider);
+                }
+                if let Some(fr) = &fido2_unlocked {
+                    fr.activate_provider(&provider);
+                }
                 let sm = ssh_unlocked.clone();
                 let s = Arc::clone(&providers_for_unlock);
                 let tm = totp_unlocked.clone();
@@ -1295,21 +1316,10 @@ fn wire_provider_callbacks(
                     sm.remove_provider(&locked_id);
                 }
                 if let Some(ref tm) = totp_locked {
-                    let tm = tm.clone();
-                    let providers = totp_providers_for_lock.providers_ordered();
-                    tokio::spawn(async move {
-                        tm.rebuild(&providers).await;
-                    });
+                    tm.remove_provider(&locked_id);
                 }
                 if let Some(ref fr) = fido2_locked {
-                    // Rebuild from live providers; the now-locked one is
-                    // skipped (locked providers contribute nothing), so its
-                    // credentials drop out of the index.
-                    let fr = fr.clone();
-                    let providers = fido2_providers_for_lock.fido2_providers();
-                    tokio::spawn(async move {
-                        fr.rebuild(&providers).await;
-                    });
+                    fr.remove_provider(&locked_id);
                 }
             })),
             on_sync_succeeded: Some(Arc::new(move |changed| {
@@ -1700,6 +1710,18 @@ async fn reconcile_providers(
         let changed = new_map
             .get(id)
             .is_none_or(|new_fp| known_map.get(id) != Some(new_fp));
+        if changed {
+            // Revoke derived material before awaiting the old instance's lock.
+            if let Some(sm) = ssh_manager {
+                sm.remove_provider(id);
+            }
+            if let Some(tm) = totp_manager {
+                tm.remove_provider(id);
+            }
+            if let Some(fr) = fido2_registry {
+                fr.remove_provider(id);
+            }
+        }
         if changed && state.hotreload_remove_provider(id).await {
             tracing::info!(provider_id = id, "hot-reload: removed provider");
             if let Some(sm) = ssh_manager {
