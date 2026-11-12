@@ -109,7 +109,11 @@ impl SecretItem {
         self.read_secret(session.as_str(), encoding).await
     }
 
-    async fn delete(&self) -> Result<OwnedObjectPath, SecretServiceError> {
+    async fn delete(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<OwnedObjectPath, SecretServiceError> {
         rosec_core::require(self.state.provider.as_ref(), Capability::Write).map_err(|_| {
             SecretServiceError::NotSupported(
                 "provider does not support write operations".to_string(),
@@ -123,25 +127,17 @@ impl SecretItem {
             let item_id = self.state.meta.id.clone();
             let item_path = self.state.path.clone();
 
-            let prompt_path = self.state.service_state.allocate_prompt_with_operation(
-                &provider_id,
-                crate::prompt::PendingOperation::DeleteItem {
-                    provider_id: provider_id.clone(),
-                    item_id,
-                    item_path,
-                },
-            );
-            let prompt_obj = crate::prompt::SecretPrompt::new(
-                prompt_path.clone(),
-                provider_id,
-                Arc::clone(&self.state.service_state),
-            );
-            let conn = self.state.service_state.conn();
-            let _ = conn
-                .object_server()
-                .at(prompt_path.clone(), prompt_obj)
-                .await
-                .map_err(crate::state::map_zbus_error)?;
+            let owner = crate::session::SessionOwner::from_request(conn, &header)?;
+            let op = crate::prompt::PendingOperation::DeleteItem {
+                provider_id: provider_id.clone(),
+                item_id,
+                item_path,
+            };
+            let prompt_path = self
+                .state
+                .service_state
+                .register_prompt(conn, owner, provider_id, op)
+                .await?;
             return Ok(to_object_path(&prompt_path));
         }
 

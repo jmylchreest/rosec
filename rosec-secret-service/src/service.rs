@@ -10,7 +10,7 @@ use zbus::message::Header;
 
 use crate::crypto::aes128_cbc_encrypt;
 use crate::daemon::log_dbus_caller;
-use crate::prompt::SecretPrompt;
+
 use crate::session_iface::SecretSession;
 use crate::state::{ServiceState, map_provider_error, map_zbus_error};
 
@@ -246,6 +246,7 @@ impl SecretService {
     async fn unlock(
         &self,
         objects: Vec<OwnedObjectPath>,
+        #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "Unlock", &header);
@@ -330,14 +331,17 @@ impl SecretService {
             }
             Some(provider_id) => {
                 debug!(provider = %provider_id, "Unlock: allocating prompt for locked provider");
-                let prompt_path = self.state.allocate_prompt(&provider_id);
-                let prompt_obj =
-                    SecretPrompt::new(prompt_path.clone(), provider_id, Arc::clone(&self.state));
-                let conn = self.state.conn();
-                conn.object_server()
-                    .at(prompt_path.clone(), prompt_obj)
-                    .await
-                    .map_err(map_zbus_error)?;
+                let owner = crate::session::SessionOwner::from_request(conn, &header)
+                    .map_err(|e| FdoError::AccessDenied(e.to_string()))?;
+                let prompt_path = self
+                    .state
+                    .register_prompt(
+                        conn,
+                        owner,
+                        provider_id,
+                        crate::prompt::PendingOperation::Unlock,
+                    )
+                    .await?;
                 Ok((vec![], to_object_path(&prompt_path)))
             }
         }

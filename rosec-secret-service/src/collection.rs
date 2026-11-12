@@ -9,12 +9,10 @@ use zbus::interface;
 
 use crate::crypto::aes128_cbc_decrypt;
 use crate::error::SecretServiceError;
-use crate::prompt::{PendingOperation, SecretPrompt};
+use crate::prompt::PendingOperation;
 use crate::service::to_object_path;
 use crate::session::SessionManager;
-use crate::state::{
-    ServiceState, make_item_path, map_provider_error, map_provider_error_ss, map_zbus_error,
-};
+use crate::state::{ServiceState, make_item_path, map_provider_error, map_provider_error_ss};
 
 #[derive(Clone)]
 pub struct CollectionState {
@@ -172,20 +170,12 @@ impl SecretCollection {
                 item,
                 replace,
             };
+            let owner = crate::session::SessionOwner::from_request(conn, &header)?;
             let prompt_path = self
                 .state
                 .service_state
-                .allocate_prompt_with_operation(&provider_id, op);
-            let prompt_obj = SecretPrompt::new(
-                prompt_path.clone(),
-                provider_id,
-                Arc::clone(&self.state.service_state),
-            );
-            let conn = self.state.service_state.conn();
-            conn.object_server()
-                .at(prompt_path.clone(), prompt_obj)
-                .await
-                .map_err(map_zbus_error)?;
+                .register_prompt(conn, owner, provider_id, op)
+                .await?;
             // Return "/" for item path and the prompt path — client must
             // complete the prompt before the item is created.
             return Ok((to_object_path("/"), to_object_path(&prompt_path)));

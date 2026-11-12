@@ -86,6 +86,9 @@ impl SecretPrompt {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<()> {
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| zbus::fdo::Error::AccessDenied(e.to_string()))?;
+        self.state.prompts.authorize(&self.path, &owner)?;
         let Some(cancelled) = self.state.prompts.start(&self.path) else {
             return Err(zbus::fdo::Error::Failed(
                 "prompt already started or completed".into(),
@@ -112,10 +115,13 @@ impl SecretPrompt {
         // background task.  The method returns immediately; the client waits
         // for the Completed signal.  This also means that if the client
         // disconnects (Ctrl+C, SIGKILL, normal exit) the spawn_blocking task
-        // is still running — but cancel_prompt() sends SIGTERM to the child
-        // so the window disappears when the client calls CancelPrompt or
-        // when the Prompt object is dropped (via Dismiss).
-        let ctxt_owned = ctxt.to_owned();
+        // is still running, but the bus owner watcher cancels the prompt and
+        // terminates its tracked child on disconnect.
+        let destination = owner
+            .name
+            .try_into()
+            .map_err(|e: zbus::Error| zbus::fdo::Error::Failed(e.to_string()))?;
+        let ctxt_owned = ctxt.to_owned().set_destination(destination);
         let state2 = Arc::clone(&state);
         state
             .run_on_tokio(async move {
@@ -133,7 +139,14 @@ impl SecretPrompt {
     }
 
     /// Dismiss the prompt (cancel).  Kills the child subprocess if still running.
-    async fn dismiss(&self) -> zbus::fdo::Result<()> {
+    async fn dismiss(
+        &self,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| zbus::fdo::Error::AccessDenied(e.to_string()))?;
+        self.state.prompts.authorize(&self.path, &owner)?;
         self.state.cancel_prompt(&self.path);
         Ok(())
     }
@@ -172,7 +185,7 @@ async fn run_prompt_task(
         if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
             tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
         }
-        state.finish_prompt(prompt_path);
+        state.finish_prompt_on(ctxt.connection(), prompt_path);
     }
 
     // Prompt serialization mirrors gnome-keyring's unlock_prompt_queue:
@@ -536,7 +549,7 @@ async fn on_unlock_success(
 
     // Now that the signal has been sent, clean up the prompt object from the
     // D-Bus object server and internal registry.
-    state.finish_prompt(prompt_path);
+    state.finish_prompt_on(ctxt.connection(), prompt_path);
 }
 
 /// Execute a deferred `CreateItem` after successful unlock.

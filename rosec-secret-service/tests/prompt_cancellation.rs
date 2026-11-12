@@ -91,23 +91,19 @@ async fn run_deferred_prompt(cancel: bool) {
     let client = zbus::Connection::session().await.unwrap();
     let mutex = state.prompts.mutex_for("a");
     let guard = mutex.lock().await;
-    let prompt_path = state.allocate_prompt_with_operation(
-        "a",
-        rosec_secret_service::prompt::PendingOperation::DeleteItem {
-            provider_id: "a".into(),
-            item_id: "dummy".into(),
-            item_path: "/dummy".into(),
-        },
-    );
-    server
-        .object_server()
-        .at(
-            prompt_path.as_str(),
-            rosec_secret_service::prompt::SecretPrompt::new(
-                prompt_path.clone(),
-                "a".into(),
-                state.clone(),
-            ),
+    let prompt_path = state
+        .register_prompt(
+            &server,
+            rosec_secret_service::session::SessionOwner {
+                bus: server.server_guid().to_string(),
+                name: client.unique_name().unwrap().to_string(),
+            },
+            "a".into(),
+            rosec_secret_service::prompt::PendingOperation::DeleteItem {
+                provider_id: "a".into(),
+                item_id: "dummy".into(),
+                item_path: "/dummy".into(),
+            },
         )
         .await
         .unwrap();

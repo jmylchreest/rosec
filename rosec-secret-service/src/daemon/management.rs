@@ -551,9 +551,16 @@ impl RosecManagement {
     fn cancel_prompt(
         &self,
         prompt_path: zbus::ObjectPath<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<bool, FdoError> {
         log_dbus_caller("management", "CancelPrompt", &header);
+        if !self.state.prompts.contains_path(prompt_path.as_str()) {
+            return Ok(false);
+        }
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| FdoError::AccessDenied(e.to_string()))?;
+        self.state.prompts.authorize(prompt_path.as_str(), &owner)?;
         Ok(self.state.cancel_prompt(prompt_path.as_str()))
     }
 
