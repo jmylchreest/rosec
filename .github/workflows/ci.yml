@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_call: {}
 
 env:
@@ -33,7 +32,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: dbus-run-session -- cargo test --workspace --locked
+
+      - name: Install libsecret interoperability test dependencies
+        if: hashFiles('tests/libsecret_roundtrip.sh') != ''
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
+
+      - name: Test real libsecret interoperability
+        if: hashFiles('tests/libsecret_roundtrip.sh') != ''
+        run: bash tests/libsecret_roundtrip.sh
 
   clippy:
     name: Clippy
@@ -56,7 +63,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy (warnings as errors)
-        run: cargo clippy --workspace --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   fmt:
     name: Format
