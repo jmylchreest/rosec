@@ -309,12 +309,12 @@ fn update(state: &mut GuiApp, message: Message) -> iced::Task<Message> {
             use iced::keyboard::{Key, key::Named};
             for (field, f) in state.fields.iter().enumerate() {
                 if let Some(code) = f.otp.as_ref() {
-                    for digit in 0..DIGITS {
+                    for (digit, value) in code.digits.iter().enumerate() {
                         if otp_id(field, digit) == id {
                             let next = match key {
                                 Key::Named(Named::ArrowLeft) => digit.saturating_sub(1),
                                 Key::Named(Named::ArrowRight) => (digit + 1).min(DIGITS - 1),
-                                Key::Named(Named::Backspace) if code.digits[digit].is_empty() => {
+                                Key::Named(Named::Backspace) if value.is_empty() => {
                                     digit.saturating_sub(1)
                                 }
                                 _ => return iced::Task::none(),
