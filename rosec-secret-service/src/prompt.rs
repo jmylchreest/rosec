@@ -32,6 +32,9 @@ pub enum PendingOperation {
     /// Standard unlock-only prompt (no deferred operation).
     Unlock,
 
+    /// Requested objects still awaiting a provider unlock.
+    UnlockTargets(Vec<String>),
+
     /// Deferred `CreateItem`: execute `provider.create_item()` after unlock.
     CreateItem {
         provider_id: String,
@@ -172,21 +175,56 @@ async fn run_prompt_task(
     ctxt: SignalEmitter<'static>,
     caller: Option<crate::state::CallerInfo>,
 ) {
-    /// Maximum number of unlock attempts before giving up.
-    const MAX_ATTEMPTS: u32 = 3;
-
-    // Inline helper: emit Completed(dismissed=true) and then clean up the
-    // prompt object.  The signal MUST be emitted before the object is
-    // deregistered so that D-Bus clients receive it.
-    async fn dismiss_and_finish(state: &ServiceState, prompt_path: &str, ctxt: &SignalEmitter<'_>) {
-        if !state.prompts.remove(prompt_path) {
+    let mut provider_id = provider_id;
+    let mut label = label;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(provider_id.clone()) {
+            // A provider relocked during this request. Do not trap the client
+            // in an unbounded sequence of dialogs.
+            dismiss_and_finish(&state, &prompt_path, &ctxt).await;
             return;
         }
-        if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
-            tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
-        }
-        state.finish_prompt_on(ctxt.connection(), prompt_path);
+        let next = run_provider_prompt(
+            Arc::clone(&state),
+            prompt_path.clone(),
+            provider_id,
+            label,
+            ctxt.clone(),
+            caller.clone(),
+        )
+        .await;
+        let Some(next) = next else {
+            return;
+        };
+        label = state
+            .provider_by_id(&next)
+            .map(|p| format!("Unlock {}", p.name()))
+            .unwrap_or_else(|| format!("Unlock {next}"));
+        provider_id = next;
     }
+}
+
+async fn dismiss_and_finish(state: &ServiceState, prompt_path: &str, ctxt: &SignalEmitter<'_>) {
+    if !state.prompts.remove(prompt_path) {
+        return;
+    }
+    if let Err(e) = SecretPrompt::completed(ctxt, true, &zbus::Variant::from("")).await {
+        tracing::debug!(error = %e, "failed to emit Completed(dismissed)");
+    }
+    state.finish_prompt_on(ctxt.connection(), prompt_path);
+}
+
+async fn run_provider_prompt(
+    state: Arc<ServiceState>,
+    prompt_path: String,
+    provider_id: String,
+    label: String,
+    ctxt: SignalEmitter<'static>,
+    caller: Option<crate::state::CallerInfo>,
+) -> Option<String> {
+    /// Maximum number of unlock attempts before giving up.
+    const MAX_ATTEMPTS: u32 = 3;
 
     // Prompt serialization mirrors gnome-keyring's unlock_prompt_queue:
     // acquire a per-provider mutex so that only one prompt GUI subprocess runs
@@ -212,7 +250,7 @@ async fn run_prompt_task(
         // the cache is synced, and the Completed signal is emitted.  The empty
         // password is harmless — opportunistic_sweep with an empty string
         // won't unlock anything.
-        on_unlock_success(
+        return on_unlock_success(
             &state,
             &prompt_path,
             &provider_id,
@@ -220,7 +258,6 @@ async fn run_prompt_task(
             &ctxt,
         )
         .await;
-        return;
     }
 
     let mut attempt = 0u32;
@@ -251,7 +288,7 @@ async fn run_prompt_task(
                 Err(e) => {
                     tracing::warn!(error = %e, "prompt task panicked");
                     dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                    return;
+                    return None;
                 }
             };
 
@@ -260,7 +297,7 @@ async fn run_prompt_task(
                 // User cancelled or prompt failed — stop immediately, no retry.
                 tracing::debug!(provider = %provider_id, error = %e, "prompt dismissed or failed");
                 dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                return;
+                return None;
             }
             Ok(pw) => pw,
         };
@@ -269,7 +306,7 @@ async fn run_prompt_task(
         let Some(provider) = state.provider_by_id(&provider_id) else {
             tracing::warn!(provider = %provider_id, "provider not found after prompt");
             dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-            return;
+            return None;
         };
 
         // Clone the password before the unlock consumes it — we need it for
@@ -286,7 +323,7 @@ async fn run_prompt_task(
 
         match unlock_result {
             Ok(()) => {
-                on_unlock_success(
+                return on_unlock_success(
                     &state,
                     &prompt_path,
                     &provider_id,
@@ -294,7 +331,6 @@ async fn run_prompt_task(
                     &ctxt,
                 )
                 .await;
-                return;
             }
             Err(rosec_core::ProviderError::TwoFactorRequired { methods }) => {
                 tracing::debug!(
@@ -310,7 +346,7 @@ async fn run_prompt_task(
                         "2FA required but no supported text methods available"
                     );
                     dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                    return;
+                    return None;
                 }
 
                 let mut two_fa_fields: Vec<serde_json::Value> = Vec::new();
@@ -378,7 +414,7 @@ async fn run_prompt_task(
                         Err(e) => {
                             tracing::warn!(error = %e, "2FA prompt task panicked");
                             dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                            return;
+                            return None;
                         }
                     };
 
@@ -390,7 +426,7 @@ async fn run_prompt_task(
                             "2FA prompt dismissed or failed"
                         );
                         dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                        return;
+                        return None;
                     }
                     Ok(m) => m,
                 };
@@ -422,7 +458,7 @@ async fn run_prompt_task(
 
                 match state.try_auth_provider(&provider_id, cred_map).await {
                     Ok(()) => {
-                        on_unlock_success(
+                        return on_unlock_success(
                             &state,
                             &prompt_path,
                             &provider_id,
@@ -430,7 +466,6 @@ async fn run_prompt_task(
                             &ctxt,
                         )
                         .await;
-                        return;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -439,7 +474,7 @@ async fn run_prompt_task(
                             "2FA authentication failed"
                         );
                         dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                        return;
+                        return None;
                     }
                 }
             }
@@ -458,7 +493,7 @@ async fn run_prompt_task(
                         "max unlock attempts reached, giving up"
                     );
                     dismiss_and_finish(&state, &prompt_path, &ctxt).await;
-                    return;
+                    return None;
                 }
 
                 // Loop around and re-prompt with a "wrong password" hint.
@@ -478,7 +513,7 @@ async fn on_unlock_success(
     provider_id: &str,
     password_for_sweep: Zeroizing<String>,
     ctxt: &SignalEmitter<'_>,
-) {
+) -> Option<String> {
     state.mark_provider_unlocked(provider_id);
     state.touch_activity();
 
@@ -494,9 +529,35 @@ async fn on_unlock_success(
 
     tracing::debug!(provider = %provider_id, "provider unlocked via Prompt");
 
-    let Some(pending) = state.prompts.claim_commit(prompt_path) else {
-        return;
-    };
+    let mut unlocked_targets = None;
+    if let Some(paths) = state.prompts.unlock_targets(prompt_path) {
+        let mut plan = match crate::unlock_plan::resolve(state, &paths).await {
+            Ok(plan) => plan,
+            Err(_) => {
+                dismiss_and_finish(state, prompt_path, ctxt).await;
+                return None;
+            }
+        };
+        if plan.next_provider.is_some() {
+            // Reuse the existing password sweep before asking for another
+            // provider's credentials, then recheck actual lock state.
+            state
+                .opportunistic_sweep(&password_for_sweep, provider_id)
+                .await;
+            plan = match crate::unlock_plan::resolve(state, &paths).await {
+                Ok(plan) => plan,
+                Err(_) => {
+                    dismiss_and_finish(state, prompt_path, ctxt).await;
+                    return None;
+                }
+            };
+        }
+        if let Some(next) = plan.next_provider {
+            return Some(next);
+        }
+        unlocked_targets = Some(plan.unlocked);
+    }
+    let pending = state.prompts.claim_commit(prompt_path)?;
 
     // Opportunistic sweep: try the same password against all other locked
     // providers (detached — does not block the Completed signal).
@@ -523,6 +584,13 @@ async fn on_unlock_success(
             item_id,
             item_path,
         } => execute_deferred_delete(state, &pid, &item_id, &item_path).await,
+        PendingOperation::UnlockTargets(_) => Some(zbus::Variant::from(
+            unlocked_targets
+                .unwrap_or_default()
+                .iter()
+                .map(|path| to_object_path(path))
+                .collect::<Vec<_>>(),
+        )),
         PendingOperation::Unlock => {
             // Plain unlock — return ao (array of object paths) of the
             // unlocked collection, per the Secret Service spec.
@@ -550,6 +618,7 @@ async fn on_unlock_success(
     // Now that the signal has been sent, clean up the prompt object from the
     // D-Bus object server and internal registry.
     state.finish_prompt_on(ctxt.connection(), prompt_path);
+    None
 }
 
 /// Execute a deferred `CreateItem` after successful unlock.

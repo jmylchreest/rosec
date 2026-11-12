@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rosec_core::{ProviderError, SecretBytes};
-use tracing::debug;
 use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -254,100 +253,32 @@ impl SecretService {
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "Unlock", &header);
 
-        // Determine which providers are relevant based on the `objects` list.
-        //
-        // The Secret Service spec says Unlock() operates on the *requested*
-        // objects.  We must only prompt for providers that own those objects,
-        // not blindly iterate every provider.
-        //
-        // Object paths are either:
-        //   - Collection: /org/freedesktop/secrets/collection/<name>
-        //   - Item:       /org/freedesktop/secrets/item/<provider_id>/<item_id>
-        //
-        // When a collection path is passed, "unlocking" means making the
-        // collection usable — which succeeds as soon as *any* provider is
-        // unlocked (matching the Collection.Locked property semantics).
-
+        let paths: Vec<String> = objects.iter().map(|path| path.to_string()).collect();
         let state = Arc::clone(&self.state);
-        let objects_for_task = objects.clone();
-        let state2 = Arc::clone(&state);
-
-        let prompt_provider_opt: Option<String> = state
-            .run_on_tokio(async move {
-                // Collect the set of provider IDs referenced by item paths.
-                let mut item_provider_ids: Vec<String> = Vec::new();
-
-                for obj in &objects_for_task {
-                    let path = obj.as_str();
-                    if path.starts_with("/org/freedesktop/secrets/item/") {
-                        // Extract provider_id from the item path.
-                        if let Some(rest) = path.strip_prefix("/org/freedesktop/secrets/item/")
-                            && let Some(pid) = rest.split('/').next()
-                            && !item_provider_ids.contains(&pid.to_string())
-                        {
-                            item_provider_ids.push(pid.to_string());
-                        }
-                    }
-                    // Collection paths and unknown paths are handled by the
-                    // fallback below (item_provider_ids stays empty).
-                }
-
-                // If no objects were passed or only collection paths, check
-                // whether any provider is already unlocked.  If so, the
-                // collection is usable — return success immediately.
-                if item_provider_ids.is_empty() {
-                    // Collection-level unlock (or empty objects list).
-                    let mut first_locked: Option<String> = None;
-                    for provider in state2.providers_ordered() {
-                        let status = provider.status().await.map_err(map_provider_error)?;
-                        if !status.locked {
-                            // At least one provider is already unlocked — the
-                            // collection is usable.  No prompt needed.
-                            return Ok::<Option<String>, FdoError>(None);
-                        }
-                        if first_locked.is_none() {
-                            first_locked = Some(provider.id().to_string());
-                        }
-                    }
-                    // All providers locked — prompt for the first one.
-                    Ok(first_locked)
-                } else {
-                    // Item-level unlock — only prompt for providers that own
-                    // the requested items and are actually locked.
-                    for pid in &item_provider_ids {
-                        if let Some(provider) = state2.provider_by_id(pid) {
-                            let status = provider.status().await.map_err(map_provider_error)?;
-                            if status.locked {
-                                return Ok(Some(pid.clone()));
-                            }
-                        }
-                    }
-                    Ok(None)
-                }
-            })
+        let plan = self
+            .state
+            .run_on_tokio(async move { crate::unlock_plan::resolve(&state, &paths).await })
             .await??;
-
-        match prompt_provider_opt {
-            None => {
-                debug!("Unlock: all relevant providers already unlocked");
-                Ok((objects, to_object_path("/")))
-            }
-            Some(provider_id) => {
-                debug!(provider = %provider_id, "Unlock: allocating prompt for locked provider");
-                let owner = crate::session::SessionOwner::from_request(conn, &header)
-                    .map_err(|e| FdoError::AccessDenied(e.to_string()))?;
-                let prompt_path = self
-                    .state
-                    .register_prompt(
-                        conn,
-                        owner,
-                        provider_id,
-                        crate::prompt::PendingOperation::Unlock,
-                    )
-                    .await?;
-                Ok((vec![], to_object_path(&prompt_path)))
-            }
-        }
+        let unlocked = plan
+            .unlocked
+            .iter()
+            .map(|path| to_object_path(path))
+            .collect();
+        let Some(provider_id) = plan.next_provider else {
+            return Ok((unlocked, to_object_path("/")));
+        };
+        let owner = crate::session::SessionOwner::from_request(conn, &header)
+            .map_err(|e| FdoError::AccessDenied(e.to_string()))?;
+        let prompt_path = self
+            .state
+            .register_prompt(
+                conn,
+                owner,
+                provider_id,
+                crate::prompt::PendingOperation::UnlockTargets(plan.pending),
+            )
+            .await?;
+        Ok((unlocked, to_object_path(&prompt_path)))
     }
 
     fn create_collection(

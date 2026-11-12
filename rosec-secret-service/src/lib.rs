@@ -39,3 +39,5 @@ mod tests {
 
 #[cfg(test)]
 mod prompt_subprocess_tests;
+
+mod unlock_plan;
