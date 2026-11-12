@@ -582,4 +582,68 @@ mod revocation_tests {
         manager.clear();
         assert!(manager.store.read().unwrap().is_empty());
     }
+    /// Opt-in host test: creates and unmounts only its own temporary filesystem.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires host /dev/fuse and fusermount3"]
+    async fn mounted_fuse_revocation_survives_pending_rebuild() {
+        use std::io::{Read, Seek};
+        let temp = tempfile::tempdir().unwrap();
+        let mountpoint = temp.path().join("mount");
+        let manager = Arc::new(SshManager {
+            gate: Default::default(),
+            store: KeyStore::new(),
+            fuse: Mutex::new(MountState {
+                handle: Some(
+                    rosec_fuse::mount(&mountpoint, temp.path().join("agent.sock")).unwrap(),
+                ),
+                last_attempt: None,
+            }),
+            ssh_dir: mountpoint.clone(),
+            agent_sock: temp.path().join("agent.sock"),
+        });
+        let provider = Arc::new(DelayedProvider {
+            locked: false.into(),
+            callbacks: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let source: Arc<dyn Provider> = provider.clone();
+        manager.register_provider(&source);
+        provider.release.notify_one();
+        assert!(manager.rebuild(std::slice::from_ref(&source)).await);
+        let file = std::fs::read_dir(mountpoint.join("keys/by-name"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let data = std::fs::read(&file).unwrap();
+        assert!(data.starts_with(b"ssh-ed25519 "));
+        assert!(std::fs::write(&file, b"forbidden").is_err());
+        let mut held = std::fs::File::open(&file).unwrap();
+        provider.entered.notified().await; // consume the initial rebuild notification
+        let task = {
+            let manager = manager.clone();
+            let source = source.clone();
+            tokio::spawn(async move { manager.rebuild(&[source]).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+            .await
+            .unwrap();
+        manager.remove_provider_instance(&source);
+        assert!(std::fs::read(&file).is_err());
+        held.rewind().unwrap();
+        assert!(held.read_to_end(&mut Vec::new()).is_err());
+        provider.release.notify_one();
+        assert!(!task.await.unwrap());
+        assert!(std::fs::read(&file).is_err());
+        manager.activate_provider(&source);
+        provider.release.notify_one();
+        assert!(manager.rebuild(&[source]).await);
+        assert!(std::fs::read(&file).is_ok());
+        manager.clear();
+        assert!(std::fs::read(&file).is_err());
+        drop(held);
+        drop(manager); // unmount before deleting the temporary directory
+    }
 }
