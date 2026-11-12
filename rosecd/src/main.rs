@@ -1,6 +1,5 @@
 #[cfg(feature = "private-socket")]
 mod bus;
-mod consumer_gate;
 mod fido2;
 mod fido2_ceremony;
 mod ssh;

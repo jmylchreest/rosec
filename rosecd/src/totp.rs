@@ -18,7 +18,7 @@ struct MountState {
 }
 
 pub struct TotpManager {
-    gate: crate::consumer_gate::ConsumerGate,
+    gate: rosec_events::ConsumerGate,
     fuse: Mutex<MountState>,
     entries: Mutex<Vec<(String, TotpEntry)>>,
     totp_dir: PathBuf,

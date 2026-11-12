@@ -114,8 +114,7 @@ pub struct ServiceState {
     /// rosecd to rebuild the SSH/TOTP key stores. Must not block — it runs on
     /// the zbus async-io executor, so it hands off to a runtime.
     items_changed_cb: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
-    change_revision: tokio::sync::watch::Sender<u64>,
-    refresh_lock: tokio::sync::Mutex<()>,
+    pub events: rosec_events::EventCoordinator<String>,
     object_lock: tokio::sync::Mutex<()>,
 }
 
@@ -187,11 +186,17 @@ impl ServiceState {
         prompt_config: PromptConfig,
         initial_config: Config,
     ) -> Self {
+        let events =
+            rosec_events::EventCoordinator::new(|meta| make_item_path(&meta.provider_id, &meta.id));
+        let cache = ItemCache {
+            items: events.projection(),
+            ..ItemCache::new()
+        };
         Self {
             registry: ProviderRegistry::new(providers, return_attr_map, collection_map),
             router,
             sessions,
-            cache: ItemCache::new(),
+            cache,
             provider_health: std::sync::Mutex::new(HashMap::new()),
             conn: RwLock::new(conn),
             locks: LockPolicy::new(),
@@ -199,8 +204,7 @@ impl ServiceState {
             prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
             items_changed_cb: RwLock::new(None),
-            change_revision: tokio::sync::watch::channel(0).0,
-            refresh_lock: tokio::sync::Mutex::new(()),
+            events,
             object_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -208,72 +212,25 @@ impl ServiceState {
     /// Subscribe to revision wakeups. Read `changes_since` after each wakeup;
     /// watch coalesces wakeups, while the bounded journal retains individual commits.
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.change_revision.subscribe()
+        self.events.subscribe()
     }
-
     pub fn changes_since(&self, revision: u64) -> ChangesSince {
-        self.cache
-            .domain
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .journal
-            .since(revision)
+        self.events.changes_since(revision)
     }
-
-    /// A consistent snapshot and revision for subscribers recovering after lag.
     pub fn change_snapshot(&self) -> (u64, Vec<ItemMeta>) {
-        let domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-        let items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
-        (domain.journal.revision(), items.values().cloned().collect())
+        self.events.snapshot()
     }
-
-    /// Record a successful provider sync reporting changed content. Publication
-    /// waits for response reconciliation, so callbacks are not committed events.
     pub fn note_provider_content_changed(&self, provider: &str) {
-        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-        domain.dirty_providers.insert(provider.to_owned());
-        domain.epoch = domain.epoch.saturating_add(1);
+        self.events.note_hint(provider);
     }
-
     fn set_cached_lock(&self, provider: Option<&str>, locked: bool) {
         let providers = provider
             .map(|id| vec![id.to_owned()])
             .unwrap_or_else(|| self.registry.order_snapshot());
-        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-        let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
-        domain.inventory.set_locked(provider, locked);
-        for meta in items.values_mut() {
-            if provider.is_none_or(|id| meta.provider_id == id) {
-                meta.locked = locked;
-            }
-        }
-        domain.epoch = domain.epoch.saturating_add(1);
-        if let Some(batch) = domain
-            .journal
-            .commit(&items.values().cloned().collect::<Vec<_>>())
-        {
-            self.change_revision.send_replace(batch.revision);
-        }
-        // Publish item and provider state under the same lock so concurrent
-        // lock/unlock completions cannot reverse the provider-state history.
-        for provider in providers {
-            if let Some(batch) = domain.journal.provider_lock(&provider, locked) {
-                self.change_revision.send_replace(batch.revision);
-            }
-        }
+        self.events.set_locked(provider, locked, &providers);
     }
-
     fn edit_inventory(&self, edit: impl FnOnce(&mut Inventory, &mut HashMap<String, ItemMeta>)) {
-        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-        let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
-        edit(&mut domain.inventory, &mut items);
-        domain.epoch = domain.epoch.saturating_add(1);
-        if let Some(batch) = domain
-            .journal
-            .commit(&items.values().cloned().collect::<Vec<_>>())
-        {
-            self.change_revision.send_replace(batch.revision);
-        }
+        self.events.edit(edit);
     }
 
     /// Register a callback fired after any item create/update/delete.
@@ -598,9 +555,7 @@ impl ServiceState {
 
     /// Hot-add a new provider at runtime.  No-op if the ID is already registered.
     pub fn hotreload_add_provider(&self, provider: Arc<dyn Provider>) {
-        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-        self.registry.add(provider);
-        domain.epoch = domain.epoch.saturating_add(1);
+        self.events.registry_change(|| self.registry.add(provider));
     }
 
     /// Reorder providers to match the given config ordering.
@@ -616,26 +571,8 @@ impl ServiceState {
     /// and purges its items from both caches.
     /// Returns `true` if a provider with that ID was found and removed.
     pub async fn hotreload_remove_provider(&self, id: &str) -> bool {
-        let provider = {
-            // Invalidate in-flight listings before awaiting the old provider's
-            // lock. A replacement with the same ID must not be purged later.
-            let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(provider) = self.registry.remove(id) else {
-                return false;
-            };
-            let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
-            domain.inventory.remove_provider(id);
-            domain.dirty_providers.remove(id);
-            domain.journal.forget_provider(id);
-            domain.epoch = domain.epoch.saturating_add(1);
-            items.retain(|_, meta| meta.provider_id != id);
-            if let Some(batch) = domain.journal.commit_with_provider_changes(
-                &items.values().cloned().collect::<Vec<_>>(),
-                &[id.to_owned()],
-            ) {
-                self.change_revision.send_replace(batch.revision);
-            }
-            provider
+        let Some(provider) = self.events.remove_provider(id, || self.registry.remove(id)) else {
+            return false;
         };
         if let Err(e) = provider.lock().await {
             warn!(provider_id = id, error = %e, "error locking provider during hot-remove");
@@ -2053,56 +1990,21 @@ impl ServiceState {
     pub(crate) async fn rebuild_cache_inner(
         self: &Arc<Self>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
-        let _refresh = self.refresh_lock.lock().await;
-        let epoch = self
+        let _refresh = self.events.refresh_guard().await;
+        let epoch = self.events.begin_refresh();
+        let outcomes = self.fetch_entries().await?;
+        self.events.commit_refresh(epoch, outcomes, |inventory| {
+            self.router
+                .dedup(inventory.items(), &self.registry.order_snapshot())
+        });
+        let entries = self
             .cache
-            .domain
+            .items
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .epoch;
-        let outcomes = self.fetch_entries().await?;
-        let entries = {
-            let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
-            let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
-            // A write or lock during the fetch makes the response stale. Preserve
-            // the committed view; the next refresh can collect a fresh snapshot.
-            if domain.epoch == epoch {
-                let mut changed_providers = Vec::new();
-                let mut inventory_changes = Vec::new();
-                for (provider, outcome) in outcomes {
-                    if matches!(&outcome, RefreshOutcome::Complete(_))
-                        && domain.dirty_providers.remove(&provider)
-                    {
-                        changed_providers.push(provider.clone());
-                    }
-                    if domain.inventory.refresh(&provider, outcome) {
-                        inventory_changes.push(provider);
-                    }
-                }
-                let order = self.registry.order_snapshot();
-                let visible = self.router.dedup(domain.inventory.items(), &order);
-                items.clear();
-                for meta in &visible {
-                    items.insert(make_item_path(&meta.provider_id, &meta.id), meta.clone());
-                }
-                domain.epoch = domain.epoch.saturating_add(1);
-                if let Some(batch) = domain
-                    .journal
-                    .commit_with_provider_changes(&visible, &inventory_changes)
-                {
-                    self.change_revision.send_replace(batch.revision);
-                }
-                for provider in changed_providers {
-                    if let Some(batch) = domain.journal.invalidate_provider(&provider) {
-                        self.change_revision.send_replace(batch.revision);
-                    }
-                }
-            }
-            items
-                .iter()
-                .map(|(path, meta)| (path.clone(), meta.clone()))
-                .collect::<Vec<_>>()
-        };
+            .iter()
+            .map(|(path, meta)| (path.clone(), meta.clone()))
+            .collect();
         self.register_current_items().await?;
         self.update_cache_time()?;
         Ok(entries)
@@ -2371,7 +2273,7 @@ impl ServiceState {
     }
 
     pub(crate) fn wake_change_adapter(&self) {
-        self.change_revision.send_modify(|_| {});
+        self.events.wake();
     }
 
     #[cfg(test)]

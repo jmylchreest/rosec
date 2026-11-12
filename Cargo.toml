@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "rosec-core",
+    "rosec-events",
     "rosec-secret-service",
     "rosec-ssh-agent",
     "rosec-fuse",

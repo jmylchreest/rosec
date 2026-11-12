@@ -26,7 +26,6 @@ use rosec_core::ItemMeta;
 pub struct ItemCache {
     /// All items the service knows about, keyed by D-Bus object path.
     pub items: Arc<Mutex<HashMap<String, ItemMeta>>>,
-    pub(crate) domain: Mutex<DomainState>,
     /// Set of D-Bus item paths currently registered on the object server.
     pub registered_items: Arc<Mutex<HashSet<String>>>,
     pub(crate) registered_sources: Mutex<HashMap<String, Weak<dyn rosec_core::Provider>>>,
@@ -50,24 +49,6 @@ impl ItemCache {
             .clear();
         if let Ok(mut g) = self.registered_items.lock() {
             g.clear();
-        }
-    }
-}
-
-/// Response-processing state. Always lock this before the public item map.
-pub(crate) struct DomainState {
-    pub inventory: rosec_core::changes::Inventory,
-    pub journal: rosec_core::changes::ChangeJournal,
-    pub epoch: u64,
-    pub dirty_providers: HashSet<String>,
-}
-impl Default for DomainState {
-    fn default() -> Self {
-        Self {
-            inventory: Default::default(),
-            journal: rosec_core::changes::ChangeJournal::new(256),
-            epoch: 0,
-            dirty_providers: HashSet::new(),
         }
     }
 }
