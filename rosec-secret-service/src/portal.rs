@@ -324,6 +324,7 @@ impl PortalSecret {
         );
 
         let item = NewItem {
+            content_types: Default::default(),
             label: format!("Portal secret for {app_id}"),
             item_type: Some(ItemType::Generic),
             attributes,

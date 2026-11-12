@@ -117,6 +117,7 @@ pub fn new_item_for_credential(cred: &NewFido2Credential) -> NewItem {
     );
 
     NewItem {
+        content_types: Default::default(),
         label: passkey_label(cred),
         item_type: Some(ItemType::Fido2),
         attributes,

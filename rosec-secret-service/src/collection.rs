@@ -117,7 +117,7 @@ impl SecretCollection {
             .and_then(|v| extract_attributes_dict(v))
             .unwrap_or_default();
 
-        let (session_path, parameters, secret_value, _content_type) = secret;
+        let (session_path, parameters, secret_value, content_type) = secret;
         let session_path = session_path.as_str().to_string();
 
         let encoding = self.state.sessions.lookup_for(
@@ -138,6 +138,7 @@ impl SecretCollection {
         secrets.insert("secret".to_string(), secret);
 
         let item = NewItem {
+            content_types: HashMap::from([("secret".into(), content_type)]),
             label,
             item_type: None,
             attributes,
