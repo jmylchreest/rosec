@@ -993,3 +993,70 @@ async fn unlock_populates_sidecar_when_missing() {
     assert!(meta_path.exists(), "unlock should populate missing sidecar");
     let _ = temp;
 }
+
+#[tokio::test]
+async fn recovery_validates_snapshot_and_excludes_active_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault");
+    let backup = dir.path().join("snapshot");
+    let vault = LocalVault::new("test", &path);
+    let password = || UnlockInput::Password(Zeroizing::new("fixture-password".into()));
+    vault.unlock(password()).await.unwrap();
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&backup, &original).unwrap();
+    let other = LocalVault::new("other", &path);
+    assert!(
+        other
+            .restore_snapshot(&backup, b"fixture-password")
+            .await
+            .is_err()
+    );
+    assert!(other.unlock(password()).await.is_err());
+    vault.lock().await.unwrap();
+    assert!(
+        other
+            .restore_snapshot(&backup, b"wrong-password")
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    other
+        .restore_snapshot(&backup, b"fixture-password")
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    other.unlock(password()).await.unwrap();
+    assert!(other.list_items().await.unwrap().is_empty());
+    assert_eq!(
+        serde_json::from_slice::<VaultFile>(&std::fs::read(&path).unwrap())
+            .unwrap()
+            .version,
+        2
+    );
+}
+
+#[tokio::test]
+async fn failed_save_does_not_publish_mutation_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault");
+    let vault = LocalVault::new("test", &path);
+    vault
+        .unlock(UnlockInput::Password(Zeroizing::new(
+            "fixture-password".into(),
+        )))
+        .await
+        .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    // Simulate an external writer which does not honour the lease.
+    std::fs::write(&path, b"external replacement").unwrap();
+    let item = NewItem {
+        label: "must-not-appear".into(),
+        item_type: None,
+        attributes: HashMap::new(),
+        secrets: HashMap::from([("secret".into(), SecretBytes::new(b"fixture".to_vec()))]),
+    };
+    assert!(vault.create_item(item, false).await.is_err());
+    assert!(vault.list_items().await.unwrap().is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), b"external replacement");
+    std::fs::write(&path, original).unwrap();
+}

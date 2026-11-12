@@ -4617,6 +4617,7 @@ dependencies = [
  "futures-util",
  "libc",
  "rosec-core",
+ "rosec-vault",
  "rosec-wasm",
  "rpassword",
  "serde_json",
