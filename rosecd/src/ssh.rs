@@ -178,11 +178,12 @@ impl SshManager {
     /// Keys from providers that are locked or that return errors are skipped
     /// with a debug log.  After all providers are processed the FUSE snapshot
     /// is refreshed atomically.
-    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) -> bool {
         let (epoch, providers) = self.gate.begin(providers);
         self.ensure_mounted();
 
         let mut new_entries = Vec::new();
+        let mut complete = true;
 
         for provider in &providers {
             // Only providers declaring Ssh contribute keys — matches the
@@ -200,6 +201,7 @@ impl SshManager {
                 Ok(s) => s.locked,
                 Err(e) => {
                     debug!(provider = %provider_id, error = %e, "ssh rebuild: status check failed, skipping");
+                    complete = false;
                     continue;
                 }
             };
@@ -212,6 +214,7 @@ impl SshManager {
                 Ok(m) => m,
                 Err(e) => {
                     debug!(provider = %provider_id, error = %e, "ssh rebuild: list_ssh_keys failed");
+                    complete = false;
                     continue;
                 }
             };
@@ -228,6 +231,7 @@ impl SshManager {
                             error = %e,
                             "ssh rebuild: get_ssh_private_key failed, skipping"
                         );
+                        complete = false;
                         continue;
                     }
                 };
@@ -291,7 +295,7 @@ impl SshManager {
                 }
             }
             self.refresh_fuse();
-        });
+        }) && complete
     }
 
     /// Revoke pending work before removing this provider's cached key material.
