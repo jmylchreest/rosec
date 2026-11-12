@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rosec_core::{ItemMeta, NewItem, Provider, SecretBytes, meta_matches_query};
+use rosec_core::{ItemMeta, NewItem, SecretBytes, meta_matches_query};
 use tracing::{debug, info};
 use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
@@ -18,7 +18,6 @@ use crate::state::{ServiceState, make_item_path, map_provider_error, map_provide
 pub struct CollectionState {
     pub label: String,
     pub items: Arc<Mutex<HashMap<String, ItemMeta>>>,
-    pub providers: Vec<Arc<dyn Provider>>,
     pub service_state: Arc<ServiceState>,
     pub sessions: Arc<SessionManager>,
     pub tokio_handle: tokio::runtime::Handle,
@@ -36,14 +35,30 @@ impl SecretCollection {
 
 #[interface(name = "org.freedesktop.Secret.Collection")]
 impl SecretCollection {
+    #[zbus(signal)]
+    pub async fn item_created(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        item: OwnedObjectPath,
+    ) -> zbus::Result<()>;
+    #[zbus(signal)]
+    pub async fn item_deleted(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        item: OwnedObjectPath,
+    ) -> zbus::Result<()>;
+    #[zbus(signal)]
+    pub async fn item_changed(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        item: OwnedObjectPath,
+    ) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn label(&self) -> String {
         self.state.label.clone()
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     async fn locked(&self) -> bool {
-        for provider in &self.state.providers {
+        for provider in self.state.service_state.providers_ordered() {
             match provider.status().await {
                 Ok(s) if !s.locked => return false,
                 _ => {}
@@ -52,7 +67,7 @@ impl SecretCollection {
         true
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn items(&self) -> Vec<OwnedObjectPath> {
         self.state
             .items

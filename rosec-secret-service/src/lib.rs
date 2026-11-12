@@ -1,3 +1,4 @@
+mod change_adapter;
 pub mod collection;
 pub mod crypto;
 pub mod daemon;

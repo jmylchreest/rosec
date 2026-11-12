@@ -63,23 +63,23 @@ impl SecretItem {
 
 #[interface(name = "org.freedesktop.Secret.Item")]
 impl SecretItem {
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn label(&self) -> String {
         self.current_meta().label
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn attributes(&self) -> HashMap<String, String> {
         self.current_meta().attributes
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn locked(&self) -> bool {
         self.is_locked()
     }
 
     /// Unix timestamp when the item was created (0 if unknown).
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn created(&self) -> u64 {
         self.current_meta()
             .created
@@ -89,7 +89,7 @@ impl SecretItem {
     }
 
     /// Unix timestamp when the item was last modified (0 if unknown).
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn modified(&self) -> u64 {
         self.current_meta()
             .modified
