@@ -218,7 +218,6 @@ async fn run() -> Result<()> {
     }
 
     wire_provider_callbacks(&state, &ssh_manager, &totp_manager, &fido2_registry);
-    wire_items_changed_callback(&state, &ssh_manager, &totp_manager, &fido2_registry);
 
     // Mount the FUSE filesystems and load any provider already unlocked at
     // startup (e.g. PAM auto-unlock that raced ahead of the callbacks above);
@@ -263,6 +262,22 @@ async fn run() -> Result<()> {
                 async move {
                     let state = state.upgrade()?;
                     Some(manager.rebuild(&state.providers_ordered()).await)
+                }
+            }));
+        }
+    }
+
+    if let Some(manager) = &fido2_registry {
+        let state = Arc::downgrade(&state);
+        let manager = Arc::clone(manager);
+        let revisions = state.upgrade().map(|s| s.events.subscribe());
+        if let Some(revisions) = revisions {
+            tokio::spawn(rosec_events::run_consumer(revisions, move || {
+                let state = state.clone();
+                let manager = Arc::clone(&manager);
+                async move {
+                    let state = state.upgrade()?;
+                    Some(manager.rebuild(&state.fido2_providers()).await)
                 }
             }));
         }
@@ -1209,38 +1224,6 @@ async fn logind_watcher(
     }
 }
 
-/// Rebuild the SSH and TOTP key stores on item create/update/delete.
-///
-/// Provider lifecycle callbacks only rebuild on unlock/lock/sync, so without
-/// this an item added while already unlocked stays invisible to `ssh-agent`
-/// until the next lock/unlock or sync. Wired once — the callback reads
-/// `providers_ordered()` at fire time, so it needs no re-wiring on hot-reload.
-fn wire_items_changed_callback(
-    state: &Arc<rosec_secret_service::ServiceState>,
-    _ssh_manager: &Option<Arc<ssh::SshManager>>,
-    _totp_manager: &Option<Arc<totp::TotpManager>>,
-    fido2_registry: &Option<Arc<fido2::Fido2Registry>>,
-) {
-    let fido2 = fido2_registry.clone();
-    if fido2.is_none() {
-        return;
-    }
-    let cb_state = Arc::clone(state);
-    // The callback fires on zbus's async-io executor; hop onto Tokio to rebuild.
-    let handle = tokio::runtime::Handle::current();
-    state.set_items_changed_callback(Arc::new(move || {
-        let fr = fido2.clone();
-        let s = Arc::clone(&cb_state);
-        handle.spawn(async move {
-            // A passkey written while already unlocked (e.g. makeCredential)
-            // must appear immediately, not wait for the next lock/unlock/sync.
-            if let Some(ref fr) = fr {
-                fr.rebuild(&s.fido2_providers()).await;
-            }
-        });
-    }));
-}
-
 /// Register lifecycle and nudge event callbacks on every provider.
 ///
 /// Remote nudge callbacks (sync / lock) are set as fields on
@@ -1279,13 +1262,9 @@ fn wire_provider_callbacks(
         let totp_unlocked = totp_manager.clone();
         let totp_locked = totp_manager.clone();
         let fido2_unlocked = fido2_registry.clone();
-        let fido2_synced = fido2_registry.clone();
         let fido2_locked = fido2_registry.clone();
         let providers_for_unlock = Arc::clone(state);
         let providers_for_sync = Arc::clone(state);
-        let fido2_providers_for_unlock = Arc::clone(state);
-        let fido2_providers_for_sync = Arc::clone(state);
-        let locked_id = provider_id.clone();
         let synced_id = provider_id.clone();
         let failed_id = provider_id.clone();
 
@@ -1314,16 +1293,16 @@ fn wire_provider_callbacks(
                 if let Some(fr) = &fido2_unlocked {
                     fr.activate_provider(&provider);
                 }
-                providers_for_unlock.mark_provider_unlocked_in_cache(provider.id());
-                let fr = fido2_unlocked.clone();
-                let fs = Arc::clone(&fido2_providers_for_unlock);
-                tokio::spawn(async move {
-                    if let Some(ref fr) = fr {
-                        // Live read of the fido2-capable providers — never a
-                        // snapshot captured at an earlier point.
-                        fr.rebuild(&fs.fido2_providers()).await;
-                    }
-                });
+                providers_for_unlock.events.set_locked_if(
+                    Some(provider.id()),
+                    false,
+                    &[provider.id().to_owned()],
+                    || {
+                        providers_for_unlock
+                            .provider_by_id(provider.id())
+                            .is_some_and(|current| Arc::ptr_eq(&current, &provider))
+                    },
+                );
             })),
             on_locked: Some(Arc::new(move || {
                 let Some(provider) = locked_provider.upgrade() else {
@@ -1336,15 +1315,24 @@ fn wire_provider_callbacks(
                     return;
                 }
                 if let Some(ref sm) = ssh_locked {
-                    sm.remove_provider(&locked_id);
+                    sm.remove_provider_instance(&provider);
                 }
                 if let Some(ref tm) = totp_locked {
-                    tm.remove_provider(&locked_id);
+                    tm.remove_provider_instance(&provider);
                 }
                 if let Some(ref fr) = fido2_locked {
-                    fr.remove_provider(&locked_id);
+                    fr.remove_provider_instance(&provider);
                 }
-                providers_for_lock.mark_provider_locked_in_cache(&locked_id);
+                providers_for_lock.events.set_locked_if(
+                    Some(provider.id()),
+                    true,
+                    &[provider.id().to_owned()],
+                    || {
+                        providers_for_lock
+                            .provider_by_id(provider.id())
+                            .is_some_and(|current| Arc::ptr_eq(&current, &provider))
+                    },
+                );
             })),
             on_sync_succeeded: Some(Arc::new(move |changed| {
                 let Some(provider) = synced_provider.upgrade() else {
@@ -1361,14 +1349,11 @@ fn wire_provider_callbacks(
                 }
                 providers_for_sync
                     .events
-                    .confirm_content_changed(&synced_id);
-                let fr = fido2_synced.clone();
-                let fs = Arc::clone(&fido2_providers_for_sync);
-                tokio::spawn(async move {
-                    if let Some(ref fr) = fr {
-                        fr.rebuild(&fs.fido2_providers()).await;
-                    }
-                });
+                    .confirm_content_changed_if(&synced_id, || {
+                        providers_for_sync
+                            .provider_by_id(provider.id())
+                            .is_some_and(|current| Arc::ptr_eq(&current, &provider))
+                    });
             })),
             on_sync_failed: Some(Arc::new(move || {
                 tracing::debug!(provider = %failed_id, "sync failed (SSH keys unchanged)");
@@ -1403,6 +1388,7 @@ fn wire_provider_callbacks(
             tracing::warn!(provider = %provider.id(), error = %e, "failed to set event callbacks (lock poisoned)");
         }
     }
+    state.events.wake();
 }
 
 /// Build all configured providers, in order.
@@ -2282,5 +2268,68 @@ mod tests {
             }
         }
         assert!(super::load_config(&main).unwrap().service.ssh_fuse);
+    }
+}
+
+#[cfg(test)]
+mod consumer_wiring_tests {
+    use super::*;
+    #[tokio::test]
+    async fn callbacks_publish_confirmed_results_and_revoke_without_waiting_for_worker() {
+        let provider = Arc::new(fido2::tests::DelayedProvider {
+            locked: false.into(),
+            callbacks: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let source: Arc<dyn Provider> = provider.clone();
+        let state = Arc::new(rosec_secret_service::ServiceState::new(
+            vec![source.clone()],
+            Arc::new(rosec_core::router::Router::new(
+                rosec_core::router::RouterConfig {
+                    dedup_strategy: rosec_core::DedupStrategy::Newest,
+                    dedup_time_fallback: rosec_core::DedupTimeFallback::Created,
+                },
+            )),
+            Arc::new(rosec_secret_service::session::SessionManager::new()),
+            zbus::Connection::session().await.unwrap(),
+            tokio::runtime::Handle::current(),
+        ));
+        let registry = Arc::new(fido2::Fido2Registry::new());
+        wire_provider_callbacks(&state, &None, &None, &Some(registry.clone()));
+        let sync = provider
+            .callbacks
+            .lock()
+            .unwrap()
+            .on_sync_succeeded
+            .clone()
+            .unwrap();
+        let before = state.change_snapshot().0;
+        sync(false);
+        assert_eq!(state.change_snapshot().0, before);
+        sync(true);
+        assert!(state.change_snapshot().0 > before);
+        let task = {
+            let state = state.clone();
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry.rebuild(&state.fido2_providers()).await;
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            provider.entered.notified(),
+        )
+        .await
+        .unwrap();
+        source.lock().await.unwrap();
+        assert!(registry.find("example.com", &[]).is_empty());
+        provider.release.notify_one();
+        task.await.unwrap();
+        assert!(registry.find("example.com", &[]).is_empty());
+        state.hotreload_remove_provider("local").await;
+        let before = state.change_snapshot().0;
+        sync(true); // A retired provider callback cannot publish new state.
+        assert_eq!(state.change_snapshot().0, before);
     }
 }

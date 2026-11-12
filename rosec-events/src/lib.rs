@@ -64,7 +64,14 @@ impl<K: Eq + Hash> EventCoordinator<K> {
     /// A successful operation confirmed changed content, even when metadata
     /// is unchanged or a subsequent listing is unavailable. No secrets enter replay.
     pub fn confirm_content_changed(&self, provider: &str) {
+        self.confirm_content_changed_if(provider, || true);
+    }
+    /// Validate the response source under the same lock as registry mutations.
+    pub fn confirm_content_changed_if(&self, provider: &str, current: impl FnOnce() -> bool) {
         let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
+        if !current() {
+            return;
+        }
         domain.epoch += 1;
         if let Some(batch) = domain.journal.invalidate_provider(provider) {
             self.revision.send_replace(batch.revision);
@@ -101,7 +108,20 @@ impl<K: Eq + Hash> EventCoordinator<K> {
         Some(provider)
     }
     pub fn set_locked(&self, provider: Option<&str>, locked: bool, providers: &[String]) {
+        self.set_locked_if(provider, locked, providers, || true);
+    }
+    /// Validate the response source atomically with its state publication.
+    pub fn set_locked_if(
+        &self,
+        provider: Option<&str>,
+        locked: bool,
+        providers: &[String],
+        current: impl FnOnce() -> bool,
+    ) {
         let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
+        if !current() {
+            return;
+        }
         let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         domain.inventory.set_locked(provider, locked);
         for meta in items.values_mut() {
@@ -122,15 +142,23 @@ impl<K: Eq + Hash> EventCoordinator<K> {
             }
         }
     }
-    pub fn edit(&self, edit: impl FnOnce(&mut Inventory, &mut HashMap<K, ItemMeta>)) {
+    pub fn edit(
+        &self,
+        edit: impl FnOnce(&mut Inventory, &mut HashMap<K, ItemMeta>) -> Option<String>,
+    ) {
         let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
         let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
-        edit(&mut domain.inventory, &mut items);
+        let provider = edit(&mut domain.inventory, &mut items);
         domain.epoch += 1;
         if let Some(batch) = domain
             .journal
             .commit(&items.values().cloned().collect::<Vec<_>>())
         {
+            self.revision.send_replace(batch.revision);
+        } else if let Some(provider) = provider
+            && let Some(batch) = domain.journal.invalidate_provider(&provider)
+        {
+            // A successful secret replacement may leave all public metadata identical.
             self.revision.send_replace(batch.revision);
         }
     }

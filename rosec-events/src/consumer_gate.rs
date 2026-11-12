@@ -33,8 +33,16 @@ impl ConsumerGate {
             s.epoch += 1;
         }
     }
-    pub fn begin(&self, providers: &[Arc<dyn Provider>]) -> (u64, Vec<Arc<dyn Provider>>) {
+    pub fn begin(&self, providers: &[Arc<dyn Provider>]) -> (Option<u64>, Vec<Arc<dyn Provider>>) {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if providers.iter().any(|p| {
+            !s.sources
+                .get(p.id())
+                .is_some_and(|(source, _)| source.ptr_eq(&Arc::downgrade(p)))
+        }) {
+            // A queued request carrying retired instances must not clear a newer view.
+            return (None, Vec::new());
+        }
         s.epoch += 1;
         let providers = providers
             .iter()
@@ -45,15 +53,28 @@ impl ConsumerGate {
             })
             .map(Arc::clone)
             .collect();
-        (s.epoch, providers)
+        (Some(s.epoch), providers)
     }
-    pub fn publish(&self, epoch: u64, install: impl FnOnce()) -> bool {
+    pub fn publish(&self, epoch: Option<u64>, install: impl FnOnce()) -> bool {
         let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if s.epoch != epoch {
+        if Some(s.epoch) != epoch {
             return false;
         }
         install();
         true
+    }
+    /// Delayed lifecycle callbacks may only revoke their own registered instance.
+    pub fn revoke_source(&self, provider: &Arc<dyn Provider>, evict: impl FnOnce()) {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((source, enabled)) = s.sources.get_mut(provider.id()) else {
+            return;
+        };
+        if !source.ptr_eq(&Arc::downgrade(provider)) {
+            return;
+        }
+        *enabled = false;
+        s.epoch += 1;
+        evict();
     }
     pub fn revoke(&self, provider: Option<&str>, evict: impl FnOnce()) {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());

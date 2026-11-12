@@ -119,8 +119,9 @@ impl PasskeyStore for RegistryStore {
             Ctap2Status::Other
         })?;
 
-        // Refresh the index so this credential is immediately assertable
-        // (create_item does not itself fire the items-changed callback).
+        self.state.events.confirm_content_changed(provider.id());
+        // Registration waits for the index update so the new credential is
+        // immediately assertable, independently of subscriber scheduling.
         self.registry.rebuild(&self.state.fido2_providers()).await;
 
         Ok(CreatedCredential {
