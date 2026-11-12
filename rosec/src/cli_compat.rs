@@ -26,6 +26,10 @@ macro_rules! legacy {
     };
 }
 pub const LEGACY: &[LegacyCommand] = &[
+    legacy!(
+        "restore-snapshot",
+        "rosec vault snapshot restore <snapshot> --path <file> --yes"
+    ),
     legacy!("auth", "rosec provider <id> unlock"),
     legacy!("add-password", "rosec provider <id> password add"),
     legacy!("remove-password", "rosec provider <id> password remove"),
@@ -92,6 +96,24 @@ fn prepare(mut cli: Cli) -> Result<Prepared, clap::Error> {
                 return Err(error(
                     "--id requires an instance operation: status, unlock, sync or password",
                 ));
+            }
+            Some(ProviderCommands::RestoreSnapshot {
+                path,
+                snapshot,
+                yes,
+            }) => {
+                legacy = LEGACY.iter().find(|spec| spec.name == "restore-snapshot");
+                cli.command = Commands::Vault {
+                    action: crate::cli::VaultCommands::Snapshot {
+                        action: crate::cli::VaultSnapshotCommands::Restore(
+                            crate::cli::SnapshotRestoreArgs {
+                                path,
+                                snapshot,
+                                yes,
+                            },
+                        ),
+                    },
+                };
             }
             Some(value) => {
                 let (name, request) = match value {
@@ -258,5 +280,36 @@ mod tests {
         let mut spec = legacy!("old-name", "rosec provider <id> unlock");
         spec.retired = true;
         assert!(enforce(&spec, false).is_err());
+    }
+    #[test]
+    fn native_recovery_spellings_normalize_identically() {
+        fn args(prepared: Prepared) -> crate::cli::SnapshotRestoreArgs {
+            let Commands::Vault {
+                action:
+                    crate::cli::VaultCommands::Snapshot {
+                        action: crate::cli::VaultSnapshotCommands::Restore(args),
+                    },
+            } = prepared.cli.command
+            else {
+                panic!("not normalized");
+            };
+            args
+        }
+        let old = parsed(&[
+            "rosec",
+            "provider",
+            "restore-snapshot",
+            "--path",
+            "vault",
+            "--snapshot",
+            "backup",
+            "--yes",
+        ]);
+        let new = parsed(&[
+            "rosec", "vault", "snapshot", "restore", "backup", "--path", "vault", "--yes",
+        ]);
+        assert!(old.legacy.is_some());
+        assert!(new.legacy.is_none());
+        assert_eq!(args(old), args(new));
     }
 }

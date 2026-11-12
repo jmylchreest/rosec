@@ -78,6 +78,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Operate on native vault files without attaching a provider
+    Vault {
+        #[command(subcommand)]
+        action: VaultCommands,
+    },
     /// Manage providers
     #[command(
         alias = "providers",
@@ -809,4 +814,29 @@ pub struct InstanceCli {
     pub deny_deprecated: bool,
     #[command(subcommand)]
     pub operation: ProviderOperation,
+}
+
+#[derive(Subcommand)]
+pub enum VaultCommands {
+    /// Recover a native vault from encrypted snapshots
+    Snapshot {
+        #[command(subcommand)]
+        action: VaultSnapshotCommands,
+    },
+}
+#[derive(Subcommand)]
+pub enum VaultSnapshotCommands {
+    /// Restore an encrypted snapshot (stop rosecd first); retain the current file
+    Restore(SnapshotRestoreArgs),
+}
+#[derive(Parser, Debug, PartialEq, Eq)]
+pub struct SnapshotRestoreArgs {
+    /// Encrypted snapshot to restore; its password may differ from the current vault
+    pub snapshot: std::path::PathBuf,
+    /// Native vault file to replace
+    #[arg(long)]
+    pub path: std::path::PathBuf,
+    /// Acknowledge that changes since the snapshot leave the active vault
+    #[arg(long, required = true)]
+    pub yes: bool,
 }

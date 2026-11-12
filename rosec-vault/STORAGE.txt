@@ -23,7 +23,7 @@ Snapshots are not automatically deleted; they may retain deleted secrets or old
 unlock passwords, so remove recovery points when no longer needed.
 
 Recovery command (stop rosecd first):
-  rosec provider restore-snapshot --path VAULT --snapshot SNAPSHOT --yes
+  rosec vault snapshot restore SNAPSHOT --path VAULT --yes
 
 The command asks for the snapshot password, authenticates/decrypts its contents,
 preserves the active encrypted file as another recovery point, and restores the
@@ -49,3 +49,6 @@ bash tests/libsecret_roundtrip.sh (requires libsecret development headers, cc an
 Set CARGO_TARGET_DIR to a disk-backed build directory when using /tmp worktrees.
 The optional libsecret test uses only a private bus and temporary native vault.
 It covers text workflows, binary MIME parameters and replacement with empty text.
+
+The former `provider restore-snapshot --path VAULT --snapshot SNAPSHOT --yes`
+spelling remains a deprecated alias. Both invoke the same native-file handler.
