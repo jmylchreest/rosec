@@ -18,7 +18,9 @@ struct MountState {
 }
 
 pub struct TotpManager {
+    gate: crate::consumer_gate::ConsumerGate,
     fuse: Mutex<MountState>,
+    entries: Mutex<Vec<(String, TotpEntry)>>,
     totp_dir: PathBuf,
 }
 
@@ -29,6 +31,13 @@ impl std::fmt::Debug for TotpManager {
 }
 
 impl TotpManager {
+    pub fn register_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.register(provider);
+    }
+    pub fn activate_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.activate(provider);
+    }
+
     /// Start the TOTP FUSE filesystem.
     ///
     /// Mounts at `$XDG_RUNTIME_DIR/rosec/totp/`.
@@ -45,6 +54,8 @@ impl TotpManager {
         let totp_dir = runtime_dir.join("rosec").join("totp");
 
         Some(Self {
+            gate: Default::default(),
+            entries: Default::default(),
             fuse: Mutex::new(MountState {
                 handle: None,
                 last_attempt: None,
@@ -96,9 +107,14 @@ impl TotpManager {
             return;
         }
 
+        self.rebuild_entries(providers).await;
+    }
+
+    async fn rebuild_entries(&self, providers: &[Arc<dyn Provider>]) {
+        let (epoch, providers) = self.gate.begin(providers);
         let mut entries = Vec::new();
 
-        for provider in providers {
+        for provider in &providers {
             if !provider.capabilities().contains(&Capability::Totp) {
                 continue;
             }
@@ -158,34 +174,102 @@ impl TotpManager {
                     }
                 };
 
-                entries.push(TotpEntry {
-                    item_id: item.id.clone(),
-                    item_name: item.label.clone(),
-                    params,
-                });
+                entries.push((
+                    provider.id().to_owned(),
+                    TotpEntry {
+                        item_id: item.id.clone(),
+                        item_name: item.label.clone(),
+                        params,
+                    },
+                ));
             }
         }
 
         let count = entries.len();
-        self.update_snapshot(&entries);
+        self.gate.publish(epoch, || {
+            *self.entries.lock().unwrap_or_else(|e| e.into_inner()) = entries;
+            self.refresh_snapshot();
+        });
         debug!(items = count, "TOTP FUSE snapshot refreshed");
     }
 
     /// Remove all entries and refresh with an empty snapshot.
+    pub fn remove_provider(&self, id: &str) {
+        self.gate.revoke(Some(id), || {
+            self.entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(provider, _)| provider != id);
+            self.refresh_snapshot();
+        });
+    }
+
     pub fn clear(&self) {
-        self.update_snapshot(&[]);
+        self.gate.revoke(None, || {
+            self.entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.refresh_snapshot();
+        });
         info!("TOTP FUSE snapshot cleared");
     }
 
     /// Push a snapshot to the FUSE filesystem if it is currently mounted.
-    fn update_snapshot(&self, entries: &[TotpEntry]) {
+    fn refresh_snapshot(&self) {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries: Vec<&TotpEntry> = entries.iter().map(|(_, entry)| entry).collect();
         match self.fuse.lock() {
             Ok(state) => {
                 if let Some(handle) = state.handle.as_ref() {
-                    handle.fuse.update(entries);
+                    handle.fuse.update_refs(&entries);
                 }
             }
             Err(e) => warn!("TOTP FUSE mount lock poisoned in update: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use crate::fido2::tests::DelayedProvider;
+    #[tokio::test]
+    async fn revoked_material_cannot_be_restored_by_pending_rebuild() {
+        let manager = Arc::new(TotpManager {
+            gate: Default::default(),
+            entries: Default::default(),
+            fuse: Mutex::new(MountState {
+                handle: None,
+                last_attempt: Some(Instant::now()),
+            }),
+            totp_dir: PathBuf::new(),
+        });
+        let provider = Arc::new(DelayedProvider {
+            locked: false.into(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let source: Arc<dyn Provider> = provider.clone();
+        manager.register_provider(&source);
+        let task = {
+            let manager = manager.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                manager.rebuild_entries(&[source]).await;
+            })
+        };
+        provider.entered.notified().await;
+        manager.remove_provider("local");
+        provider.release.notify_one();
+        task.await.unwrap();
+        assert!(manager.entries.lock().unwrap().is_empty());
+        // Successful fresh unlock still loads the same data.
+        manager.activate_provider(&source);
+        provider.release.notify_one();
+        manager.rebuild_entries(&[source]).await;
+        assert!(!(manager.entries.lock().unwrap().is_empty()));
+        manager.clear();
+        assert!(manager.entries.lock().unwrap().is_empty());
     }
 }

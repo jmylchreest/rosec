@@ -83,7 +83,7 @@ impl Default for Snapshot {
 }
 
 impl Snapshot {
-    fn build(entries: &[TotpEntry]) -> Self {
+    fn build<'a>(entries: impl IntoIterator<Item = &'a TotpEntry>) -> Self {
         let mut snap = Self::default();
 
         let root = snap
@@ -234,7 +234,12 @@ impl TotpFuse {
 
     /// Rebuild the snapshot from a new set of TOTP entries.
     pub fn update(&self, entries: &[TotpEntry]) {
-        let snap = Snapshot::build(entries);
+        self.update_refs(&entries.iter().collect::<Vec<_>>());
+    }
+
+    /// Rebuild using borrowed entries without copying their secret parameters.
+    pub fn update_refs(&self, entries: &[&TotpEntry]) {
+        let snap = Snapshot::build(entries.iter().copied());
         match self.snapshot.write() {
             Ok(mut guard) => *guard = snap,
             Err(e) => warn!("TOTP FUSE snapshot lock poisoned: {e}"),

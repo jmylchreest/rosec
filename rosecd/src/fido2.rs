@@ -77,10 +77,18 @@ impl Fido2Index {
 /// always see the current set — never one frozen at unlock/registration time.
 #[derive(Default)]
 pub struct Fido2Registry {
+    gate: crate::consumer_gate::ConsumerGate,
     index: RwLock<Fido2Index>,
 }
 
 impl Fido2Registry {
+    pub fn register_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.register(provider);
+    }
+    pub fn activate_provider(&self, provider: &Arc<dyn Provider>) {
+        self.gate.activate(provider);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -91,8 +99,9 @@ impl Fido2Registry {
     /// `state.fido2_providers()`); locked providers contribute nothing.
     /// Metadata only — no private keys are fetched or cached.
     pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+        let (epoch, providers) = self.gate.begin(providers);
         let mut metas = Vec::new();
-        for provider in providers {
+        for provider in &providers {
             // Declared capability is authoritative (matches ssh/totp loops).
             if !provider.capabilities().contains(&Capability::Fido2) {
                 continue;
@@ -121,7 +130,18 @@ impl Fido2Registry {
         }
         let index = Fido2Index::build(metas);
         debug!(total = index.len(), "fido2 rebuild: index updated");
-        *self.index.write().unwrap() = index;
+        self.gate.publish(epoch, || {
+            *self.index.write().unwrap_or_else(|e| e.into_inner()) = index;
+        });
+    }
+
+    pub fn remove_provider(&self, id: &str) {
+        self.gate.revoke(Some(id), || {
+            let mut index = self.index.write().unwrap_or_else(|e| e.into_inner());
+            for entries in index.by_rp.values_mut() {
+                entries.retain(|m| m.provider_id != id);
+            }
+        });
     }
 
     /// Credentials to offer for an assertion (delegates to the live index).
@@ -129,12 +149,15 @@ impl Fido2Registry {
     // already wired into the daemon's unlock/sync/lock callbacks.
     #[allow(dead_code)]
     pub fn find(&self, rp_id: &str, allow_ids: &[String]) -> Vec<Fido2CredentialMeta> {
-        self.index.read().unwrap().find(rp_id, allow_ids)
+        self.index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .find(rp_id, allow_ids)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::SystemTime;
 
@@ -202,5 +225,179 @@ mod tests {
     #[test]
     fn index_counts_all_credentials() {
         assert_eq!(index().len(), 3);
+    }
+    pub(crate) struct DelayedProvider {
+        pub locked: std::sync::atomic::AtomicBool,
+        pub entered: tokio::sync::Notify,
+        pub release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for DelayedProvider {
+        fn id(&self) -> &str {
+            "local"
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn kind(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> &'static [Capability] {
+            &[Capability::Fido2, Capability::Ssh, Capability::Totp]
+        }
+        async fn status(&self) -> Result<rosec_core::ProviderStatus, rosec_core::ProviderError> {
+            Ok(rosec_core::ProviderStatus {
+                locked: self.locked.load(std::sync::atomic::Ordering::SeqCst),
+                last_sync: None,
+                cached: false,
+                offline_cache: false,
+                last_cache_write: None,
+            })
+        }
+        async fn unlock(
+            &self,
+            _: rosec_core::UnlockInput,
+        ) -> Result<(), rosec_core::ProviderError> {
+            Ok(())
+        }
+        async fn lock(&self) -> Result<(), rosec_core::ProviderError> {
+            Ok(())
+        }
+        async fn list_items(&self) -> Result<Vec<rosec_core::ItemMeta>, rosec_core::ProviderError> {
+            Ok(vec![rosec_core::ItemMeta {
+                id: "item".into(),
+                provider_id: "local".into(),
+                label: "Test".into(),
+                attributes: [(rosec_core::ATTR_TOTP.into(), "true".into())].into(),
+                created: None,
+                modified: None,
+                locked: false,
+                attribute_hashes: None,
+            }])
+        }
+        async fn search(
+            &self,
+            _: &rosec_core::Attributes,
+        ) -> Result<Vec<rosec_core::ItemMeta>, rosec_core::ProviderError> {
+            Ok(vec![])
+        }
+        async fn get_item_attributes(
+            &self,
+            _: &str,
+        ) -> Result<rosec_core::ItemAttributes, rosec_core::ProviderError> {
+            Err(rosec_core::ProviderError::NotFound)
+        }
+        async fn get_secret_attr(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<rosec_core::SecretBytes, rosec_core::ProviderError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(rosec_core::SecretBytes::new(b"JBSWY3DPEHPK3PXP".to_vec()))
+        }
+        async fn list_ssh_keys(
+            &self,
+        ) -> Result<Vec<rosec_core::SshKeyMeta>, rosec_core::ProviderError> {
+            Ok(vec![rosec_core::SshKeyMeta {
+                item_id: "item".into(),
+                item_name: "test".into(),
+                provider_id: "local".into(),
+                public_key_openssh: None,
+                fingerprint: None,
+                ssh_hosts: vec![],
+                signing_principals: vec![],
+                ssh_user: None,
+                require_confirm: false,
+                revision_date: None,
+            }])
+        }
+        async fn get_ssh_private_key(
+            &self,
+            _: &str,
+        ) -> Result<rosec_core::SshPrivateKeyMaterial, rosec_core::ProviderError> {
+            let pair = ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]);
+            let key =
+                ssh_key::PrivateKey::new(ssh_key::private::KeypairData::Ed25519(pair), "test")
+                    .unwrap();
+            let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(rosec_core::SshPrivateKeyMaterial { pem })
+        }
+        async fn list_fido2_credentials(
+            &self,
+        ) -> Result<Vec<Fido2CredentialMeta>, rosec_core::ProviderError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(vec![meta("stale", "example.com", true)])
+        }
+    }
+
+    #[tokio::test]
+    async fn old_rebuild_cannot_restore_credentials_after_lock() {
+        let registry = Arc::new(Fido2Registry::new());
+        let provider = Arc::new(DelayedProvider {
+            locked: false.into(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let providers: Vec<Arc<dyn Provider>> = vec![provider.clone()];
+        registry.register_provider(&providers[0]);
+        let old = {
+            let registry = registry.clone();
+            let providers = providers.clone();
+            tokio::spawn(async move {
+                registry.rebuild(&providers).await;
+            })
+        };
+        provider.entered.notified().await;
+        provider
+            .locked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        registry.rebuild(&providers).await;
+        assert!(registry.find("example.com", &[]).is_empty());
+        provider.release.notify_one();
+        old.await.unwrap();
+        assert!(
+            registry.find("example.com", &[]).is_empty(),
+            "old rebuild restored a locked provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_rejects_inflight_and_queued_old_instance() {
+        let registry = Arc::new(Fido2Registry::new());
+        let provider = Arc::new(DelayedProvider {
+            locked: false.into(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let old: Arc<dyn Provider> = provider.clone();
+        registry.register_provider(&old);
+        let task = {
+            let registry = registry.clone();
+            let old = old.clone();
+            tokio::spawn(async move {
+                registry.rebuild(&[old]).await;
+            })
+        };
+        provider.entered.notified().await;
+        registry.remove_provider("local");
+        provider.release.notify_one();
+        task.await.unwrap();
+        assert!(registry.find("example.com", &[]).is_empty());
+        let replacement: Arc<dyn Provider> = Arc::new(DelayedProvider {
+            locked: true.into(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        registry.register_provider(&replacement);
+        registry.activate_provider(&old); // A delayed callback cannot reactivate the old source.
+        tokio::time::timeout(std::time::Duration::from_secs(1), registry.rebuild(&[old]))
+            .await
+            .unwrap();
+        assert!(registry.find("example.com", &[]).is_empty());
     }
 }
