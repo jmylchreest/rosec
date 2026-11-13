@@ -16,16 +16,21 @@
 
 use aes::Aes128;
 use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
+use crypto_bigint::{U1024, const_monty_params};
 use hkdf::Hkdf;
+#[cfg(test)]
 use num_bigint::BigUint;
 use rosec_core::ProviderError;
 use sha2::Sha256;
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(test)]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// The 1024-bit MODP prime from RFC 2409 §6.2.
 ///
 /// This is the exact byte sequence specified by the freedesktop Secret Service
 /// spec for the `dh-ietf1024-sha256-aes128-cbc-pkcs7` algorithm.
+#[cfg(test)]
 const MODP1024_PRIME_BYTES: &[u8] = &[
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
     0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
@@ -39,6 +44,23 @@ const MODP1024_PRIME_BYTES: &[u8] = &[
 
 /// Generator for the MODP-1024 group.
 const MODP1024_GENERATOR: u64 = 2;
+const_monty_params!(
+    Modp1024,
+    U1024,
+    "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece65381ffffffffffffffff"
+);
+type DhMonty = crypto_bigint::modular::ConstMontyForm<Modp1024, { U1024::LIMBS }>;
+const MODP1024_PRIME: U1024 = U1024::from_be_hex(
+    "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece65381ffffffffffffffff",
+);
+
+// Full-width exponentiation: never derive the loop bound from a secret value.
+// These wrappers scrub owned values, not every internal library copy or CPU register.
+fn dh_power(base: &U1024, exponent: &[u8]) -> Zeroizing<U1024> {
+    let exponent = Zeroizing::new(U1024::from_be_slice(exponent));
+    let result = Zeroizing::new(DhMonty::new(base).pow(&exponent));
+    Zeroizing::new(result.retrieve())
+}
 
 /// Byte width of the MODP-1024 group (1024 bits = 128 bytes).
 const DH_KEY_BYTES: usize = 128;
@@ -70,8 +92,8 @@ impl SessionAlgorithm {
 /// A server-side DH keypair for one session negotiation.
 ///
 /// The private key bytes are kept in a `Zeroizing` buffer so they are scrubbed
-/// on drop.  We store raw bytes rather than a `BigUint` because `BigUint` does
-/// not implement `Zeroize`.
+/// on drop.  Owned arithmetic values are also scrubbed; internal library temporaries
+/// are not covered by that guarantee.
 pub struct DhKeypair {
     /// Raw big-endian private key bytes (128 bytes), zeroized on drop.
     private_bytes: Zeroizing<[u8; DH_KEY_BYTES]>,
@@ -84,15 +106,12 @@ pub struct DhKeypair {
 /// Uses a thread-local CSPRNG (seeded from the OS) for the private key.
 /// The private key is 1024 bits; the public key is `g^private mod p`.
 pub fn generate_dh_keypair() -> Result<DhKeypair, ProviderError> {
-    let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
-    let g = BigUint::from(MODP1024_GENERATOR);
+    let g = U1024::from(MODP1024_GENERATOR);
 
     let mut priv_bytes = Zeroizing::new([0u8; DH_KEY_BYTES]);
     rand::RngExt::fill(&mut rand::rng(), priv_bytes.as_mut_slice());
-    let private = BigUint::from_bytes_be(priv_bytes.as_ref());
-
-    let public = g.modpow(&private, &p);
-    let public_bytes = pad_to_128(public.to_bytes_be());
+    let public = dh_power(&g, priv_bytes.as_ref());
+    let public_bytes = public.to_be_bytes().to_vec();
 
     Ok(DhKeypair {
         private_bytes: priv_bytes,
@@ -102,8 +121,8 @@ pub fn generate_dh_keypair() -> Result<DhKeypair, ProviderError> {
 
 /// Compute the shared secret and derive a 16-byte AES-128 key from it.
 ///
-/// Validates that the client public key is in the range [2, p-2] to prevent
-/// small-subgroup attacks before computing the shared secret.
+/// Rejects trivial/out-of-range public values outside [2, p-2] before
+/// computing the shared secret. This is not a full subgroup-membership check.
 ///
 /// Key derivation: HKDF-SHA256 with no salt and empty info string, extracting
 /// 16 bytes — this matches the freedesktop Secret Service specification.
@@ -129,22 +148,17 @@ pub fn derive_session_key(
         ));
     }
 
-    let p = BigUint::from_bytes_be(MODP1024_PRIME_BYTES);
-    let client_pub = BigUint::from_bytes_be(client_pubkey_bytes);
-
-    // Validate client public key is in range [2, p-2] — reject 0, 1, p-1, p
-    let two = BigUint::from(2u32);
-    let p_minus_two = &p - &two;
-    if client_pub < two || client_pub > p_minus_two {
+    let mut public_bytes = [0u8; DH_KEY_BYTES];
+    public_bytes[DH_KEY_BYTES - client_pubkey_bytes.len()..].copy_from_slice(client_pubkey_bytes);
+    let client_pub = U1024::from_be_slice(&public_bytes);
+    let two = U1024::from(2u64);
+    if client_pub < two || client_pub > MODP1024_PRIME.wrapping_sub(&two) {
         return Err(ProviderError::InvalidInput(
             "client DH public key out of valid range".into(),
         ));
     }
-
-    // Shared secret: client_pub ^ server_private mod p
-    let private = BigUint::from_bytes_be(keypair.private_bytes.as_ref());
-    let shared = client_pub.modpow(&private, &p);
-    let shared_bytes = Zeroizing::new(pad_to_128(shared.to_bytes_be()));
+    let shared = dh_power(&client_pub, keypair.private_bytes.as_ref());
+    let shared_bytes = Zeroizing::new(shared.to_be_bytes());
 
     // HKDF-SHA256: no salt, no info → 16-byte AES-128 key
     let hkdf = Hkdf::<Sha256>::new(None, shared_bytes.as_ref());
@@ -205,6 +219,7 @@ pub fn aes128_cbc_decrypt(
 /// `BigUint::to_bytes_be()` omits leading zeros. We emit fixed-width public
 /// keys while accepting variable-width unsigned encodings from clients.
 /// The shared secret is padded to the group width before key derivation.
+#[cfg(test)]
 fn pad_to_128(mut bytes: Vec<u8>) -> Vec<u8> {
     // Mod-p values never exceed 128 bytes; nothing to pad.
     if bytes.len() >= DH_KEY_BYTES {
@@ -224,6 +239,88 @@ fn pad_to_128(mut bytes: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_python_pow_hkdf_vectors() {
+        // Generated using Python integer pow and stdlib hmac/SHA256, not this backend.
+        // Includes a shared value requiring 127 leading padding bytes.
+        for (private_bytes, client_public, expected_key) in [
+            (
+                [
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                ],
+                [
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+                ],
+                [
+                    253, 237, 46, 221, 193, 89, 123, 12, 152, 210, 19, 117, 28, 174, 242, 157,
+                ],
+            ),
+            (
+                [
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85,
+                    85, 85, 85, 85, 85, 85, 85, 85,
+                ],
+                [
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128,
+                ],
+                [
+                    71, 188, 73, 74, 233, 8, 55, 205, 202, 130, 123, 112, 229, 210, 81, 110,
+                ],
+            ),
+            (
+                [
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                ],
+                [
+                    255, 255, 255, 255, 255, 255, 255, 255, 201, 15, 218, 162, 33, 104, 194, 52,
+                    196, 198, 98, 139, 128, 220, 28, 209, 41, 2, 78, 8, 138, 103, 204, 116, 2, 11,
+                    190, 166, 59, 19, 155, 34, 81, 74, 8, 121, 142, 52, 4, 221, 239, 149, 25, 179,
+                    205, 58, 67, 27, 48, 43, 10, 109, 242, 95, 20, 55, 79, 225, 53, 109, 109, 81,
+                    194, 69, 228, 133, 181, 118, 98, 94, 126, 198, 244, 76, 66, 233, 166, 55, 237,
+                    107, 11, 255, 92, 182, 244, 6, 183, 237, 238, 56, 107, 251, 90, 137, 159, 165,
+                    174, 159, 36, 17, 124, 75, 31, 230, 73, 40, 102, 81, 236, 230, 83, 129, 255,
+                    255, 255, 255, 255, 255, 255, 253,
+                ],
+                [
+                    140, 22, 220, 126, 4, 34, 187, 148, 200, 112, 165, 70, 158, 134, 242, 109,
+                ],
+            ),
+        ] {
+            let kp = DhKeypair {
+                private_bytes: Zeroizing::new(private_bytes),
+                public_bytes: vec![],
+            };
+            assert_eq!(
+                *derive_session_key(&kp, &client_public).unwrap(),
+                expected_key
+            );
+        }
+    }
 
     #[test]
     fn plain_algorithm_accepted() {
