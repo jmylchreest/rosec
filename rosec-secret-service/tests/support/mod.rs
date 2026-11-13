@@ -123,6 +123,10 @@ impl Provider for MutableProvider {
         Ok(SecretBytes::new(self.secret.lock().unwrap().clone()))
     }
 }
+#[allow(
+    dead_code,
+    reason = "some test binaries supply their own private connection via setup_on"
+)]
 pub async fn setup(
     providers: Vec<Arc<dyn Provider>>,
 ) -> (
@@ -130,6 +134,16 @@ pub async fn setup(
     Arc<rosec_secret_service::state::ServiceState>,
 ) {
     let conn = zbus::Connection::session().await.unwrap();
+    setup_on(conn, providers).await
+}
+
+pub async fn setup_on(
+    conn: zbus::Connection,
+    providers: Vec<Arc<dyn Provider>>,
+) -> (
+    zbus::Connection,
+    Arc<rosec_secret_service::state::ServiceState>,
+) {
     let router = Arc::new(rosec_core::router::Router::new(
         rosec_core::router::RouterConfig {
             dedup_strategy: rosec_core::DedupStrategy::Priority,

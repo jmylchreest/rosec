@@ -1,25 +1,36 @@
 //! The same harness can run against main and the eventing branch. Fixtures
 //! contain no user credentials; transcripts include exact CLI output/status.
+#[path = "../../tests/support/private_bus.rs"]
+mod private_bus;
 mod support;
+use private_bus::PrivateBus;
 use serde_json::json;
-use support::{MutableProvider, setup};
+use support::{MutableProvider, setup_on};
 use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 #[tokio::test]
 async fn ordinary_product_workflows() {
+    let bus = PrivateBus::new();
     let provider = MutableProvider::new("parity");
     provider.put("one", "Example login");
     provider.items.lock().unwrap()[0]
         .attributes
         .insert("username".into(), "alice".into());
-    let (server, state) = setup(vec![provider.clone()]).await;
+    let connection = zbus::connection::Builder::address(bus.address.as_str())
+        .build()
+        .await
+        .unwrap();
+    let (server, state) = setup_on(connection, vec![provider.clone()]).await;
     server
         .request_name("org.freedesktop.secrets")
         .await
         .unwrap();
     let entries = state.rebuild_cache().await.unwrap();
     let path = entries[0].0.clone();
-    let client = zbus::Connection::session().await.unwrap();
+    let client = zbus::connection::Builder::address(bus.address.as_str())
+        .build()
+        .await
+        .unwrap();
     let service = zbus::Proxy::new(
         &client,
         "org.freedesktop.secrets",
@@ -55,10 +66,12 @@ async fn ordinary_product_workflows() {
             vec!["get", "--no-unlock", "--attr", "username", path.as_str()],
         ] {
             let exe = cli.clone();
+            let address = bus.address.clone();
             let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
             let output = tokio::task::spawn_blocking(move || {
                 std::process::Command::new(exe)
                     .args(owned)
+                    .env("DBUS_SESSION_BUS_ADDRESS", address)
                     .env_remove("ROSEC_SOCKET")
                     .env("XDG_CONFIG_HOME", "/tmp/rosec-parity-empty-config")
                     .output()
