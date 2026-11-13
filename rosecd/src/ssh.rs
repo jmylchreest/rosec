@@ -300,16 +300,22 @@ impl SshManager {
 
     /// Revoke pending work before removing this provider's cached key material.
     pub fn remove_provider(&self, provider_id: &str) {
-        self.gate.revoke(Some(provider_id), || {
-            match self.store.write() {
-                Ok(mut guard) => guard.remove_provider(provider_id),
-                Err(e) => {
-                    warn!("SSH key store lock poisoned during eviction: {e}");
-                    return;
-                }
+        self.gate
+            .revoke(Some(provider_id), || self.evict_provider(provider_id));
+    }
+    pub fn remove_provider_instance(&self, provider: &Arc<dyn Provider>) {
+        self.gate
+            .revoke_source(provider, || self.evict_provider(provider.id()));
+    }
+    fn evict_provider(&self, provider_id: &str) {
+        match self.store.write() {
+            Ok(mut guard) => guard.remove_provider(provider_id),
+            Err(e) => {
+                warn!("SSH key store lock poisoned during eviction: {e}");
+                return;
             }
-            self.refresh_fuse();
-        });
+        }
+        self.refresh_fuse();
     }
 
     /// Clear all keys from the store and refresh FUSE.
@@ -550,6 +556,7 @@ mod revocation_tests {
         });
         let provider = Arc::new(DelayedProvider {
             locked: false.into(),
+            callbacks: Default::default(),
             entered: Default::default(),
             release: Default::default(),
         });

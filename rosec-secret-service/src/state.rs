@@ -110,10 +110,6 @@ pub struct ServiceState {
     /// The full non-provider configuration, kept live so background tasks always
     /// read the latest values rather than a snapshot taken at startup.
     live_config: Arc<RwLock<Config>>,
-    /// Optional callback fired after any item create/update/delete. Wired by
-    /// rosecd to rebuild the SSH/TOTP key stores. Must not block — it runs on
-    /// the zbus async-io executor, so it hands off to a runtime.
-    items_changed_cb: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub events: rosec_events::EventCoordinator<String>,
     object_lock: tokio::sync::Mutex<()>,
 }
@@ -203,7 +199,6 @@ impl ServiceState {
             tokio_handle,
             prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
-            items_changed_cb: RwLock::new(None),
             events,
             object_lock: tokio::sync::Mutex::new(()),
         }
@@ -229,32 +224,13 @@ impl ServiceState {
             .unwrap_or_else(|| self.registry.order_snapshot());
         self.events.set_locked(provider, locked, &providers);
     }
-    fn edit_inventory(&self, edit: impl FnOnce(&mut Inventory, &mut HashMap<String, ItemMeta>)) {
+    fn edit_inventory(
+        &self,
+        edit: impl FnOnce(&mut Inventory, &mut HashMap<String, ItemMeta>) -> Option<String>,
+    ) {
         self.events.edit(edit);
     }
 
-    /// Register a callback fired after any item create/update/delete.
-    pub fn set_items_changed_callback(&self, cb: Arc<dyn Fn() + Send + Sync>) {
-        if let Ok(mut guard) = self.items_changed_cb.write() {
-            *guard = Some(cb);
-        }
-    }
-
-    /// Fire the items-changed callback if one is registered.
-    fn notify_items_changed(&self) {
-        let cb = self
-            .items_changed_cb
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        if let Some(cb) = cb {
-            cb();
-        }
-    }
-
-    /// Return a clone of the active D-Bus connection.
-    ///
-    /// `Connection` is internally `Arc`-based, so cloning is cheap.
     pub fn conn(&self) -> Connection {
         self.conn.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -1650,11 +1626,11 @@ impl ServiceState {
         self.edit_inventory(|inventory, items| {
             inventory.upsert(meta.clone());
             items.insert(path.to_string(), meta.clone());
+            Some(meta.provider_id.clone())
         });
         // Existing objects read live metadata, so replacement does not need
         // to remove and recreate an object that clients may be using.
         self.register_current_items().await?;
-        self.notify_items_changed();
         Ok(())
     }
 
@@ -1694,9 +1670,11 @@ impl ServiceState {
             if let Some(meta) = items.get_mut(path) {
                 patch(meta);
                 inventory.upsert(meta.clone());
+                Some(meta.provider_id.clone())
+            } else {
+                None
             }
         });
-        self.notify_items_changed();
     }
 
     /// Remove a deleted item from the cache so it disappears from
@@ -1705,9 +1683,11 @@ impl ServiceState {
         self.edit_inventory(|inventory, items| {
             if let Some(meta) = items.remove(path) {
                 inventory.remove(&meta.provider_id, &meta.id);
+                Some(meta.provider_id)
+            } else {
+                None
             }
         });
-        self.notify_items_changed();
     }
 
     /// Mark all items belonging to a specific provider as locked.
@@ -2993,44 +2973,35 @@ mod tests {
         assert!(locked.is_empty(), "locked={locked:?}");
     }
 
-    /// Regression for issue #23: creating, updating, or deleting an item must
-    /// fire the items-changed callback so rosecd rebuilds the SSH/TOTP key
-    /// stores immediately, rather than only on the next lock/unlock or sync.
+    /// Item writes publish revisions without a daemon-specific callback.
     #[tokio::test]
-    async fn items_changed_callback_fires_on_create_update_delete() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
+    async fn item_writes_publish_committed_changes() {
         let state = new_state(vec![]).await;
-        let count = Arc::new(AtomicUsize::new(0));
-        let cb_count = Arc::clone(&count);
-        state.set_items_changed_callback(Arc::new(move || {
-            cb_count.fetch_add(1, Ordering::SeqCst);
-        }));
-
-        let path = "/org/freedesktop/secrets/collection/default/item_create".to_string();
+        let mut revisions = state.events.subscribe();
+        let path = "/org/freedesktop/secrets/collection/default/item_create";
         state
-            .insert_created_item(&path, meta("new-item", "New", false))
+            .insert_created_item(path, meta("new-item", "New", false))
             .await
-            .expect("insert_created_item");
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "create should fire the callback"
-        );
+            .unwrap();
+        assert!(revisions.has_changed().unwrap());
+        revisions.borrow_and_update();
+        state.patch_cached_item(path, Some("Renamed"), None, None);
+        assert!(revisions.has_changed().unwrap());
+        revisions.borrow_and_update();
+        state.remove_deleted_item(path);
+        assert!(revisions.has_changed().unwrap());
+        assert!(state.change_snapshot().1.is_empty());
+    }
 
-        state.patch_cached_item(&path, Some("Renamed"), None, None);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            2,
-            "update should fire the callback"
-        );
-
-        state.remove_deleted_item(&path);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            3,
-            "delete should fire the callback"
-        );
+    #[tokio::test]
+    async fn replacing_secret_with_identical_metadata_still_publishes() {
+        let state = new_state(vec![]).await;
+        let path = "/org/freedesktop/secrets/collection/default/same";
+        let item = meta("same", "Same", false);
+        state.insert_created_item(path, item.clone()).await.unwrap();
+        let revision = state.change_snapshot().0;
+        state.insert_created_item(path, item).await.unwrap();
+        assert!(state.change_snapshot().0 > revision);
     }
 
     #[tokio::test]

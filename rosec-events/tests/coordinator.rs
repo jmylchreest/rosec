@@ -39,3 +39,12 @@ async fn confirmed_secret_change_wakes_consumers_without_a_metadata_listing() {
     }
     assert!(events.snapshot().1.is_empty());
 }
+
+#[test]
+fn retired_operation_results_do_not_publish() {
+    let events = EventCoordinator::new(|m| (m.provider_id.clone(), m.id.clone()));
+    let revision = events.snapshot().0;
+    events.set_locked_if(Some("replaced"), false, &["replaced".into()], || false);
+    events.confirm_content_changed_if("replaced", || false);
+    assert_eq!(events.snapshot().0, revision);
+}

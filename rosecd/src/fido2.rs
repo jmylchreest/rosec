@@ -47,9 +47,6 @@ impl Fido2Index {
     ///   (resident or not — the RP asked for them explicitly).
     ///
     /// rp id matching is case-insensitive (WebAuthn rp ids are domains).
-    // Consumed by the CTAP2 ceremony event loop (the getAssertion path); the
-    // rebuild side is already wired into the daemon callbacks.
-    #[allow(dead_code)]
     pub fn find(&self, rp_id: &str, allow_ids: &[String]) -> Vec<Fido2CredentialMeta> {
         let Some(creds) = self.by_rp.get(&rp_id.to_ascii_lowercase()) else {
             return Vec::new();
@@ -78,6 +75,7 @@ impl Fido2Index {
 #[derive(Default)]
 pub struct Fido2Registry {
     gate: rosec_events::ConsumerGate,
+    refresh: tokio::sync::Mutex<()>,
     index: RwLock<Fido2Index>,
 }
 
@@ -98,9 +96,13 @@ impl Fido2Registry {
     /// Reads the live provider list each time (callers pass
     /// `state.fido2_providers()`); locked providers contribute nothing.
     /// Metadata only — no private keys are fetched or cached.
-    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) {
+    pub async fn rebuild(&self, providers: &[Arc<dyn Provider>]) -> bool {
+        // Registration waits for its index update, while background refreshes
+        // use the same serialized path. Revocation never waits on this mutex.
+        let _refresh = self.refresh.lock().await;
         let (epoch, providers) = self.gate.begin(providers);
         let mut metas = Vec::new();
+        let mut complete = true;
         for provider in &providers {
             // Declared capability is authoritative (matches ssh/totp loops).
             if !provider.capabilities().contains(&Capability::Fido2) {
@@ -115,6 +117,7 @@ impl Fido2Registry {
                 Ok(_) => {}
                 Err(e) => {
                     debug!(provider = %id, error = %e, "fido2 rebuild: status check failed, skipping");
+                    complete = false;
                     continue;
                 }
             }
@@ -124,7 +127,8 @@ impl Fido2Registry {
                     metas.extend(m);
                 }
                 Err(e) => {
-                    debug!(provider = %id, error = %e, "fido2 rebuild: list_fido2_credentials failed")
+                    debug!(provider = %id, error = %e, "fido2 rebuild: list_fido2_credentials failed");
+                    complete = false;
                 }
             }
         }
@@ -132,22 +136,24 @@ impl Fido2Registry {
         debug!(total = index.len(), "fido2 rebuild: index updated");
         self.gate.publish(epoch, || {
             *self.index.write().unwrap_or_else(|e| e.into_inner()) = index;
-        });
+        }) && complete
     }
 
     pub fn remove_provider(&self, id: &str) {
-        self.gate.revoke(Some(id), || {
-            let mut index = self.index.write().unwrap_or_else(|e| e.into_inner());
-            for entries in index.by_rp.values_mut() {
-                entries.retain(|m| m.provider_id != id);
-            }
-        });
+        self.gate.revoke(Some(id), || self.evict_provider(id));
+    }
+    pub fn remove_provider_instance(&self, provider: &Arc<dyn Provider>) {
+        self.gate
+            .revoke_source(provider, || self.evict_provider(provider.id()));
+    }
+    fn evict_provider(&self, id: &str) {
+        let mut index = self.index.write().unwrap_or_else(|e| e.into_inner());
+        for entries in index.by_rp.values_mut() {
+            entries.retain(|m| m.provider_id != id);
+        }
     }
 
     /// Credentials to offer for an assertion (delegates to the live index).
-    // Consumed by the CTAP2 ceremony event loop (forthcoming); rebuild is
-    // already wired into the daemon's unlock/sync/lock callbacks.
-    #[allow(dead_code)]
     pub fn find(&self, rp_id: &str, allow_ids: &[String]) -> Vec<Fido2CredentialMeta> {
         self.index
             .read()
@@ -228,12 +234,20 @@ pub(crate) mod tests {
     }
     pub(crate) struct DelayedProvider {
         pub locked: std::sync::atomic::AtomicBool,
+        pub callbacks: std::sync::Mutex<rosec_core::ProviderCallbacks>,
         pub entered: tokio::sync::Notify,
         pub release: tokio::sync::Notify,
     }
 
     #[async_trait::async_trait]
     impl Provider for DelayedProvider {
+        fn set_event_callbacks(
+            &self,
+            callbacks: rosec_core::ProviderCallbacks,
+        ) -> Result<(), rosec_core::ProviderError> {
+            *self.callbacks.lock().unwrap() = callbacks;
+            Ok(())
+        }
         fn id(&self) -> &str {
             "local"
         }
@@ -262,6 +276,11 @@ pub(crate) mod tests {
             Ok(())
         }
         async fn lock(&self) -> Result<(), rosec_core::ProviderError> {
+            self.locked.store(true, std::sync::atomic::Ordering::SeqCst);
+            let cb = self.callbacks.lock().unwrap().on_locked.clone();
+            if let Some(cb) = cb {
+                cb();
+            }
             Ok(())
         }
         async fn list_items(&self) -> Result<Vec<rosec_core::ItemMeta>, rosec_core::ProviderError> {
@@ -340,6 +359,7 @@ pub(crate) mod tests {
         let registry = Arc::new(Fido2Registry::new());
         let provider = Arc::new(DelayedProvider {
             locked: false.into(),
+            callbacks: Default::default(),
             entered: Default::default(),
             release: Default::default(),
         });
@@ -356,7 +376,7 @@ pub(crate) mod tests {
         provider
             .locked
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        registry.rebuild(&providers).await;
+        registry.remove_provider("local");
         assert!(registry.find("example.com", &[]).is_empty());
         provider.release.notify_one();
         old.await.unwrap();
@@ -371,6 +391,7 @@ pub(crate) mod tests {
         let registry = Arc::new(Fido2Registry::new());
         let provider = Arc::new(DelayedProvider {
             locked: false.into(),
+            callbacks: Default::default(),
             entered: Default::default(),
             release: Default::default(),
         });
@@ -390,6 +411,7 @@ pub(crate) mod tests {
         assert!(registry.find("example.com", &[]).is_empty());
         let replacement: Arc<dyn Provider> = Arc::new(DelayedProvider {
             locked: true.into(),
+            callbacks: Default::default(),
             entered: Default::default(),
             release: Default::default(),
         });
@@ -399,5 +421,28 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(registry.find("example.com", &[]).is_empty());
+    }
+    #[test]
+    fn retired_callbacks_and_queued_rebuilds_cannot_invalidate_replacement() {
+        let gate = rosec_events::ConsumerGate::default();
+        let old: Arc<dyn Provider> = Arc::new(DelayedProvider {
+            locked: false.into(),
+            callbacks: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let new: Arc<dyn Provider> = Arc::new(DelayedProvider {
+            locked: false.into(),
+            callbacks: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        gate.register(&old);
+        gate.register(&new);
+        let (current, _) = gate.begin(&[new]);
+        gate.revoke_source(&old, || panic!("retired source revoked replacement"));
+        let (retired, _) = gate.begin(&[old]);
+        assert!(!gate.publish(retired, || panic!("retired rebuild published")));
+        assert!(gate.publish(current, || {}));
     }
 }

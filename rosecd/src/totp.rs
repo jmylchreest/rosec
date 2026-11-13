@@ -202,13 +202,18 @@ impl TotpManager {
 
     /// Remove all entries and refresh with an empty snapshot.
     pub fn remove_provider(&self, id: &str) {
-        self.gate.revoke(Some(id), || {
-            self.entries
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .retain(|(provider, _)| provider != id);
-            self.refresh_snapshot();
-        });
+        self.gate.revoke(Some(id), || self.evict_provider(id));
+    }
+    pub fn remove_provider_instance(&self, provider: &Arc<dyn Provider>) {
+        self.gate
+            .revoke_source(provider, || self.evict_provider(provider.id()));
+    }
+    fn evict_provider(&self, id: &str) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(provider, _)| provider != id);
+        self.refresh_snapshot();
     }
 
     pub fn clear(&self) {
@@ -254,6 +259,7 @@ mod revocation_tests {
         });
         let provider = Arc::new(DelayedProvider {
             locked: false.into(),
+            callbacks: Default::default(),
             entered: Default::default(),
             release: Default::default(),
         });
