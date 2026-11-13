@@ -41,7 +41,7 @@ struct MountState {
 
 /// Manages the SSH agent and FUSE filesystem on behalf of `rosecd`.
 pub struct SshManager {
-    gate: crate::consumer_gate::ConsumerGate,
+    gate: rosec_events::ConsumerGate,
     store: Arc<RwLock<KeyStore>>,
     /// Lazily-mounted FUSE export; the agent serves keys from `store`, so it
     /// still works while this is unmounted.

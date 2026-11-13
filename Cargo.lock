@@ -4661,6 +4661,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosec-events"
+version = "0.0.39"
+dependencies = [
+ "rosec-core",
+ "tokio",
+]
+
+[[package]]
 name = "rosec-fuse"
 version = "0.0.39"
 dependencies = [
@@ -4720,6 +4728,7 @@ dependencies = [
  "num-bigint",
  "rand 0.10.3",
  "rosec-core",
+ "rosec-events",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -4861,6 +4870,7 @@ dependencies = [
  "notify",
  "rand 0.10.3",
  "rosec-core",
+ "rosec-events",
  "rosec-fuse",
  "rosec-secret-service",
  "rosec-ssh-agent",

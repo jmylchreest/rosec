@@ -77,7 +77,7 @@ impl Fido2Index {
 /// always see the current set — never one frozen at unlock/registration time.
 #[derive(Default)]
 pub struct Fido2Registry {
-    gate: crate::consumer_gate::ConsumerGate,
+    gate: rosec_events::ConsumerGate,
     index: RwLock<Fido2Index>,
 }
 
