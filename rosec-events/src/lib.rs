@@ -61,6 +61,16 @@ impl<K: Eq + Hash> EventCoordinator<K> {
         let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         (domain.journal.revision(), items.values().cloned().collect())
     }
+    /// A successful operation confirmed changed content, even when metadata
+    /// is unchanged or a subsequent listing is unavailable. No secrets enter replay.
+    pub fn confirm_content_changed(&self, provider: &str) {
+        let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
+        domain.epoch += 1;
+        if let Some(batch) = domain.journal.invalidate_provider(provider) {
+            self.revision.send_replace(batch.revision);
+        }
+    }
+
     pub fn note_hint(&self, provider: &str) {
         let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
         domain.dirty.insert(provider.to_owned());
@@ -170,5 +180,42 @@ impl<K: Eq + Hash> EventCoordinator<K> {
             }
         }
         true
+    }
+}
+
+/// Reconcile from live state at startup and after each wakeup. Full rebuilds
+/// naturally recover from coalescing and journal gaps. A false result retries
+/// with bounded backoff; None stops a consumer whose owner has gone away.
+/// A JoinSet supervises each attempt and cancels it if the worker is dropped.
+pub async fn run_consumer<F, Fut>(
+    mut revisions: tokio::sync::watch::Receiver<u64>,
+    mut reconcile: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<bool>> + Send + 'static,
+{
+    use std::time::Duration;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        revisions.borrow_and_update();
+        let mut attempt = tokio::task::JoinSet::new();
+        attempt.spawn(reconcile());
+        let success = match attempt.join_next().await {
+            Some(Ok(Some(success))) => success,
+            Some(Ok(None)) => return,
+            _ => false,
+        };
+        if success {
+            delay = Duration::from_millis(100);
+            if revisions.changed().await.is_err() {
+                return;
+            }
+        } else {
+            tokio::select! {
+                result = revisions.changed() => { if result.is_err() { return; } }
+                _ = tokio::time::sleep(delay) => {}
+            }
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
     }
 }

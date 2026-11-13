@@ -22,3 +22,20 @@ async fn coordinator_runs_without_a_transport_and_rejects_stale_results() {
     ));
     assert!(events.snapshot().0 > 0);
 }
+
+#[tokio::test]
+async fn confirmed_secret_change_wakes_consumers_without_a_metadata_listing() {
+    let events = EventCoordinator::new(|m| (m.provider_id.clone(), m.id.clone()));
+    let mut subscription = events.subscribe();
+    events.confirm_content_changed("hidden-provider");
+    subscription.changed().await.unwrap();
+    match events.changes_since(0) {
+        ChangesSince::Batches(batches) => {
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].providers_changed, ["hidden-provider"]);
+            assert!(batches[0].changed.is_empty());
+        }
+        _ => panic!("expected a replayable provider change"),
+    }
+    assert!(events.snapshot().1.is_empty());
+}
