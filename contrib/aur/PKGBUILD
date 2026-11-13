@@ -144,8 +144,8 @@ build() {
 
 check() {
     cd "${srcdir}/${pkgname}"
-    cargo test --release --locked --workspace 2>/dev/null || \
-    cargo test --release          --workspace
+    dbus-run-session -- cargo test --release --locked --workspace 2>/dev/null || \
+    dbus-run-session -- cargo test --release          --workspace
 }
 
 package() {
