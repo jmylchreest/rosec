@@ -1316,6 +1316,7 @@ fn wire_provider_callbacks(
                 if !changed {
                     return;
                 }
+                providers_for_sync.note_provider_content_changed(&synced_id);
                 let sm = ssh_synced.clone();
                 let s = Arc::clone(&providers_for_sync);
                 let tm = totp_synced.clone();

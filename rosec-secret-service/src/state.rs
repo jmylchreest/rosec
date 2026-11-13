@@ -27,6 +27,7 @@ fn wait_with_timeout(child: &mut Child) -> std::io::Result<ExitStatus> {
     }
 }
 
+use rosec_core::changes::{ChangesSince, Inventory, RefreshOutcome};
 use rosec_core::config::{Config, PromptConfig};
 
 use crate::item_cache::ItemCache;
@@ -113,6 +114,8 @@ pub struct ServiceState {
     /// rosecd to rebuild the SSH/TOTP key stores. Must not block — it runs on
     /// the zbus async-io executor, so it hands off to a runtime.
     items_changed_cb: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    change_revision: tokio::sync::watch::Sender<u64>,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for ServiceState {
@@ -195,6 +198,79 @@ impl ServiceState {
             prompts: PromptManager::new(prompt_config),
             live_config: Arc::new(RwLock::new(initial_config)),
             items_changed_cb: RwLock::new(None),
+            change_revision: tokio::sync::watch::channel(0).0,
+            refresh_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Subscribe to revision wakeups. Read `changes_since` after each wakeup;
+    /// watch coalesces wakeups, while the bounded journal retains individual commits.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.change_revision.subscribe()
+    }
+
+    pub fn changes_since(&self, revision: u64) -> ChangesSince {
+        self.cache
+            .domain
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .journal
+            .since(revision)
+    }
+
+    /// A consistent snapshot and revision for subscribers recovering after lag.
+    pub fn change_snapshot(&self) -> (u64, Vec<ItemMeta>) {
+        let domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+        let items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
+        (domain.journal.revision(), items.values().cloned().collect())
+    }
+
+    /// Record a successful provider sync reporting changed content. Publication
+    /// waits for response reconciliation, so callbacks are not committed events.
+    pub fn note_provider_content_changed(&self, provider: &str) {
+        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+        domain.dirty_providers.insert(provider.to_owned());
+        domain.epoch = domain.epoch.saturating_add(1);
+    }
+
+    fn set_cached_lock(&self, provider: Option<&str>, locked: bool) {
+        let providers = provider
+            .map(|id| vec![id.to_owned()])
+            .unwrap_or_else(|| self.registry.order_snapshot());
+        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+        let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
+        domain.inventory.set_locked(provider, locked);
+        for meta in items.values_mut() {
+            if provider.is_none_or(|id| meta.provider_id == id) {
+                meta.locked = locked;
+            }
+        }
+        domain.epoch = domain.epoch.saturating_add(1);
+        if let Some(batch) = domain
+            .journal
+            .commit(&items.values().cloned().collect::<Vec<_>>())
+        {
+            self.change_revision.send_replace(batch.revision);
+        }
+        // Publish item and provider state under the same lock so concurrent
+        // lock/unlock completions cannot reverse the provider-state history.
+        for provider in providers {
+            if let Some(batch) = domain.journal.provider_lock(&provider, locked) {
+                self.change_revision.send_replace(batch.revision);
+            }
+        }
+    }
+
+    fn edit_inventory(&self, edit: impl FnOnce(&mut Inventory, &mut HashMap<String, ItemMeta>)) {
+        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+        let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
+        edit(&mut domain.inventory, &mut items);
+        domain.epoch = domain.epoch.saturating_add(1);
+        if let Some(batch) = domain
+            .journal
+            .commit(&items.values().cloned().collect::<Vec<_>>())
+        {
+            self.change_revision.send_replace(batch.revision);
         }
     }
 
@@ -519,7 +595,9 @@ impl ServiceState {
 
     /// Hot-add a new provider at runtime.  No-op if the ID is already registered.
     pub fn hotreload_add_provider(&self, provider: Arc<dyn Provider>) {
+        let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
         self.registry.add(provider);
+        domain.epoch = domain.epoch.saturating_add(1);
     }
 
     /// Reorder providers to match the given config ordering.
@@ -535,19 +613,29 @@ impl ServiceState {
     /// and purges its items from both caches.
     /// Returns `true` if a provider with that ID was found and removed.
     pub async fn hotreload_remove_provider(&self, id: &str) -> bool {
-        let Some(provider) = self.registry.remove(id) else {
-            return false;
+        let provider = {
+            // Invalidate in-flight listings before awaiting the old provider's
+            // lock. A replacement with the same ID must not be purged later.
+            let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(provider) = self.registry.remove(id) else {
+                return false;
+            };
+            let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
+            domain.inventory.remove_provider(id);
+            domain.dirty_providers.remove(id);
+            domain.journal.forget_provider(id);
+            domain.epoch = domain.epoch.saturating_add(1);
+            items.retain(|_, meta| meta.provider_id != id);
+            if let Some(batch) = domain.journal.commit_with_provider_changes(
+                &items.values().cloned().collect::<Vec<_>>(),
+                &[id.to_owned()],
+            ) {
+                self.change_revision.send_replace(batch.revision);
+            }
+            provider
         };
         if let Err(e) = provider.lock().await {
             warn!(provider_id = id, error = %e, "error locking provider during hot-remove");
-        }
-        // provider is dropped here — Zeroizing<> fields zeroize on drop
-        drop(provider);
-
-        // Purge all items belonging to the removed provider so they don't
-        // appear as ghost entries in SearchItems results.
-        if let Ok(mut items) = self.cache.items.lock() {
-            items.retain(|_, meta| meta.provider_id != id);
         }
         true
     }
@@ -1619,9 +1707,10 @@ impl ServiceState {
         meta: ItemMeta,
     ) -> Result<(), FdoError> {
         // 1. Insert into the items cache.
-        if let Ok(mut items) = self.cache.items.lock() {
+        self.edit_inventory(|inventory, items| {
+            inventory.upsert(meta.clone());
             items.insert(path.to_string(), meta.clone());
-        }
+        });
         // 2. If a D-Bus object already exists at this path (replace/update
         //    path), remove it so register_items will create a fresh one with
         //    updated metadata (label, attributes, etc.).
@@ -1678,24 +1767,23 @@ impl ServiceState {
             meta.modified = Some(std::time::SystemTime::now());
         };
 
-        if let Ok(mut items) = self.cache.items.lock()
-            && let Some(meta) = items.get_mut(path)
-        {
-            patch(meta);
-        }
+        self.edit_inventory(|inventory, items| {
+            if let Some(meta) = items.get_mut(path) {
+                patch(meta);
+                inventory.upsert(meta.clone());
+            }
+        });
         self.notify_items_changed();
     }
 
     /// Remove a deleted item from the cache so it disappears from
     /// `SearchItems` immediately.
     pub(crate) fn remove_deleted_item(&self, path: &str) {
-        if let Ok(mut items) = self.cache.items.lock() {
-            items.remove(path);
-        }
-        // Note: we do NOT deregister the D-Bus object here. zbus keeps
-        // it registered but it will fail with NotFound on GetSecret
-        // because the provider no longer has the item. The next cache
-        // rebuild will skip registering it again (already registered).
+        self.edit_inventory(|inventory, items| {
+            if let Some(meta) = items.remove(path) {
+                inventory.remove(&meta.provider_id, &meta.id);
+            }
+        });
         self.notify_items_changed();
     }
 
@@ -1705,24 +1793,14 @@ impl ServiceState {
     /// manual lock, etc.).  Does NOT remove items — they remain queryable
     /// via `SearchItems` and friends, just in the `locked` partition.
     pub fn mark_provider_locked_in_cache(&self, provider_id: &str) {
-        if let Ok(mut cache) = self.cache.items.lock() {
-            for meta in cache.values_mut() {
-                if meta.provider_id == provider_id {
-                    meta.locked = true;
-                }
-            }
-        }
+        self.set_cached_lock(Some(provider_id), true);
     }
 
     /// Mark every cached item as locked.
     ///
     /// Called during `auto_lock` / `Lock` when all providers are locked at once.
     fn mark_all_locked_in_cache(&self) {
-        if let Ok(mut cache) = self.cache.items.lock() {
-            for meta in cache.values_mut() {
-                meta.locked = true;
-            }
-        }
+        self.set_cached_lock(None, true);
     }
 
     /// Returns true if the provider is currently within its quarantine window.
@@ -1780,13 +1858,7 @@ impl ServiceState {
     /// which libsecret clients (e.g. Chromium safe storage) interpret as
     /// "secret not loadable" and react to by regenerating and overwriting.
     pub fn mark_provider_unlocked_in_cache(&self, provider_id: &str) {
-        if let Ok(mut cache) = self.cache.items.lock() {
-            for meta in cache.values_mut() {
-                if meta.provider_id == provider_id {
-                    meta.locked = false;
-                }
-            }
-        }
+        self.set_cached_lock(Some(provider_id), false);
     }
 
     /// Resolve item paths or search by attributes.
@@ -1989,55 +2061,69 @@ impl ServiceState {
         // First-time population: attempt to unlock interactive providers so the
         // initial cache contains as many items as possible.
         self.ensure_unlocked_inner().await?;
-        let entries = self.fetch_entries().await?;
-        self.register_items(&entries).await?;
-        let mut state_items = self.cache.items.lock().map_err(|_| {
-            map_provider_error(ProviderError::Unavailable(
-                "items lock poisoned".to_string(),
-            ))
-        })?;
-        state_items.clear();
-        for (path, item) in entries.iter() {
-            state_items.insert(path.clone(), item.clone());
-        }
-        Ok(entries)
+        self.rebuild_cache_inner().await
     }
 
     pub(crate) async fn rebuild_cache_inner(
         self: &Arc<Self>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
-        let entries = self.fetch_entries().await?;
-        self.register_items(&entries).await?;
-
-        // Determine which providers contributed fresh entries so we can
-        // selectively replace only those providers' items, preserving
-        // cached items from providers that were skipped (still locked).
-        let fresh_providers: HashSet<String> = entries
-            .iter()
-            .map(|(_, meta)| meta.provider_id.clone())
-            .collect();
-
-        {
-            let mut state_items = self.cache.items.lock().map_err(|_| {
-                map_provider_error(ProviderError::Unavailable(
-                    "items lock poisoned".to_string(),
-                ))
-            })?;
-            // Remove old entries only for providers that were refreshed.
-            state_items.retain(|_, meta| !fresh_providers.contains(&meta.provider_id));
-            // Insert fresh entries.
-            for (path, item) in entries.iter() {
-                state_items.insert(path.clone(), item.clone());
+        let _refresh = self.refresh_lock.lock().await;
+        let epoch = self
+            .cache
+            .domain
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .epoch;
+        let outcomes = self.fetch_entries().await?;
+        let entries = {
+            let mut domain = self.cache.domain.lock().unwrap_or_else(|e| e.into_inner());
+            let mut items = self.cache.items.lock().unwrap_or_else(|e| e.into_inner());
+            // A write or lock during the fetch makes the response stale. Preserve
+            // the committed view; the next refresh can collect a fresh snapshot.
+            if domain.epoch == epoch {
+                let mut changed_providers = Vec::new();
+                let mut inventory_changes = Vec::new();
+                for (provider, outcome) in outcomes {
+                    if matches!(&outcome, RefreshOutcome::Complete(_))
+                        && domain.dirty_providers.remove(&provider)
+                    {
+                        changed_providers.push(provider.clone());
+                    }
+                    if domain.inventory.refresh(&provider, outcome) {
+                        inventory_changes.push(provider);
+                    }
+                }
+                let order = self.registry.order_snapshot();
+                let visible = self.router.dedup(domain.inventory.items(), &order);
+                items.clear();
+                for meta in &visible {
+                    items.insert(make_item_path(&meta.provider_id, &meta.id), meta.clone());
+                }
+                domain.epoch = domain.epoch.saturating_add(1);
+                if let Some(batch) = domain
+                    .journal
+                    .commit_with_provider_changes(&visible, &inventory_changes)
+                {
+                    self.change_revision.send_replace(batch.revision);
+                }
+                for provider in changed_providers {
+                    if let Some(batch) = domain.journal.invalidate_provider(&provider) {
+                        self.change_revision.send_replace(batch.revision);
+                    }
+                }
             }
-        }
-
+            items
+                .iter()
+                .map(|(path, meta)| (path.clone(), meta.clone()))
+                .collect::<Vec<_>>()
+        };
+        self.register_items(&entries).await?;
         self.update_cache_time()?;
         Ok(entries)
     }
 
-    async fn fetch_entries(&self) -> Result<Vec<(String, ItemMeta)>, FdoError> {
-        let mut all_items: Vec<ItemMeta> = Vec::new();
-        let mut provider_ids: Vec<String> = Vec::new();
+    async fn fetch_entries(&self) -> Result<Vec<(String, RefreshOutcome)>, FdoError> {
+        let mut outcomes = Vec::new();
         for provider in self.providers_ordered() {
             let bid = provider.id().to_string();
             // Honour the circuit breaker: a provider with repeated failures
@@ -2045,7 +2131,7 @@ impl ServiceState {
             // rebuild loop from spamming the same dead plugin.
             if self.is_provider_quarantined(&bid) {
                 debug!(provider = %bid, "skipping quarantined provider during cache fetch");
-                provider_ids.push(bid);
+                outcomes.push((bid, RefreshOutcome::Unavailable));
                 continue;
             }
             let result = self
@@ -2065,7 +2151,7 @@ impl ServiceState {
                     // is now just locked doesn't stay quarantined.
                     self.record_provider_success(&bid);
                     debug!(provider = %bid, "skipping locked provider during cache fetch");
-                    provider_ids.push(bid);
+                    outcomes.push((bid, RefreshOutcome::Locked));
                     continue;
                 }
                 // Any other per-provider failure (e.g. wasm guest returning
@@ -2077,7 +2163,7 @@ impl ServiceState {
                 Err(e) => {
                     warn!(provider = %bid, error = %e, "provider failed during cache fetch — skipping");
                     self.record_provider_failure(&bid);
-                    provider_ids.push(bid);
+                    outcomes.push((bid, RefreshOutcome::Unavailable));
                     continue;
                 }
             };
@@ -2105,9 +2191,11 @@ impl ServiceState {
                 };
             let tagged: Vec<ItemMeta> = fetched
                 .into_iter()
-                .map(|mut item| {
-                    if item.provider_id.is_empty() {
-                        item.provider_id = bid.clone();
+                .enumerate()
+                .map(|(idx, mut item)| {
+                    item.provider_id = bid.clone();
+                    if item.id.is_empty() {
+                        item.id = format!("auto-{idx}");
                     }
                     // Stamp provider identity so clients can see where items
                     // came from and filter by provider in searches.
@@ -2128,27 +2216,9 @@ impl ServiceState {
                     item
                 })
                 .collect();
-            all_items.extend(tagged);
-            provider_ids.push(bid);
+            outcomes.push((bid, RefreshOutcome::Complete(tagged)));
         }
-        let deduped = self.router.dedup(all_items, &provider_ids);
-        let fallback_bid = provider_ids
-            .first()
-            .map(String::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let mut entries = Vec::with_capacity(deduped.len());
-        for (idx, mut item) in deduped.into_iter().enumerate() {
-            if item.provider_id.is_empty() {
-                item.provider_id = fallback_bid.clone();
-            }
-            if item.id.is_empty() {
-                item.id = format!("auto-{idx}");
-            }
-            let path = make_item_path(&item.provider_id, &item.id);
-            entries.push((path, item));
-        }
-        Ok(entries)
+        Ok(outcomes)
     }
 
     fn should_rebuild_cache(&self) -> Result<bool, FdoError> {
@@ -2787,6 +2857,34 @@ mod tests {
             locked,
             attribute_hashes: None,
         }
+    }
+
+    #[tokio::test]
+    async fn committed_changes_replay_without_dbus_types() {
+        use rosec_core::changes::ChangesSince;
+        let state = new_state(vec![meta("item-1", "one", false)]).await;
+        state.rebuild_cache().await.unwrap();
+        let mut receiver = state.subscribe_changes();
+        let before = *receiver.borrow_and_update();
+        state.patch_cached_item(
+            &make_item_path("mock", "item-1"),
+            Some("renamed"),
+            None,
+            None,
+        );
+        receiver.changed().await.unwrap();
+        match state.changes_since(before) {
+            ChangesSince::Batches(batches) => {
+                assert_eq!(batches.len(), 1);
+                assert_eq!(batches[0].changed[0].item_id, "item-1");
+            }
+            _ => panic!("unexpected lag"),
+        }
+        let before_lock = *receiver.borrow_and_update();
+        state.mark_provider_locked_in_cache("mock");
+        assert!(
+            matches!(state.changes_since(before_lock), ChangesSince::Batches(b) if b.len() == 2)
+        );
     }
 
     #[tokio::test]
