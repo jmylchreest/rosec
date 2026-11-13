@@ -61,3 +61,37 @@ fn captured_legacy_output_has_no_deprecation_warning() {
     let out = cli(&["provider", "list-passwords", "personal"]);
     assert!(!String::from_utf8_lossy(&out.stderr).contains("deprecated"));
 }
+
+#[test]
+fn vault_recovery_help_and_legacy_strict_mode() {
+    let out = cli(&["vault", "snapshot", "restore", "--help"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("<SNAPSHOT>"));
+    assert!(help.contains("--path"));
+    assert!(help.contains("--yes"));
+    let out = cli(&[
+        "--deny-deprecated",
+        "provider",
+        "restore-snapshot",
+        "--path",
+        "vault",
+        "--snapshot",
+        "backup",
+        "--yes",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("deprecated command syntax"));
+    assert!(error.contains("rosec vault snapshot restore"));
+}
+#[test]
+fn recovery_requires_explicit_acknowledgement() {
+    let out = cli(&["vault", "snapshot", "restore", "backup", "--path", "vault"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--yes"));
+}

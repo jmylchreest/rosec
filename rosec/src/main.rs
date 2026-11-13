@@ -1,4 +1,5 @@
 mod cli_compat;
+mod vault;
 use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -66,6 +67,7 @@ async fn main() -> Result<()> {
         return provider::instance::run(request).await;
     }
     match cli.command {
+        Commands::Vault { action } => vault::dispatch(action).await,
         Commands::Provider { action, .. } => provider::dispatch(action).await,
         Commands::Config { action } => config::dispatch(action),
         Commands::Status => status::run().await,

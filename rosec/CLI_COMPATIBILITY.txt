@@ -31,3 +31,9 @@ become a provider ID. Explicit --id selection continues to allow that ID.
 Do not add arbitrary plugin command execution. Future operations are typed groups
 with capability checks and consistent errors/output. External-subcommand capture
 is only used to parse a configured provider ID and the known instance operations.
+
+Native recovery is separate from configured provider operations:
+  rosec vault snapshot restore SNAPSHOT --path FILE --yes
+The former provider restore-snapshot syntax remains in the same deprecation
+registry and normalizes into the exact same native recovery request. It is not
+a generic provider recovery capability. No remote-provider snapshot API is added.

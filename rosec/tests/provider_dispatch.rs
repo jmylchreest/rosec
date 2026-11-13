@@ -99,6 +99,30 @@ async fn both_spellings_dispatch_identically_and_scope_instance_operations() {
             .status
             .success()
     );
+    let old_recovery = run(&[
+        "provider",
+        "restore-snapshot",
+        "--path",
+        "unused",
+        "--snapshot",
+        "unused-backup",
+        "--yes",
+    ])
+    .await;
+    let new_recovery = run(&[
+        "vault",
+        "snapshot",
+        "restore",
+        "unused-backup",
+        "--path",
+        "unused",
+        "--yes",
+    ])
+    .await;
+    assert!(!old_recovery.status.success());
+    assert_eq!(old_recovery.status.code(), new_recovery.status.code());
+    assert_eq!(old_recovery.stderr, new_recovery.stderr);
+    assert!(String::from_utf8_lossy(&new_recovery.stderr).contains("stop rosecd"));
     assert_eq!(
         *calls.lock().unwrap(),
         vec!["passwords:personal", "passwords:personal", "sync:personal"]
