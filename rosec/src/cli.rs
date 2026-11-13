@@ -387,6 +387,16 @@ pub struct DisableArgs {
 // provider subcommands
 #[derive(Subcommand)]
 pub enum ProviderCommands {
+    /// Restore an encrypted native-vault snapshot (stop the daemon first)
+    RestoreSnapshot {
+        #[arg(long)]
+        path: std::path::PathBuf,
+        #[arg(long)]
+        snapshot: std::path::PathBuf,
+        /// Acknowledge that changes since the snapshot will leave the active vault
+        #[arg(long, required = true)]
+        yes: bool,
+    },
     /// List all configured providers and their state
     #[command(alias = "ls")]
     List,

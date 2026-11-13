@@ -16,39 +16,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// Write `data` to `path` with Unix mode `0600`, replacing any existing file.
-///
-/// Uses a write-then-rename strategy so the file is never partially written.
-fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let tmp_path = path.with_extension("json.tmp");
-
-    {
-        #[cfg(unix)]
-        let mut f = {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)?
-        };
-        #[cfg(not(unix))]
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-
-        f.write_all(data)?;
-        f.flush()?;
-    }
-
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
-}
+use crate::{
+    format,
+    storage::{self, write_secret_file},
+};
 
 fn metadata_path_for(vault_path: &Path) -> PathBuf {
     let mut name = vault_path
@@ -102,6 +73,9 @@ struct UnlockedState {
     data: VaultData,
     /// Whether in-memory data has been modified since last save.
     dirty: bool,
+    disk_revision: [u8; 32],
+    committed_file: Vec<u8>,
+    lease: storage::Lease,
 }
 
 pub struct LocalVault {
@@ -117,7 +91,8 @@ pub struct LocalVault {
 
 impl LocalVault {
     pub fn new(id: impl Into<String>, path: impl AsRef<Path>) -> Self {
-        let path = path.as_ref().to_path_buf();
+        let path =
+            std::fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
         let metadata = load_metadata_sidecar(&metadata_path_for(&path));
         Self {
             id: id.into(),
@@ -155,8 +130,15 @@ impl LocalVault {
     async fn load_vault(
         &self,
         password: &[u8],
-    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>), ProviderError> {
-        let content = fs::read(&self.path).await.map_err(|e| {
+    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
+        Self::load_from(&self.path, password).await
+    }
+
+    async fn load_from(
+        path: &Path,
+        password: &[u8],
+    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
+        let content = fs::read(path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ProviderError::Unavailable("vault file not found".into())
             } else {
@@ -167,12 +149,8 @@ impl LocalVault {
         let vault_file: VaultFile =
             serde_json::from_slice(&content).map_err(|e| ProviderError::Other(e.into()))?;
 
-        if vault_file.version != crate::types::VAULT_FORMAT_VERSION {
-            return Err(ProviderError::Other(anyhow::anyhow!(
-                "unsupported vault version: {}",
-                vault_file.version
-            )));
-        }
+        let version =
+            format::VaultVersion::try_from(vault_file.version).map_err(ProviderError::Other)?;
 
         if vault_file.wrapping_entries.is_empty() {
             return Err(ProviderError::Other(anyhow::anyhow!(
@@ -206,17 +184,22 @@ impl LocalVault {
         let decrypted = crypto::decrypt(&encrypted_data, &*vault_key)
             .map_err(|e| ProviderError::Other(anyhow::anyhow!("decryption failed: {}", e)))?;
 
-        let data: VaultData =
-            serde_json::from_slice(&decrypted).map_err(|e| ProviderError::Other(e.into()))?;
+        let data = format::decode(&decrypted, version).map_err(ProviderError::Other)?;
 
-        Ok((data, vault_key, vault_file.wrapping_entries))
+        Ok((
+            data,
+            vault_key,
+            vault_file.wrapping_entries,
+            storage::revision(&content),
+        ))
     }
 
     /// Create a new vault file with a random vault key wrapped by the password.
     async fn create_vault(
         &self,
         password: &[u8],
-    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>), ProviderError> {
+        lease: &storage::Lease,
+    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
         let vault_key = crypto::generate_vault_key();
         let mac_key =
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
@@ -229,7 +212,7 @@ impl LocalVault {
         // Zeroizing: the serialized plaintext holds every secret in the vault;
         // scrub the buffer on drop rather than leaving it in freed heap.
         let plaintext =
-            Zeroizing::new(serde_json::to_vec(&data).map_err(|e| ProviderError::Other(e.into()))?);
+            format::encode(&data, format::required_version(&data)).map_err(ProviderError::Other)?;
         let encrypted = crypto::encrypt(&plaintext, &vault_key);
         let hmac = crypto::compute_hmac(&*mac_key, &encrypted)
             .map_err(|e| ProviderError::Other(e.into()))?;
@@ -244,38 +227,63 @@ impl LocalVault {
                 .map_err(|e| ProviderError::Other(e.into()))?;
         }
 
-        write_secret_file(&self.path, content.as_bytes())
-            .map_err(|e| ProviderError::Other(e.into()))?;
+        storage::replace(lease, content.as_bytes(), None, false).map_err(ProviderError::Other)?;
 
         info!(path = %self.path.display(), "created new vault");
 
-        Ok((data, vault_key, wrapping_entries))
+        Ok((
+            data,
+            vault_key,
+            wrapping_entries,
+            storage::revision(content.as_bytes()),
+        ))
     }
 
-    async fn save(&self) -> Result<(), ProviderError> {
-        let mut guard = self.state.write().await;
+    fn save(&self, state: &mut UnlockedState) -> Result<(), ProviderError> {
+        let result = self.save_inner(state);
+        if result.is_err() {
+            // Roll back an unacknowledged mutation from our last authenticated
+            // encrypted image, without retaining a second plaintext vault.
+            let file: VaultFile = serde_json::from_slice(&state.committed_file)
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            let version =
+                format::VaultVersion::try_from(file.version).map_err(ProviderError::Other)?;
+            let plaintext = crypto::decrypt(&file.encrypted_data_bytes(), &*state.vault_key)
+                .map_err(|e| ProviderError::Other(anyhow::anyhow!(e)))?;
+            state.data = format::decode(&plaintext, version).map_err(ProviderError::Other)?;
+            state.wrapping_entries = file.wrapping_entries;
+            state.dirty = false;
+        }
+        result
+    }
 
-        let state = guard.as_mut().ok_or(ProviderError::Locked)?;
-
+    fn save_inner(&self, state: &mut UnlockedState) -> Result<(), ProviderError> {
         if !state.dirty {
             return Ok(());
         }
 
         // Zeroizing: the serialized plaintext holds every secret in the vault;
         // scrub the buffer on drop rather than leaving it in freed heap.
-        let plaintext = Zeroizing::new(
-            serde_json::to_vec(&state.data).map_err(|e| ProviderError::Other(e.into()))?,
-        );
+        let version = format::required_version(&state.data);
+        let plaintext = format::encode(&state.data, version).map_err(ProviderError::Other)?;
         let encrypted = crypto::encrypt(&plaintext, &state.vault_key);
         let hmac = crypto::compute_hmac(&*state.mac_key, &encrypted)
             .map_err(|e| ProviderError::Other(e.into()))?;
 
-        let vault_file = VaultFile::new(state.wrapping_entries.clone(), &encrypted, &hmac);
+        let mut vault_file = VaultFile::new(state.wrapping_entries.clone(), &encrypted, &hmac);
+        vault_file.version = version.number();
         let content = serde_json::to_string_pretty(&vault_file)
             .map_err(|e| ProviderError::Other(e.into()))?;
 
-        write_secret_file(&self.path, content.as_bytes())
-            .map_err(|e| ProviderError::Other(e.into()))?;
+        storage::replace(
+            &state.lease,
+            content.as_bytes(),
+            Some(state.disk_revision),
+            false,
+        )
+        .map_err(ProviderError::Other)?;
+        state.disk_revision = storage::revision(content.as_bytes());
+        state.committed_file = content.into_bytes();
 
         // Vault-first ordering: a crash here leaves the sidecar stale, not
         // ghost-pathed.  Sidecar errors are warn-logged, not fatal.
@@ -283,6 +291,49 @@ impl LocalVault {
 
         state.dirty = false;
         debug!(path = %self.path.display(), "saved vault");
+        Ok(())
+    }
+
+    /// Restore an encrypted recovery snapshot. The vault must be locked in every
+    /// process. The current encrypted file is itself retained as a recovery point.
+    /// Password is for the snapshot, which may predate a password change.
+    pub async fn restore_snapshot(
+        &self,
+        snapshot: &Path,
+        password: &[u8],
+    ) -> Result<(), ProviderError> {
+        let guard = self.state.write().await;
+        if guard.is_some() {
+            return Err(ProviderError::InvalidInput(
+                "lock the vault before restoring a snapshot".into(),
+            ));
+        }
+        let lease = storage::acquire(&self.path).map_err(ProviderError::Other)?;
+        let (data, _, _, verified_revision) = Self::load_from(snapshot, password).await?;
+        let bytes = fs::read(snapshot)
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+        if storage::revision(&bytes) != verified_revision {
+            return Err(ProviderError::Unavailable(
+                "snapshot changed while being verified".into(),
+            ));
+        }
+        let current = fs::read(&self.path)
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+        storage::replace(&lease, &bytes, Some(storage::revision(&current)), true)
+            .map_err(ProviderError::Other)?;
+        // A failed sidecar refresh must not leave metadata from the replaced vault.
+        let meta = self.metadata_path();
+        match std::fs::remove_file(&meta) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(ProviderError::Other(e.into())),
+        }
+        if let Ok(mut cache) = self.metadata_cache.write() {
+            *cache = None;
+        }
+        self.write_sidecar(&data.items);
         Ok(())
     }
 
@@ -515,15 +566,17 @@ impl Provider for LocalVault {
             return Ok(());
         }
 
+        let lease = storage::acquire(&self.path).map_err(ProviderError::Other)?;
         let password_bytes = password.as_bytes();
-        let (data, vault_key, wrapping_entries) = match self.load_vault(password_bytes).await {
-            Ok(result) => result,
-            Err(ProviderError::Unavailable(_)) => {
-                info!("vault not found, creating new vault");
-                self.create_vault(password_bytes).await?
-            }
-            Err(e) => return Err(e),
-        };
+        let (data, vault_key, wrapping_entries, disk_revision) =
+            match self.load_vault(password_bytes).await {
+                Ok(result) => result,
+                Err(ProviderError::Unavailable(_)) => {
+                    info!("vault not found, creating new vault");
+                    self.create_vault(password_bytes, &lease).await?
+                }
+                Err(e) => return Err(e),
+            };
 
         let mac_key =
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
@@ -540,12 +593,23 @@ impl Provider for LocalVault {
             self.write_sidecar(&data.items);
         }
 
+        let committed_file = fs::read(&self.path)
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+        if storage::revision(&committed_file) != disk_revision {
+            return Err(ProviderError::Unavailable(
+                "vault changed during unlock".into(),
+            ));
+        }
         *guard = Some(UnlockedState {
             vault_key,
             mac_key,
             wrapping_entries,
             data,
             dirty: false,
+            disk_revision,
+            committed_file,
+            lease,
         });
 
         info!("provider unlocked");
@@ -623,8 +687,8 @@ impl Provider for LocalVault {
         state.wrapping_entries.retain(|e| e.id != old_entry_id);
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!("vault password changed");
         Ok(())
@@ -769,8 +833,8 @@ impl Provider for LocalVault {
             let id = existing.id.clone();
             state.dirty = true;
 
+            self.save(state)?;
             drop(guard);
-            self.save().await?;
 
             return Ok(id);
         }
@@ -796,8 +860,8 @@ impl Provider for LocalVault {
         state.data.items.push(new_item);
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!(item_id = %id, "created item");
         Ok(id)
@@ -851,8 +915,8 @@ impl Provider for LocalVault {
         item.modified = now;
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!(item_id = %id, "updated item");
         Ok(())
@@ -871,8 +935,8 @@ impl Provider for LocalVault {
 
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!(item_id = %id, "deleted item");
         Ok(())
@@ -975,8 +1039,8 @@ impl Provider for LocalVault {
         state.wrapping_entries.push(entry);
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!(entry_id = %id, "added wrapping entry");
         Ok(id)
@@ -1001,8 +1065,8 @@ impl Provider for LocalVault {
 
         state.dirty = true;
 
+        self.save(state)?;
         drop(guard);
-        self.save().await?;
 
         info!(entry_id = %entry_id, "removed wrapping entry");
         Ok(())

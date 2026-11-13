@@ -1,0 +1,30 @@
+Native vault storage
+
+Vault format versions describe the serialized payload, not the rosec release.
+Reads never upgrade files. The writer selects the oldest lossless representation.
+Unknown versions are rejected, not guessed. Version 2 remains the only format in
+this storage-layer change; the MIME change adds v3 separately.
+
+An unlocked vault holds an OS file lease. A second writer or recovery operation
+must wait until it is locked/dropped (operations currently return an in-use error).
+The adjacent .lock file must stay in place. An on-disk revision check additionally
+rejects saves after an external replacement. Older rosec binaries do not obey this
+lease; never run old and new writers concurrently against the same vault.
+
+Writes use unique restrictive temporary files, file sync, rename and directory
+sync. Each format transition retains the previous encrypted file under a unique
+<path>.recovery-<uuid> name. Normal same-format writes do not create snapshots.
+A snapshot contains the passwords/wrapping entries that existed at that time.
+Snapshots are not automatically deleted; they may retain deleted secrets or old
+unlock passwords, so remove recovery points when no longer needed.
+
+Recovery command (stop rosecd first):
+  rosec provider restore-snapshot --path VAULT --snapshot SNAPSHOT --yes
+
+The command asks for the snapshot password, authenticates/decrypts its contents,
+preserves the active encrypted file as another recovery point, and restores the
+snapshot. Changes made since the snapshot are absent from the restored vault.
+The metadata sidecar is rebuilt, not restored from an old sidecar snapshot.
+The library also exposes LocalVault::restore_snapshot for controlled callers.
+If directory sync fails after rename, the new file may already be active; an
+error is returned rather than claiming crash durability. Reopen before retrying.
