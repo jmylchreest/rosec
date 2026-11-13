@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rosec_core::{Capability, ItemMeta, Provider, ProviderError};
+use rosec_core::{Capability, ItemMeta, Provider};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -187,7 +187,6 @@ impl SecretItem {
         session: &str,
         encoding: crate::session::SessionEncoding,
     ) -> Result<(SecretStruct,), SecretServiceError> {
-        use wildmatch::WildMatch;
         if self.is_locked() {
             return Err(SecretServiceError::IsLocked("item is locked".to_string()));
         }
@@ -199,23 +198,7 @@ impl SecretItem {
             .state
             .tokio_handle
             .spawn(async move {
-                match provider.get_item_attributes(&item_id).await {
-                    Ok(ia) => {
-                        for pattern in &patterns {
-                            let wm = WildMatch::new(pattern);
-                            if let Some(matched) = ia.secret_names.iter().find(|n| wm.matches(n)) {
-                                match provider.get_secret_attr(&item_id, matched).await {
-                                    Ok(s) => return Ok(s),
-                                    Err(ProviderError::NotFound) => continue,
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                        }
-                        // No pattern matched — fall back to primary_secret.
-                        rosec_core::primary_secret(&*provider, &item_id).await
-                    }
-                    Err(e) => Err(e),
-                }
+                rosec_core::selected_secret_value(&*provider, &item_id, &patterns).await
             })
             .await
             .map_err(|e| FdoError::Failed(format!("tokio task panicked: {e}")))?

@@ -2259,6 +2259,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "wildmatch",
  "zeroize",
 ]
 
@@ -3682,6 +3683,12 @@ dependencies = [
  "syn 2.0.119",
  "wiggle-generate",
 ]
+
+[[package]]
+name = "wildmatch"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f18219fbd41a807dec044965d4106bb4fdb1d3a4b70aac4e5510aacc80a9f140"
 
 [[package]]
 name = "winapi"

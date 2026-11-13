@@ -28,3 +28,7 @@ futures-util = { workspace = true }
 libc = { workspace = true }
 wildmatch = { workspace = true }
 wait-timeout = { workspace = true }
+
+[dev-dependencies]
+rosec-vault = { path = "../rosec-vault" }
+tempfile = { workspace = true }

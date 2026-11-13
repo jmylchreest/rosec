@@ -7,8 +7,8 @@ use base64::prelude::{BASE64_STANDARD, Engine};
 use rosec_core::{
     AttributeDescriptor, Attributes, Capability, Fido2CredentialMeta, Fido2KeyMaterial,
     ItemAttributes, ItemMeta, ItemType, ItemUpdate, NewItem, Provider, ProviderCallbacks,
-    ProviderError, ProviderStatus, SecretBytes, SshKeyMeta, SshPrivateKeyMaterial, UnlockInput,
-    attributes_match,
+    ProviderError, ProviderStatus, SecretBytes, SecretValue, SshKeyMeta, SshPrivateKeyMaterial,
+    UnlockInput, attributes_match,
 };
 use tokio::fs;
 use tokio::sync::RwLock;
@@ -175,8 +175,12 @@ impl LocalVault {
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
 
         let encrypted_data = vault_file.encrypted_data_bytes();
-        let hmac_valid = crypto::verify_hmac(&*mac_key, &encrypted_data, &vault_file.hmac_bytes())
-            .map_err(|e| ProviderError::Other(e.into()))?;
+        let hmac_valid = crypto::verify_hmac(
+            &*mac_key,
+            &format::mac_input(version, &encrypted_data),
+            &vault_file.hmac_bytes(),
+        )
+        .map_err(|e| ProviderError::Other(e.into()))?;
         if !hmac_valid {
             return Err(ProviderError::AuthFailed);
         }
@@ -267,7 +271,7 @@ impl LocalVault {
         let version = format::required_version(&state.data);
         let plaintext = format::encode(&state.data, version).map_err(ProviderError::Other)?;
         let encrypted = crypto::encrypt(&plaintext, &state.vault_key);
-        let hmac = crypto::compute_hmac(&*state.mac_key, &encrypted)
+        let hmac = crypto::compute_hmac(&*state.mac_key, &format::mac_input(version, &encrypted))
             .map_err(|e| ProviderError::Other(e.into()))?;
 
         let mut vault_file = VaultFile::new(state.wrapping_entries.clone(), &encrypted, &hmac);
@@ -734,18 +738,32 @@ impl Provider for LocalVault {
     }
 
     async fn get_secret_attr(&self, id: &str, attr: &str) -> Result<SecretBytes, ProviderError> {
+        self.get_secret_value(id, attr)
+            .await
+            .map(|value| value.bytes)
+    }
+    async fn get_secret_value(&self, id: &str, attr: &str) -> Result<SecretValue, ProviderError> {
         let guard = self.state.read().await;
         let state = guard.as_ref().ok_or(ProviderError::Locked)?;
-
-        state
+        let item = state
             .data
             .items
             .iter()
-            .find(|item| item.id == id)
-            .and_then(|item| item.secrets.get(attr))
+            .find(|i| i.id == id)
+            .ok_or(ProviderError::NotFound)?;
+        let bytes = item
+            .secrets
+            .get(attr)
             .and_then(|s| BASE64_STANDARD.decode(s).ok())
-            .map(SecretBytes::new)
-            .ok_or(ProviderError::NotFound)
+            .ok_or(ProviderError::NotFound)?;
+        Ok(SecretValue {
+            bytes: SecretBytes::new(bytes),
+            content_type: item
+                .content_types
+                .get(attr)
+                .cloned()
+                .unwrap_or_else(|| "text/plain".into()),
+        })
     }
 
     async fn get_item_attributes(&self, id: &str) -> Result<ItemAttributes, ProviderError> {
@@ -828,6 +846,7 @@ impl Provider for LocalVault {
                 .iter()
                 .map(|(k, v)| (k.clone(), BASE64_STANDARD.encode(v.as_slice())))
                 .collect();
+            existing.content_types = item.content_types.clone();
             existing.modified = chrono::Utc::now().timestamp();
 
             let id = existing.id.clone();
@@ -849,6 +868,7 @@ impl Provider for LocalVault {
             .collect();
 
         let new_item = VaultItemData {
+            content_types: item.content_types,
             id: id.clone(),
             label: item.label,
             attributes: stored_attributes,
@@ -888,6 +908,14 @@ impl Provider for LocalVault {
             .find(|item| item.id == id)
             .ok_or(ProviderError::NotFound)?;
 
+        if update.content_types.keys().any(|key| {
+            !item.secrets.contains_key(key)
+                && !update.secrets.as_ref().is_some_and(|s| s.contains_key(key))
+        }) {
+            return Err(ProviderError::InvalidInput(
+                "content type has no corresponding secret".into(),
+            ));
+        }
         let now = chrono::Utc::now().timestamp();
 
         if let Some(label) = update.label {
@@ -912,6 +940,13 @@ impl Provider for LocalVault {
             }
         }
 
+        for (key, content_type) in update.content_types {
+            if content_type == "text/plain" {
+                item.content_types.remove(&key);
+            } else {
+                item.content_types.insert(key, content_type);
+            }
+        }
         item.modified = now;
         state.dirty = true;
 

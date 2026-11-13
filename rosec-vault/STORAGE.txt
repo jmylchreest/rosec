@@ -2,8 +2,12 @@ Native vault storage
 
 Vault format versions describe the serialized payload, not the rosec release.
 Reads never upgrade files. The writer selects the oldest lossless representation.
-Unknown versions are rejected, not guessed. Version 2 remains the only format in
-this storage-layer change; the MIME change adds v3 separately.
+Unknown versions are rejected, not guessed. V2 stores the original payload. V3 additionally stores per-secret content types
+inside the encrypted payload. Only non-default content types require v3.
+Removing/resetting the last such type lets the next write use v2 again.
+V3 also includes a format-specific prefix in its MAC input: changing the header
+to v2 fails authentication, including with an older v2 reader. Key wrapping and
+KDF parameters are unchanged. V2 output retains the original MAC convention.
 
 An unlocked vault holds an OS file lease. A second writer or recovery operation
 must wait until it is locked/dropped (operations currently return an in-use error).
@@ -28,3 +32,20 @@ The metadata sidecar is rebuilt, not restored from an old sidecar snapshot.
 The library also exposes LocalVault::restore_snapshot for controlled callers.
 If directory sync fails after rename, the new file may already be active; an
 error is returned rather than claiming crash durability. Reopen before retrying.
+
+MIME input semantics
+CreateItem replacement replaces both bytes and types; absent types mean text/plain.
+ItemUpdate preserves unspecified types, including for byte-only callers. Explicit
+text/plain removes a non-default type. Types for absent secret keys are rejected
+before modifying the item. Types and bytes are read under the same native lock.
+No content types are exposed in public item attributes or the metadata sidecar.
+Existing external providers default to text/plain; WASM guest exports and JSON
+remain unchanged. Standard SetSecret and property setters remain unsupported.
+
+Verification
+cargo test --workspace (run within dbus-run-session)
+cargo clippy --workspace --all-targets -- -D warnings
+bash tests/libsecret_roundtrip.sh (requires libsecret development headers, cc and pkg-config)
+Set CARGO_TARGET_DIR to a disk-backed build directory when using /tmp worktrees.
+The optional libsecret test uses only a private bus and temporary native vault.
+It covers text workflows, binary MIME parameters and replacement with empty text.

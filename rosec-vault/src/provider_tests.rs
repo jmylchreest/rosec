@@ -132,6 +132,7 @@ async fn fido2_credentials_roundtrip() {
     let id = provider
         .create_item(
             NewItem {
+                content_types: Default::default(),
                 label: "Example Passkey".to_string(),
                 item_type: None,
                 attributes,
@@ -174,6 +175,7 @@ async fn fido2_items_without_passkey_attributes_are_not_listed() {
     provider
         .create_item(
             NewItem {
+                content_types: Default::default(),
                 label: "Ordinary".to_string(),
                 item_type: None,
                 attributes: HashMap::new(),
@@ -201,6 +203,7 @@ async fn create_and_get_item() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test Item".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -233,6 +236,7 @@ async fn create_item_already_exists() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: attrs.clone(),
@@ -242,6 +246,7 @@ async fn create_item_already_exists() {
     provider.create_item(item, false).await.unwrap();
 
     let item2 = NewItem {
+        content_types: Default::default(),
         label: "Test2".to_string(),
         item_type: None,
         attributes: attrs,
@@ -269,6 +274,7 @@ async fn create_item_replace() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: attrs.clone(),
@@ -278,6 +284,7 @@ async fn create_item_replace() {
     let id1 = provider.create_item(item, false).await.unwrap();
 
     let item2 = NewItem {
+        content_types: Default::default(),
         label: "Replaced".to_string(),
         item_type: None,
         attributes: attrs,
@@ -307,6 +314,7 @@ async fn create_item_attribute_less_distinct_labels_coexist() {
         .unwrap();
 
     let mk = |label: &str| NewItem {
+        content_types: Default::default(),
         label: label.to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -340,6 +348,7 @@ async fn create_item_attribute_less_same_label_conflicts() {
         .unwrap();
 
     let mk = |secret: &[u8]| NewItem {
+        content_types: Default::default(),
         label: "API token".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -374,6 +383,7 @@ async fn update_item() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Original".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -383,6 +393,7 @@ async fn update_item() {
     let id = provider.create_item(item, false).await.unwrap();
 
     let update = ItemUpdate {
+        content_types: Default::default(),
         label: Some("Updated".to_string()),
         item_type: None,
         attributes: None,
@@ -410,6 +421,7 @@ async fn update_item_reserved_attribute() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -422,6 +434,7 @@ async fn update_item_reserved_attribute() {
     attrs.insert("id".to_string(), "newid".to_string());
 
     let update = ItemUpdate {
+        content_types: Default::default(),
         label: None,
         item_type: None,
         attributes: Some(attrs),
@@ -446,6 +459,7 @@ async fn delete_item() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -482,12 +496,14 @@ async fn search_items() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item1 = NewItem {
+        content_types: Default::default(),
         label: "Item1".to_string(),
         item_type: None,
         attributes: attrs1.clone(),
         secrets: secrets.clone(),
     };
     let item2 = NewItem {
+        content_types: Default::default(),
         label: "Item2".to_string(),
         item_type: None,
         attributes: attrs2,
@@ -518,6 +534,7 @@ async fn operations_fail_when_locked() {
     let mut secrets = HashMap::new();
     secrets.insert("secret".to_string(), SecretBytes::new(b"test".to_vec()));
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -542,6 +559,7 @@ async fn unlock_relock_roundtrip() {
     secrets.insert("secret".to_string(), SecretBytes::new(b"mysecret".to_vec()));
 
     let item = NewItem {
+        content_types: Default::default(),
         label: "Test".to_string(),
         item_type: None,
         attributes: HashMap::new(),
@@ -870,6 +888,7 @@ async fn unlocked_with_signal_item() -> (LocalVault, NamedTempFile) {
     provider
         .create_item(
             NewItem {
+                content_types: Default::default(),
                 label: "Chromium Safe Storage".to_string(),
                 item_type: Some(ItemType::Login),
                 attributes,
@@ -1036,6 +1055,213 @@ async fn recovery_validates_snapshot_and_excludes_active_writers() {
 }
 
 #[tokio::test]
+async fn mime_changes_format_only_when_needed_and_can_return_to_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault");
+    let vault = LocalVault::new("test", &path);
+    let password = || UnlockInput::Password(Zeroizing::new("fixture-password".into()));
+    let file = || serde_json::from_slice::<VaultFile>(&std::fs::read(&path).unwrap()).unwrap();
+    vault.unlock(password()).await.unwrap();
+    let id = vault
+        .create_item(
+            NewItem {
+                label: "binary fixture".into(),
+                item_type: None,
+                attributes: HashMap::new(),
+                secrets: HashMap::from([
+                    ("secret".into(), SecretBytes::new(vec![0, 255, 128, 0])),
+                    ("other".into(), SecretBytes::new(vec![])),
+                ]),
+                content_types: HashMap::new(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(file().version, 2);
+    let original = std::fs::read(&path).unwrap();
+    vault.lock().await.unwrap();
+    vault.unlock(password()).await.unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "unlock must not rewrite"
+    );
+    let mime = "application/octet-stream; fixture=exact";
+    vault
+        .update_item(
+            &id,
+            ItemUpdate {
+                content_types: HashMap::from([("secret".into(), mime.into())]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(file().version, 3);
+    let v3_bytes = std::fs::read(&path).unwrap();
+    let backups = || {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains(".recovery-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(backups().len(), 1);
+    assert_eq!(std::fs::read(&backups()[0]).unwrap(), original);
+    vault
+        .update_item(
+            &id,
+            ItemUpdate {
+                label: Some("renamed".into()),
+                secrets: Some(HashMap::from([(
+                    "other".into(),
+                    SecretBytes::new(b"updated".to_vec()),
+                )])),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        backups().len(),
+        1,
+        "same-format writes need no recovery snapshot"
+    );
+    vault.lock().await.unwrap();
+    vault.unlock(password()).await.unwrap();
+    let value = vault.get_secret_value(&id, "secret").await.unwrap();
+    assert_eq!(value.content_type, mime);
+    assert_eq!(value.bytes.as_slice(), &[0, 255, 128, 0]);
+    assert_eq!(
+        vault
+            .get_secret_value(&id, "other")
+            .await
+            .unwrap()
+            .content_type,
+        "text/plain"
+    );
+    vault.lock().await.unwrap();
+    let mut tampered: VaultFile = serde_json::from_slice(&v3_bytes).unwrap();
+    tampered.version = 2;
+    std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(matches!(
+        vault.unlock(password()).await,
+        Err(ProviderError::AuthFailed)
+    ));
+    std::fs::write(&path, &v3_bytes).unwrap();
+    vault.unlock(password()).await.unwrap();
+    vault
+        .update_item(
+            &id,
+            ItemUpdate {
+                content_types: HashMap::from([("secret".into(), "text/plain".into())]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(file().version, 2);
+    assert_eq!(backups().len(), 2);
+    vault.lock().await.unwrap();
+    vault.unlock(password()).await.unwrap();
+    assert_eq!(
+        vault
+            .get_secret_value(&id, "secret")
+            .await
+            .unwrap()
+            .bytes
+            .as_slice(),
+        &[0, 255, 128, 0]
+    );
+    assert_eq!(
+        vault
+            .get_secret_value(&id, "secret")
+            .await
+            .unwrap()
+            .content_type,
+        "text/plain"
+    );
+    vault.lock().await.unwrap();
+    let v3_snapshot = backups()
+        .into_iter()
+        .find(|p| {
+            serde_json::from_slice::<VaultFile>(&std::fs::read(p).unwrap())
+                .unwrap()
+                .version
+                == 3
+        })
+        .unwrap();
+    vault
+        .restore_snapshot(&v3_snapshot, b"fixture-password")
+        .await
+        .unwrap();
+    vault.unlock(password()).await.unwrap();
+    assert_eq!(
+        vault
+            .get_secret_value(&id, "secret")
+            .await
+            .unwrap()
+            .content_type,
+        mime
+    );
+}
+
+#[tokio::test]
+async fn replacement_and_invalid_mime_metadata_are_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault");
+    let vault = LocalVault::new("test", &path);
+    vault
+        .unlock(UnlockInput::Password(Zeroizing::new(
+            "fixture-password".into(),
+        )))
+        .await
+        .unwrap();
+    let item = |mime: &str, bytes: &[u8]| NewItem {
+        label: "fixture".into(),
+        item_type: None,
+        attributes: HashMap::new(),
+        secrets: HashMap::from([("secret".into(), SecretBytes::new(bytes.to_vec()))]),
+        content_types: HashMap::from([("secret".into(), mime.into())]),
+    };
+    let id = vault
+        .create_item(item("application/x-fixture", &[255, 0]), false)
+        .await
+        .unwrap();
+    assert!(
+        vault
+            .update_item(
+                &id,
+                ItemUpdate {
+                    label: Some("must-not-change".into()),
+                    content_types: HashMap::from([("absent".into(), "x".into())]),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(vault.list_items().await.unwrap()[0].label, "fixture");
+    assert_eq!(
+        vault
+            .create_item(item("text/plain", b""), true)
+            .await
+            .unwrap(),
+        id
+    );
+    let value = vault.get_secret_value(&id, "secret").await.unwrap();
+    assert_eq!(value.content_type, "text/plain");
+    assert!(value.bytes.as_slice().is_empty());
+    assert_eq!(
+        serde_json::from_slice::<VaultFile>(&std::fs::read(path).unwrap())
+            .unwrap()
+            .version,
+        2
+    );
+}
+
+#[tokio::test]
 async fn failed_save_does_not_publish_mutation_in_memory() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vault");
@@ -1050,6 +1276,8 @@ async fn failed_save_does_not_publish_mutation_in_memory() {
     // Simulate an external writer which does not honour the lease.
     std::fs::write(&path, b"external replacement").unwrap();
     let item = NewItem {
+        content_types: Default::default(),
+
         label: "must-not-appear".into(),
         item_type: None,
         attributes: HashMap::new(),

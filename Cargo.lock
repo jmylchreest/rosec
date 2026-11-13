@@ -4658,6 +4658,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "wildmatch",
  "zeroize",
 ]
 
@@ -4730,9 +4731,11 @@ dependencies = [
  "rand 0.10.3",
  "rosec-core",
  "rosec-events",
+ "rosec-vault",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",

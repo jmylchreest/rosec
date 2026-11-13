@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rosec_core::{ProviderError, SecretBytes};
+use rosec_core::ProviderError;
 use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -160,7 +160,9 @@ impl SecretService {
             let state = Arc::clone(&self.state);
             let secret_result = self
                 .state
-                .run_on_tokio(async move { state.resolve_primary_secret(provider, &item_id).await })
+                .run_on_tokio(async move {
+                    state.resolve_primary_secret_value(provider, &item_id).await
+                })
                 .await?;
             // Skip items that have no primary secret (e.g. login without
             // password, empty secure note) rather than failing the entire
@@ -318,7 +320,7 @@ impl SecretService {
 /// plaintext is only visible inside this process for the duration of the call.
 pub(crate) fn build_secret_value(
     session_path: &str,
-    secret: &SecretBytes,
+    secret: &rosec_core::SecretValue,
     aes_key: Option<&[u8; 16]>,
 ) -> Result<SecretStruct, FdoError> {
     let session = OwnedObjectPath::try_from(session_path.to_string())
@@ -327,12 +329,12 @@ pub(crate) fn build_secret_value(
     let (parameters, value) = if let Some(key) = aes_key {
         // DH-encrypted session: AES-128-CBC with random IV
         let (iv, ciphertext) =
-            aes128_cbc_encrypt(key, secret.as_slice()).map_err(map_provider_error)?;
+            aes128_cbc_encrypt(key, secret.bytes.as_slice()).map_err(map_provider_error)?;
         (iv, ciphertext)
     } else {
         // Plain session: no parameters, raw plaintext value
-        (Vec::new(), secret.as_slice().to_vec())
+        (Vec::new(), secret.bytes.as_slice().to_vec())
     };
 
-    Ok((session, parameters, value, "text/plain".to_string()))
+    Ok((session, parameters, value, secret.content_type.clone()))
 }

@@ -77,6 +77,7 @@ impl RosecItems {
             .collect();
 
         let item = NewItem {
+            content_types: Default::default(),
             label: label.to_string(),
             item_type: Some(parsed_type),
             attributes,
@@ -193,6 +194,7 @@ impl RosecItems {
         };
 
         let update = ItemUpdate {
+            content_types: Default::default(),
             label: update_label,
             item_type: parsed_type,
             attributes: update_attrs,

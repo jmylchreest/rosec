@@ -293,29 +293,18 @@ impl ServiceState {
         provider: Arc<dyn Provider>,
         item_id: &str,
     ) -> Result<SecretBytes, ProviderError> {
+        self.resolve_primary_secret_value(provider, item_id)
+            .await
+            .map(|value| value.bytes)
+    }
+
+    pub async fn resolve_primary_secret_value(
+        &self,
+        provider: Arc<dyn Provider>,
+        item_id: &str,
+    ) -> Result<rosec_core::SecretValue, ProviderError> {
         let patterns = self.return_attr_patterns(provider.id());
-
-        // Ask the provider for the available secret attribute names so we can
-        // do pattern matching without calling get_secret_attr for every pattern.
-        let attr_names: Vec<String> = match provider.get_item_attributes(item_id).await {
-            Ok(ia) => ia.secret_names,
-            Err(e) => return Err(e),
-        };
-
-        for pattern in &patterns {
-            let wm = WildMatch::new(pattern);
-            if let Some(matched) = attr_names.iter().find(|n| wm.matches(n)) {
-                match provider.get_secret_attr(item_id, matched).await {
-                    Ok(secret) => return Ok(secret),
-                    // Attr exists in the list but couldn't be resolved — skip.
-                    Err(ProviderError::NotFound) => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-
-        // No pattern matched — fall back to primary_secret.
-        rosec_core::primary_secret(&*provider, item_id).await
+        rosec_core::selected_secret_value(&*provider, item_id, &patterns).await
     }
 
     /// Resolve a D-Bus item path to the `(provider, item_id)` pair needed by
@@ -3040,8 +3029,12 @@ mod tests {
         let secret = rosec_core::primary_secret(&*provider, &item_meta.id)
             .await
             .expect("primary_secret");
-        let value = crate::service::build_secret_value(&session, &secret, aes_key.as_deref())
-            .expect("build_secret_value");
+        let value = crate::service::build_secret_value(
+            &session,
+            &rosec_core::SecretValue::text(secret),
+            aes_key.as_deref(),
+        )
+        .expect("build_secret_value");
 
         // Verify we got a valid secret tuple (session, params, value, content_type)
         let _path_str = path; // just ensure the path was resolved

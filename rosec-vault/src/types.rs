@@ -73,6 +73,9 @@ impl WrappingEntry {
 /// Data for a single vault item (decrypted form).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VaultItemData {
+    /// Non-default types, encrypted with the corresponding secret values.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub content_types: HashMap<String, String>,
     pub id: String,
     pub label: String,
     pub attributes: HashMap<String, String>,

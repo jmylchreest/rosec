@@ -250,9 +250,26 @@ impl std::str::FromStr for ItemType {
     }
 }
 
+/// Bytes and their interpretation, retrieved from one provider snapshot.
+#[derive(Debug)]
+pub struct SecretValue {
+    pub bytes: SecretBytes,
+    pub content_type: String,
+}
+impl SecretValue {
+    pub fn text(bytes: SecretBytes) -> Self {
+        Self {
+            bytes,
+            content_type: "text/plain".into(),
+        }
+    }
+}
+
 /// A request to create a new vault item.
 #[derive(Debug, Clone)]
 pub struct NewItem {
+    /// Content type per secret. Missing entries mean text/plain.
+    pub content_types: HashMap<String, String>,
     /// Display label (required, non-empty).
     pub label: String,
     /// Item type hint.
@@ -276,6 +293,15 @@ impl NewItem {
     /// - no secrets provided
     /// - reserved attribute names are used
     pub fn validate(&self) -> Result<(), ProviderError> {
+        if self
+            .content_types
+            .keys()
+            .any(|key| !self.secrets.contains_key(key))
+        {
+            return Err(ProviderError::InvalidInput(
+                "content type has no corresponding secret".into(),
+            ));
+        }
         if self.label.is_empty() {
             return Err(ProviderError::InvalidInput("label cannot be empty".into()));
         }
@@ -300,6 +326,9 @@ impl NewItem {
 /// All fields are optional — only provided values are changed.
 #[derive(Debug, Clone, Default)]
 pub struct ItemUpdate {
+    /// Update content types for existing or supplied secret keys. Unspecified
+    /// entries are preserved; text/plain explicitly removes a non-default type.
+    pub content_types: HashMap<String, String>,
     /// New display label (None = no change).
     pub label: Option<String>,
     /// New item type (None = no change).
@@ -1167,6 +1196,11 @@ pub trait Provider: Send + Sync {
     /// All providers must implement this — there is no default.
     async fn get_secret_attr(&self, id: &str, attr: &str) -> Result<SecretBytes, ProviderError>;
 
+    /// Existing providers need no MIME implementation; guest protocols stay unchanged.
+    async fn get_secret_value(&self, id: &str, attr: &str) -> Result<SecretValue, ProviderError> {
+        self.get_secret_attr(id, attr).await.map(SecretValue::text)
+    }
+
     /// List all SSH keys available from this provider (public metadata only).
     ///
     /// Gated behind [`Capability::Ssh`].  Returns one [`SshKeyMeta`] per
@@ -1320,6 +1354,29 @@ pub async fn primary_secret(
     let item_type = ItemType::from_attributes(&attrs.public);
     provider
         .get_secret_attr(id, item_type.default_secret_attr())
+        .await
+}
+
+/// Resolve the same selected secret and MIME value for all transport reads.
+pub async fn selected_secret_value(
+    provider: &dyn Provider,
+    id: &str,
+    patterns: &[String],
+) -> Result<SecretValue, ProviderError> {
+    let attrs = provider.get_item_attributes(id).await?;
+    for pattern in patterns {
+        let matcher = wildmatch::WildMatch::new(pattern);
+        if let Some(name) = attrs.secret_names.iter().find(|n| matcher.matches(n)) {
+            match provider.get_secret_value(id, name).await {
+                Ok(value) => return Ok(value),
+                Err(ProviderError::NotFound) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let kind = ItemType::from_attributes(&attrs.public);
+    provider
+        .get_secret_value(id, kind.default_secret_attr())
         .await
 }
 
