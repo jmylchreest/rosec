@@ -166,7 +166,7 @@ build() {
 check() {
     cd "${srcdir}/${pkgname}"
     export ROSEC_PACKAGED_PROVIDERS="${srcdir}/packaged-providers.json"
-    cargo test --release --locked --workspace
+    dbus-run-session -- cargo test --release --locked --workspace
 }
 
 package() {

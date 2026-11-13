@@ -1,4 +1,4 @@
-//! Run under dbus-run-session; no real provider or credentials are used.
+//! Uses a private bus; no desktop service, real provider, or credentials are used.
 use std::sync::{Arc, Mutex};
 type ProviderEntry = (
     String,
@@ -51,11 +51,46 @@ impl Fixture {
         7
     }
 }
-async fn run(args: &[&str]) -> std::process::Output {
+struct PrivateBus {
+    child: std::process::Child,
+    address: String,
+}
+impl PrivateBus {
+    fn new() -> Self {
+        use std::io::BufRead;
+        let child = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start private test bus (requires dbus-daemon)");
+        let mut bus = Self {
+            child,
+            address: String::new(),
+        };
+        std::io::BufReader::new(bus.child.stdout.take().unwrap())
+            .read_line(&mut bus.address)
+            .expect("read private test bus address");
+        bus.address = bus.address.trim().to_owned();
+        assert!(
+            !bus.address.is_empty(),
+            "private test bus returned no address"
+        );
+        bus
+    }
+}
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+async fn run(bus: &PrivateBus, args: &[&str]) -> std::process::Output {
+    let address = bus.address.clone();
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     tokio::task::spawn_blocking(move || {
         std::process::Command::new(env!("CARGO_BIN_EXE_rosec"))
             .args(args)
+            .env("DBUS_SESSION_BUS_ADDRESS", address)
             .env_remove("ROSEC_SOCKET")
             .output()
             .unwrap()
@@ -65,8 +100,9 @@ async fn run(args: &[&str]) -> std::process::Output {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn both_spellings_dispatch_identically_and_scope_instance_operations() {
+    let bus = PrivateBus::new();
     let calls = Arc::new(Mutex::new(vec![]));
-    let _server = zbus::connection::Builder::session()
+    let _server = zbus::connection::Builder::address(bus.address.as_str())
         .name("org.freedesktop.secrets")
         .serve_at(
             "/org/rosec/Daemon",
@@ -77,47 +113,53 @@ async fn both_spellings_dispatch_identically_and_scope_instance_operations() {
         .build()
         .await
         .unwrap();
-    let old = run(&["provider", "list-passwords", "personal"]).await;
-    let new = run(&["provider", "personal", "password", "list"]).await;
+    let old = run(&bus, &["provider", "list-passwords", "personal"]).await;
+    let new = run(&bus, &["provider", "personal", "password", "list"]).await;
     assert!(old.status.success());
     assert_eq!(old.status.code(), new.status.code());
     assert_eq!(old.stdout, new.stdout);
     assert_eq!(old.stderr, new.stderr);
-    let status = run(&["provider", "personal", "status"]).await;
+    let status = run(&bus, &["provider", "personal", "status"]).await;
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("personal"));
     assert!(!String::from_utf8_lossy(&status.stdout).contains("readonly"));
     assert!(
-        run(&["provider", "personal", "sync"])
+        run(&bus, &["provider", "personal", "sync"])
             .await
             .status
             .success()
     );
     assert!(
-        !run(&["provider", "readonly", "sync"])
+        !run(&bus, &["provider", "readonly", "sync"])
             .await
             .status
             .success()
     );
-    let old_recovery = run(&[
-        "provider",
-        "restore-snapshot",
-        "--path",
-        "unused",
-        "--snapshot",
-        "unused-backup",
-        "--yes",
-    ])
+    let old_recovery = run(
+        &bus,
+        &[
+            "provider",
+            "restore-snapshot",
+            "--path",
+            "unused",
+            "--snapshot",
+            "unused-backup",
+            "--yes",
+        ],
+    )
     .await;
-    let new_recovery = run(&[
-        "vault",
-        "snapshot",
-        "restore",
-        "unused-backup",
-        "--path",
-        "unused",
-        "--yes",
-    ])
+    let new_recovery = run(
+        &bus,
+        &[
+            "vault",
+            "snapshot",
+            "restore",
+            "unused-backup",
+            "--path",
+            "unused",
+            "--yes",
+        ],
+    )
     .await;
     assert!(!old_recovery.status.success());
     assert_eq!(old_recovery.status.code(), new_recovery.status.code());
