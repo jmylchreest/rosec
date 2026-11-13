@@ -116,6 +116,7 @@ pub struct ServiceState {
     items_changed_cb: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     change_revision: tokio::sync::watch::Sender<u64>,
     refresh_lock: tokio::sync::Mutex<()>,
+    object_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for ServiceState {
@@ -200,6 +201,7 @@ impl ServiceState {
             items_changed_cb: RwLock::new(None),
             change_revision: tokio::sync::watch::channel(0).0,
             refresh_lock: tokio::sync::Mutex::new(()),
+            object_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -314,6 +316,7 @@ impl ServiceState {
     /// all items on the new connection's `ObjectServer`.
     pub fn clear_registered_items(&self) {
         self.cache.clear_registered();
+        self.wake_change_adapter();
     }
 
     /// Atomically replace the live config.
@@ -1711,26 +1714,9 @@ impl ServiceState {
             inventory.upsert(meta.clone());
             items.insert(path.to_string(), meta.clone());
         });
-        // 2. If a D-Bus object already exists at this path (replace/update
-        //    path), remove it so register_items will create a fresh one with
-        //    updated metadata (label, attributes, etc.).
-        let already_registered = self
-            .cache
-            .registered_items
-            .lock()
-            .map(|r| r.contains(path))
-            .unwrap_or(false);
-        if already_registered {
-            let conn = self.conn();
-            let server = conn.object_server();
-            // Ignore errors — the object might already be gone.
-            let _ = server.remove::<SecretItem, _>(path).await;
-            if let Ok(mut registered) = self.cache.registered_items.lock() {
-                registered.remove(path);
-            }
-        }
-        // 3. Register the D-Bus object so GetSecret works on the new path.
-        self.register_items(&[(path.to_string(), meta)]).await?;
+        // Existing objects read live metadata, so replacement does not need
+        // to remove and recreate an object that clients may be using.
+        self.register_current_items().await?;
         self.notify_items_changed();
         Ok(())
     }
@@ -2117,7 +2103,7 @@ impl ServiceState {
                 .map(|(path, meta)| (path.clone(), meta.clone()))
                 .collect::<Vec<_>>()
         };
-        self.register_items(&entries).await?;
+        self.register_current_items().await?;
         self.update_cache_time()?;
         Ok(entries)
     }
@@ -2240,68 +2226,152 @@ impl ServiceState {
         Ok(())
     }
 
-    pub(crate) async fn register_items(
-        self: &Arc<Self>,
-        entries: &[(String, ItemMeta)],
-    ) -> Result<(), FdoError> {
+    fn prepare_object_bus(&self, conn: &Connection) {
+        let identity = (
+            conn.server_guid().to_string(),
+            conn.unique_name()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
+        let mut bus = self
+            .cache
+            .object_bus
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bus.as_ref() != Some(&identity) {
+            self.cache
+                .registered_items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.cache
+                .registered_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            *bus = Some(identity);
+        }
+    }
+
+    pub(crate) async fn register_current_items(self: &Arc<Self>) -> Result<(), FdoError> {
+        let _objects = self.object_lock.lock().await;
         let conn = self.conn();
+        self.prepare_object_bus(&conn);
+        // Never register a caller's earlier snapshot after a concurrent delete.
+        let (_, snapshot) = self.change_snapshot();
+        self.register_items_inner(&conn, &snapshot).await
+    }
+
+    async fn register_items_inner(
+        self: &Arc<Self>,
+        conn: &Connection,
+        entries: &[ItemMeta],
+    ) -> Result<(), FdoError> {
         let server = conn.object_server();
-        let mut pending = Vec::new();
-        {
-            let registered = self.cache.registered_items.lock().map_err(|_| {
-                map_provider_error(ProviderError::Unavailable(
-                    "registered lock poisoned".to_string(),
-                ))
-            })?;
-            for (path, item) in entries {
-                if registered.contains(path) {
-                    continue;
-                }
-                pending.push((path.clone(), item.clone()));
+        for item in entries {
+            let path = make_item_path(&item.provider_id, &item.id);
+            let Some(provider) = self.provider_by_id(&item.provider_id) else {
+                continue;
+            };
+            let registered = self
+                .cache
+                .registered_items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&path);
+            let same_source = self
+                .cache
+                .registered_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&path)
+                .is_some_and(|old| old.ptr_eq(&Arc::downgrade(&provider)));
+            if registered && same_source {
+                continue;
             }
-        }
-
-        if pending.is_empty() {
-            return Ok(());
-        }
-
-        for (path, item) in &pending {
-            // Look up the correct provider for this item
-            let provider = self
-                .provider_by_id(&item.provider_id)
-                .or_else(|| self.providers_ordered().into_iter().next())
-                .ok_or_else(|| {
-                    map_provider_error(ProviderError::Unavailable(format!(
-                        "no provider found for item provider_id '{}'",
-                        item.provider_id
-                    )))
-                })?;
-            let return_attr_patterns = self.return_attr_patterns(&item.provider_id);
+            if registered {
+                match server.remove::<SecretItem, _>(path.as_str()).await {
+                    Ok(_) | Err(zbus::Error::InterfaceNotFound) => {}
+                    Err(e) => return Err(map_zbus_error(e)),
+                }
+            }
+            let source = Arc::downgrade(&provider);
             let state = ItemState {
                 meta: item.clone(),
                 path: path.clone(),
                 provider,
-                sessions: self.sessions.clone(),
-                return_attr_patterns,
+                sessions: Arc::clone(&self.sessions),
+                return_attr_patterns: self.return_attr_patterns(&item.provider_id),
                 tokio_handle: self.tokio_handle.clone(),
                 items_cache: Arc::clone(&self.cache.items),
                 service_state: Arc::clone(self),
             };
             server
-                .at(path.clone(), SecretItem::new(state))
+                .at(path.as_str(), SecretItem::new(state))
                 .await
                 .map_err(map_zbus_error)?;
-        }
-
-        let mut registered = self.cache.registered_items.lock().map_err(|_| {
-            map_provider_error(ProviderError::Unavailable(
-                "registered lock poisoned".to_string(),
-            ))
-        })?;
-        for (path, _) in pending {
-            registered.insert(path);
+            self.cache
+                .registered_items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(path.clone());
+            self.cache
+                .registered_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(path, source);
         }
         Ok(())
+    }
+
+    /// Use one connection for registration, deletion and notification even if
+    /// migration swaps the active connection while this operation is suspended.
+    pub(crate) async fn reconcile_item_objects(
+        self: &Arc<Self>,
+    ) -> Result<(Connection, u64, Vec<ItemMeta>), FdoError> {
+        let _objects = self.object_lock.lock().await;
+        let conn = self.conn();
+        self.prepare_object_bus(&conn);
+        let (revision, snapshot) = self.change_snapshot();
+        self.register_items_inner(&conn, &snapshot).await?;
+        let current: HashSet<_> = snapshot
+            .iter()
+            .map(|meta| make_item_path(&meta.provider_id, &meta.id))
+            .collect();
+        let removed: Vec<_> = self
+            .cache
+            .registered_items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|path| !current.contains(*path))
+            .cloned()
+            .collect();
+        for path in removed {
+            match conn
+                .object_server()
+                .remove::<SecretItem, _>(path.as_str())
+                .await
+            {
+                Ok(_) | Err(zbus::Error::InterfaceNotFound) => {}
+                Err(e) => return Err(map_zbus_error(e)),
+            }
+            self.cache
+                .registered_items
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&path);
+            self.cache
+                .registered_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&path);
+        }
+        Ok((conn, revision, snapshot))
+    }
+
+    pub(crate) fn wake_change_adapter(&self) {
+        self.change_revision.send_modify(|_| {});
     }
 
     #[cfg(test)]

@@ -79,6 +79,7 @@ pub async fn register_objects_with_full_config(
     ));
 
     register_all_objects(conn, &state).await?;
+    crate::change_adapter::start(&state);
 
     Ok(state)
 }
@@ -130,7 +131,6 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
     let collection_state = CollectionState {
         label: "default".to_string(),
         items: Arc::clone(&state.cache.items),
-        providers: state.providers_ordered(),
         service_state: Arc::clone(state),
         sessions: Arc::clone(&state.sessions),
         tokio_handle: tokio::runtime::Handle::current(),

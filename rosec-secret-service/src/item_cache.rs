@@ -17,7 +17,7 @@
 //! for direct lookup.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use rosec_core::ItemMeta;
@@ -29,6 +29,8 @@ pub struct ItemCache {
     pub(crate) domain: Mutex<DomainState>,
     /// Set of D-Bus item paths currently registered on the object server.
     pub registered_items: Arc<Mutex<HashSet<String>>>,
+    pub(crate) registered_sources: Mutex<HashMap<String, Weak<dyn rosec_core::Provider>>>,
+    pub(crate) object_bus: Mutex<Option<(String, String)>>,
     /// Timestamp of the last successful cache rebuild.
     pub last_sync: Arc<Mutex<Option<SystemTime>>>,
 }
@@ -41,6 +43,11 @@ impl ItemCache {
     /// Clear the registered-items set (used during bus migration so the
     /// caller can re-register items on the new connection).
     pub fn clear_registered(&self) {
+        *self.object_bus.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.registered_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if let Ok(mut g) = self.registered_items.lock() {
             g.clear();
         }
