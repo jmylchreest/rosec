@@ -1,8 +1,7 @@
+mod cli_compat;
 use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
-
-use clap::Parser;
 
 use anyhow::{Result, bail};
 use zbus::Connection;
@@ -51,13 +50,23 @@ async fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    let prepared = cli_compat::parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit());
+    if let Some(spec) = prepared.legacy {
+        use std::io::IsTerminal;
+        if let Some(message) = cli_compat::warning(spec, std::io::stderr().is_terminal()) {
+            eprintln!("{message}");
+        }
+    }
+    let cli = prepared.cli;
     if let Some(path) = cli.config {
         let _ = CONFIG_PATH.set(path);
     }
 
+    if let Some(request) = prepared.instance {
+        return provider::instance::run(request).await;
+    }
     match cli.command {
-        Commands::Provider { action } => provider::dispatch(action).await,
+        Commands::Provider { action, .. } => provider::dispatch(action).await,
         Commands::Config { action } => config::dispatch(action),
         Commands::Status => status::run().await,
         Commands::Sync => sync::run().await,

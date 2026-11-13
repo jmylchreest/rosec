@@ -1,0 +1,33 @@
+Provider command compatibility
+
+Preferred instance syntax:
+  rosec provider personal unlock [--force]
+  rosec provider personal status
+  rosec provider personal sync
+  rosec provider personal password add [--label LABEL]
+  rosec provider personal password remove ENTRY_ID
+  rosec provider personal password list
+  rosec provider personal password change
+
+Use `rosec provider --id auth unlock` when an ID matches a management command.
+Management commands (list, add, attach, detach, remove, enable, disable, kinds,
+validate) keep their current syntax. Top-level unlock, lock, status and sync
+are NOT deprecated and retain their service-wide behavior.
+
+The registry in src/cli_compat.rs owns deprecated spellings and replacement hints.
+Old/new instance spellings normalize into one ProviderRequest and run one handler.
+Warnings go to stderr only when stderr is a terminal; captured output is unchanged.
+--deny-deprecated rejects legacy invocation with exit status 2 before any operation,
+configuration loading, D-Bus connection or credential prompt. Help remains available.
+
+Release policy: deprecated_since is pending until this syntax first ships. Release
+preparation must fill the actual introducing version; do not infer it from a dev
+build version. No removal release is scheduled. Retain compatibility throughout
+the introducing minor release line, and announce any removal in a breaking release.
+Set remove_in for an announced deadline. At retirement set retired=true and keep
+the registry entry/command reservation, so an obsolete command cannot silently
+become a provider ID. Explicit --id selection continues to allow that ID.
+
+Do not add arbitrary plugin command execution. Future operations are typed groups
+with capability checks and consistent errors/output. External-subcommand capture
+is only used to parse a configured provider ID and the known instance operations.

@@ -18,6 +18,7 @@ pub mod attach;
 pub mod auth;
 pub mod change_password;
 pub mod detach;
+pub mod instance;
 pub mod kinds;
 pub mod list;
 pub mod list_passwords;
@@ -29,6 +30,7 @@ pub mod validate;
 pub async fn dispatch(action: Option<ProviderCommands>) -> Result<()> {
     let action = action.unwrap_or(ProviderCommands::List);
     match action {
+        ProviderCommands::Instance(_) => bail!("instance command was not normalized"),
         ProviderCommands::RestoreSnapshot {
             path,
             snapshot,
