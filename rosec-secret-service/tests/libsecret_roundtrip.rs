@@ -1,13 +1,20 @@
 //! Opt-in real libsecret interoperability against a disposable native vault.
+#[path = "../../tests/support/private_bus.rs"]
+mod private_bus;
+use private_bus::PrivateBus;
 use rosec_core::{Provider, UnlockInput};
 use std::sync::Arc;
 pub async fn setup(
+    bus: &PrivateBus,
     providers: Vec<Arc<dyn Provider>>,
 ) -> (
     zbus::Connection,
     Arc<rosec_secret_service::state::ServiceState>,
 ) {
-    let conn = zbus::Connection::session().await.unwrap();
+    let conn = zbus::connection::Builder::address(bus.address.as_str())
+        .build()
+        .await
+        .unwrap();
     let router = Arc::new(rosec_core::router::Router::new(
         rosec_core::router::RouterConfig {
             dedup_strategy: rosec_core::DedupStrategy::Priority,
@@ -26,8 +33,9 @@ pub async fn setup(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires private dbus-run-session and ROSEC_LIBSECRET_CLIENT"]
+#[ignore = "requires ROSEC_LIBSECRET_CLIENT and ROSEC_LIBSECRET_FIXTURE"]
 async fn native_vault_libsecret_roundtrip() {
+    let bus = PrivateBus::new();
     let root = std::env::var("ROSEC_LIBSECRET_FIXTURE").expect("isolated fixture directory");
     let vault = Arc::new(rosec_vault::LocalVault::new(
         "interop",
@@ -39,15 +47,17 @@ async fn native_vault_libsecret_roundtrip() {
         )))
         .await
         .unwrap();
-    let (server, _state) = setup(vec![vault.clone()]).await;
+    let (server, _state) = setup(&bus, vec![vault.clone()]).await;
     server
         .request_name("org.freedesktop.secrets")
         .await
         .unwrap();
     let client = std::env::var("ROSEC_LIBSECRET_CLIENT").unwrap();
+    let address = bus.address.clone();
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("timeout")
             .args(["45", &client])
+            .env("DBUS_SESSION_BUS_ADDRESS", address)
             .env("G_DBUS_DEBUG", "message")
             .output()
             .unwrap()

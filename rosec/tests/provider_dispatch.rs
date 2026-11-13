@@ -1,4 +1,7 @@
 //! Uses a private bus; no desktop service, real provider, or credentials are used.
+#[path = "../../tests/support/private_bus.rs"]
+mod private_bus;
+use private_bus::PrivateBus;
 use std::sync::{Arc, Mutex};
 type ProviderEntry = (
     String,
@@ -49,39 +52,6 @@ impl Fixture {
     fn sync_provider(&self, id: &str) -> u32 {
         self.calls.lock().unwrap().push(format!("sync:{id}"));
         7
-    }
-}
-struct PrivateBus {
-    child: std::process::Child,
-    address: String,
-}
-impl PrivateBus {
-    fn new() -> Self {
-        use std::io::BufRead;
-        let child = std::process::Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("start private test bus (requires dbus-daemon)");
-        let mut bus = Self {
-            child,
-            address: String::new(),
-        };
-        std::io::BufReader::new(bus.child.stdout.take().unwrap())
-            .read_line(&mut bus.address)
-            .expect("read private test bus address");
-        bus.address = bus.address.trim().to_owned();
-        assert!(
-            !bus.address.is_empty(),
-            "private test bus returned no address"
-        );
-        bus
-    }
-}
-impl Drop for PrivateBus {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 async fn run(bus: &PrivateBus, args: &[&str]) -> std::process::Output {
