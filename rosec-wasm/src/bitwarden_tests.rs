@@ -215,12 +215,22 @@ impl Drop for Server {
 async fn unlocked(server: &Server) -> WasmProvider {
     let wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../rosec-bitwarden-pm/target/wasm32-wasip1/release/rosec_bitwarden_pm.wasm");
+    let wasm_bytes =
+        Arc::new(std::fs::read(&wasm).expect("build the Bitwarden PM WASM guest first"));
+    // Production discovery probes the manifest before starting a sandboxed
+    // worker. This also creates Wasmtime's cache directory before Landlock
+    // grants access to it; a fresh CI runner has no pre-existing cache.
+    let mut probe = extism::Plugin::new(wasm_bytes.as_slice(), [], true).unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&probe.call::<_, Vec<u8>>("plugin_manifest", ()).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "bitwarden-pm");
+    drop(probe);
     let mut provider = WasmProvider::new(WasmProviderConfig {
         id: "bitwarden-sync-fixture".into(),
         name: "Fixture".into(),
         kind: "bitwarden-pm".into(),
         wasm_path: wasm.display().to_string(),
-        wasm_bytes: Arc::new(std::fs::read(wasm).expect("build the Bitwarden PM WASM guest first")),
+        wasm_bytes,
         // The hostname gates HTTP destinations; the URL also grants the
         // ephemeral fixture port in the worker's Landlock ruleset.
         allowed_hosts: vec!["127.0.0.1".into(), server.url.clone()],
