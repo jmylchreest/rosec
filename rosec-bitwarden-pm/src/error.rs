@@ -56,7 +56,8 @@ impl BitwardenError {
             Self::TwoFactorRequired { .. } => ErrorKind::TwoFactorRequired,
             Self::DeviceVerificationRequired => ErrorKind::RegistrationRequired,
             Self::Auth(_) | Self::Crypto(_) | Self::CipherParse(_) => ErrorKind::AuthFailed,
-            Self::Api(_) | Self::Http(_) => ErrorKind::Other,
+            Self::Http(_) => ErrorKind::Unavailable,
+            Self::Api(_) => ErrorKind::Other,
         }
     }
 }

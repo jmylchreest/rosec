@@ -61,6 +61,10 @@ jobs:
         if: matrix.provider == 'rosec-keepassxc-file'
         working-directory: .
         run: cargo test -p rosec-wasm --locked keepassxc_totp -- --ignored
+      - name: Verify Bitwarden sync recovery through the WASM host
+        if: matrix.provider == 'rosec-bitwarden-pm'
+        working-directory: .
+        run: cargo test -p rosec-wasm --locked bitwarden_sync -- --ignored
       - name: Verify Proton Pass production isolation
         if: matrix.provider == 'rosec-protonpass'
         run: PROTONPASS_WASM="$PWD/target/wasm32-wasip1/release/rosec_protonpass.wasm" cargo run --locked --example probe -- --check-production

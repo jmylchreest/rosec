@@ -2109,8 +2109,8 @@ pub fn auth_fields(_input: ()) -> FnResult<Json<AuthFieldsResponse>> {
 ///
 /// The host evaluates these natively (no WASM involved) before calling
 /// network-facing functions like `unlock`, `sync`, or
-/// `check_remote_changed`.  This prevents DNS/TLS failures from causing
-/// WASM traps that corrupt the plugin's internal state.
+/// `check_remote_changed`. This avoids unnecessary requests when connectivity
+/// is unavailable and lets the host attempt offline unlock promptly.
 ///
 /// For Bitwarden PM, the identity server is the first endpoint hit during
 /// unlock (prelogin + login).  If it's unreachable, there's no point

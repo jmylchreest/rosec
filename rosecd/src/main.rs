@@ -395,7 +395,9 @@ async fn run() -> Result<()> {
 /// (operating from its offline cache), the effective interval is
 /// `refresh_interval_secs × cache_sync_modifier` (default 0.2, i.e. 5×
 /// more frequent).  Once a sync succeeds and clears the `cached` flag, the
-/// provider reverts to its normal interval on the next tick.
+/// provider reverts to its normal interval on the next tick. Failures also
+/// enforce a shared retry cooldown (30 seconds, doubling to 5 minutes),
+/// including for remote notification nudges.
 ///
 /// Both `refresh_interval_secs` and `cache_sync_modifier` are read from
 /// live config on every tick, so config changes take effect without a restart.
@@ -477,84 +479,25 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                 );
             }
 
-            match provider.check_remote_changed().await {
+            // Remote checks and sync share a retry gate with notification
+            // nudges, so neither path can bypass a failed attempt's cooldown.
+            match state.check_and_sync_provider(&provider_id).await {
                 Ok(true) => {
-                    tracing::debug!(provider = %provider_id, "background: remote changed, syncing");
-                    match state.try_sync_provider(&provider_id).await {
-                        Ok(true) => {
-                            tracing::debug!(provider = %provider_id, "background: sync ok");
-                            did_any_work = true;
-                            provider_failures.remove(&provider_id);
-
-                            if status.cached {
-                                tracing::info!(
-                                    provider = %provider_id,
-                                    "provider recovered from cached mode after successful sync"
-                                );
-                            }
-                        }
-                        Ok(false) => {
-                            tracing::debug!(provider = %provider_id, "background: sync skipped (already in progress)");
-                        }
-                        Err(e) => {
-                            if handle_sync_auth_failure(&e, &provider, &provider_id).await {
-                                last_checked.remove(&provider_id);
-                                provider_failures.remove(&provider_id);
-                            } else {
-                                let pf = provider_failures.entry(provider_id.clone()).or_insert(0);
-                                log_background_failure(pf, Some(&provider_id), "sync", &e);
-                            }
-                        }
+                    tracing::debug!(provider = %provider_id, "background: sync ok");
+                    did_any_work = true;
+                    provider_failures.remove(&provider_id);
+                    if status.cached {
+                        tracing::info!(provider = %provider_id,
+                            "provider recovered from cached mode after successful sync");
                     }
                 }
                 Ok(false) => {
-                    tracing::debug!(provider = %provider_id, "background: no remote changes");
-                    provider_failures.remove(&provider_id);
-
-                    // If the provider is cached but probes passed (no remote
-                    // changes is still a successful probe), try syncing anyway
-                    // to refresh from the server and clear cached state.
-                    if status.cached {
-                        tracing::info!(
-                            provider = %provider_id,
-                            "background: provider cached but probes passed, forcing sync to recover"
-                        );
-                        match state.try_sync_provider(&provider_id).await {
-                            Ok(true) => {
-                                tracing::info!(
-                                    provider = %provider_id,
-                                    "provider recovered from cached mode after forced sync"
-                                );
-                                did_any_work = true;
-                                provider_failures.remove(&provider_id);
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    provider = %provider_id,
-                                    "background: forced sync skipped (already in progress)"
-                                );
-                            }
-                            Err(e) => {
-                                if handle_sync_auth_failure(&e, &provider, &provider_id).await {
-                                    last_checked.remove(&provider_id);
-                                    provider_failures.remove(&provider_id);
-                                } else {
-                                    let pf =
-                                        provider_failures.entry(provider_id.clone()).or_insert(0);
-                                    log_background_failure(
-                                        pf,
-                                        Some(&provider_id),
-                                        "forced sync (cached recovery)",
-                                        &e,
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    tracing::debug!(provider = %provider_id,
+                        "background: sync skipped (unchanged, busy, locked, or retry delayed)");
                 }
                 Err(e) => {
-                    tracing::debug!(provider = %provider_id, error = %e,
-                        "background: remote-changed check failed, skipping sync");
+                    let pf = provider_failures.entry(provider_id.clone()).or_insert(0);
+                    log_background_failure(pf, Some(&provider_id), "check/sync", &e);
                 }
             }
         }
@@ -575,42 +518,6 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
             consecutive_failures = 0;
         }
     }
-}
-
-/// Handle `auth_failed` errors from background sync.
-///
-/// When a sync attempt fails with `auth_failed`, the provider's session is
-/// unrecoverable in the background (the refresh token has expired or been
-/// revoked).  Lock the provider so the next user interaction triggers a
-/// normal unlock prompt — exactly as if it were a fresh start.
-///
-/// Returns `true` if the error was `auth_failed` and the provider was
-/// locked, `false` for all other errors (caller should handle normally).
-async fn handle_sync_auth_failure(
-    error: &zbus::fdo::Error,
-    provider: &Arc<dyn Provider>,
-    provider_id: &str,
-) -> bool {
-    let err_str = error.to_string();
-    if !err_str.contains("auth_failed") {
-        return false;
-    }
-
-    tracing::warn!(
-        provider = %provider_id,
-        "background sync failed with auth_failed — session is unrecoverable, \
-         locking provider to trigger re-unlock on next access"
-    );
-
-    if let Err(lock_err) = provider.lock().await {
-        tracing::error!(
-            provider = %provider_id,
-            error = %lock_err,
-            "failed to lock provider after auth_failed"
-        );
-    }
-
-    true
 }
 
 /// Auto-lock policy loop: evaluates idle-timeout and max-unlocked policies for
@@ -1365,7 +1272,7 @@ fn wire_provider_callbacks(
                     match s.try_sync_provider(&id).await {
                         Ok(true) => tracing::debug!(provider = %id, "remote nudge: sync triggered"),
                         Ok(false) => {
-                            tracing::debug!(provider = %id, "remote nudge: sync already in progress")
+                            tracing::debug!(provider = %id, "remote nudge: sync skipped (busy, locked, or retry delayed)")
                         }
                         Err(e) => {
                             tracing::debug!(provider = %id, error = %e, "remote nudge: sync trigger failed")

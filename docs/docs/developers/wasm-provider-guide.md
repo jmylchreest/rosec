@@ -128,19 +128,36 @@ is lost.
 | Source | Examples | Guest can prevent? |
 |--------|----------|--------------------|
 | Guest panic | `.unwrap()` on `None`/`Err`, array OOB, explicit `panic!()` | **Yes** |
-| HTTP host function | DNS failure, TLS error, URL parse error, response too large | Partially (readiness probes prevent most) |
-| Timeout | Extism epoch interrupt (60s default) | Avoid long computations |
+| HTTP host function | Disallowed destination, invalid request, response too large | Validate requests and bound responses |
+| Execution timeout | Extism epoch interrupt (180s default; 60s for Proton Pass) | Avoid long computations |
 | OOM | WASM linear memory exhausted | Avoid unbounded allocations |
 | Variable store | `var_set` when store is full | Check capacity |
 
-**Traps from HTTP are the most common cause of corruption in practice.**
-The Extism PDK's `http::request()` calls an Extism host function that uses
-`ureq`.  Any non-HTTP-status error (DNS, TLS, connection refused, timeout)
-causes the host function to `bail!()`, which becomes a WASM trap.  The guest
-never gets a chance to handle the error.
+### Recoverable HTTP failures
 
-This is why readiness probes exist: they let the host check connectivity
-*before* calling guest functions that would trigger HTTP.
+rosec overrides Extism's HTTP host functions. DNS, TLS, connection failures,
+request timeouts, and interrupted response bodies return status `0`, an empty
+body, and no headers. Check `response.status_code()` even when `http::request()`
+returns `Ok`. Status `0` means no complete response was received; return an
+application error with `error_kind: Unavailable` and retain the current vault.
+The host marks failed syncs as cached and retries through background sync.
+
+Scheduled remote-change checks and notification-triggered syncs share one
+per-provider retry gate. A failed attempt delays further automatic requests
+for 30 seconds, doubling after consecutive failures up to 5 minutes. The
+delay starts when the attempt finishes, and concurrent triggers are skipped.
+Successful sync or a fresh unlock resets the backoff; manual sync can bypass
+the delay. Cached-mode scheduling does not bypass this gate.
+
+Temporary server responses such as HTTP 429 and 5xx should also be recoverable.
+Reserve `AuthFailed` for confirmed credential rejection, since the daemon locks
+providers on that error. Bitwarden refresh uses the structured `invalid_grant`
+response to identify an unusable refresh credential.
+Credential rejection stops automatic retries until a fresh unlock or successful
+manual sync, even if the provider's lock operation fails.
+
+Policy violations, response-size limits, cancellation, and expiry of the whole
+guest execution deadline still fail the WASM call and discard the instance.
 
 ## Readiness probes
 
@@ -148,8 +165,9 @@ This is why readiness probes exist: they let the host check connectivity
 
 Readiness probes are declarative connectivity checks that the host evaluates
 natively (no WASM execution) before calling network-facing guest functions.
-They prevent WASM traps caused by network unavailability (e.g. after
-laptop resume from sleep before WiFi reconnects).
+They avoid unnecessary guest calls and allow prompt offline-cache fallback
+when the network is unavailable, such as after laptop resume before WiFi reconnects.
+A successful probe does not guarantee that a later request will succeed.
 
 ### How to declare them
 
@@ -421,7 +439,8 @@ keep a compatible encrypted backup before downgrading.
 The shared runtime requires Rust 1.96. Default guest calls retain a 180-second
 execution limit for slow KeePass KDFs; callers allow another five seconds. Proton
 uses 60/65 seconds and an 8 MiB response cap. Blocking HTTP requests have a
-10-second cap within the guest execution deadline. Cancellation or timeout
+10-second cap within the guest execution deadline. A request timeout returns
+the recoverable status `0` described above. Cancellation or execution timeout
 invalidates pending calls and the entire authentication generation, including
 credential replay. Queue saturation returns `unavailable` without blocking Tokio.
 

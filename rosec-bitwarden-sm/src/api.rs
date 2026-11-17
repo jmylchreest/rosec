@@ -26,6 +26,16 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::crypto::{decrypt_field_opt, decrypt_org_key, derive_token_enc_key};
 use crate::error::SmError;
 
+// Status zero is the host's recoverable transport-failure response.
+fn check_http_status(status: u16) -> Result<(), SmError> {
+    match status {
+        0 | 408 | 429 | 500..=599 => Err(SmError::Http(format!(
+            "server unavailable (status {status})"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A parsed Bitwarden SM access token.
 ///
 /// Token format: `0.{access_token_id}.{client_secret}:{base64_16_byte_enc_key}`
@@ -244,6 +254,7 @@ pub fn login(urls: &SmUrls, token: &AccessToken) -> Result<LoginResponse, SmErro
         .map_err(|e| SmError::Http(format!("SM login request: {e}")))?;
 
     let status = resp.status_code();
+    check_http_status(status)?;
     if !(200..300).contains(&status) {
         let text = String::from_utf8_lossy(&resp.body()).to_string();
         return Err(SmError::Api(format!("SM login failed ({status}): {text}")));
@@ -276,6 +287,7 @@ pub fn list_secrets(
         .map_err(|e| SmError::Http(format!("SM list secrets request: {e}")))?;
 
     let status = resp.status_code();
+    check_http_status(status)?;
     if !(200..300).contains(&status) {
         let text = String::from_utf8_lossy(&resp.body()).to_string();
         return Err(SmError::Api(format!(
@@ -319,6 +331,7 @@ pub fn get_secrets_by_ids(
         .map_err(|e| SmError::Http(format!("SM get secrets request: {e}")))?;
 
     let status = resp.status_code();
+    check_http_status(status)?;
     if !(200..300).contains(&status) {
         let text = String::from_utf8_lossy(&resp.body()).to_string();
         return Err(SmError::Api(format!(
@@ -398,6 +411,7 @@ pub fn check_secrets_changed(
         .map_err(|e| SmError::Http(format!("SM sync check request: {e}")))?;
 
     let status = resp.status_code();
+    check_http_status(status)?;
     if !(200..300).contains(&status) {
         let text = String::from_utf8_lossy(&resp.body()).to_string();
         return Err(SmError::Api(format!(
@@ -505,6 +519,16 @@ pub fn fetch_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_http_failures_are_unavailable() {
+        for status in [0, 408, 429, 500, 502, 503, 504] {
+            assert!(matches!(
+                check_http_status(status).unwrap_err().to_error_kind(),
+                crate::protocol::ErrorKind::Unavailable
+            ));
+        }
+    }
 
     #[test]
     fn parse_access_token_ok() {

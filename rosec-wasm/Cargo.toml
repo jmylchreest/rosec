@@ -51,6 +51,7 @@ sign = ["dep:minisign"]
 
 [dev-dependencies]
 minisign = { workspace = true }
+pbkdf2 = { workspace = true }
 
 [build-dependencies]
 serde_json = { workspace = true }
