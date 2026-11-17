@@ -30,6 +30,16 @@ struct HttpState {
     headers: BTreeMap<String, String>,
 }
 
+impl HttpState {
+    fn clear_response(&mut self) {
+        self.status = 0;
+        for value in self.headers.values_mut() {
+            value.zeroize();
+        }
+        self.headers.clear();
+    }
+}
+
 impl Drop for HttpState {
     fn drop(&mut self) {
         for value in self.headers.values_mut() {
@@ -188,14 +198,7 @@ fn http_request_inner(
     let state_arc = get_state(&user_data)?;
     let agent = lock_state(&state_arc)?.agent.clone();
 
-    {
-        let mut state = lock_state(&state_arc)?;
-        state.status = 0;
-        for value in state.headers.values_mut() {
-            value.zeroize();
-        }
-        state.headers.clear();
-    }
+    lock_state(&state_arc)?.clear_response();
 
     let http_req_offset = input[0].unwrap_i64() as u64;
     let handle = match data.memory_handle(http_req_offset) {
@@ -284,44 +287,46 @@ fn http_request_inner(
                 }
             }
             state.status = res.status().as_u16();
-            Some(res.into_body().into_reader())
+            res.into_body().into_reader()
         }
-        Err(e) => {
-            if let Some(d) = data.time_remaining()
-                && matches!(e, ureq::Error::Timeout(_))
-                && d.as_nanos() == 0
-            {
-                anyhow::bail!("timeout");
-            }
-
-            if let ureq::Error::StatusCode(status) = e {
-                lock_state(&state_arc)?.status = status;
-                None
-            } else {
-                return Err(extism::Error::msg("HTTP transport failed"));
-            }
-        }
+        Err(_) => return transport_failure(data, output, &state_arc),
     };
 
-    if let Some(reader) = reader {
-        let mut buf = Zeroizing::new(Vec::new());
-        let max = data
-            .manifest()
-            .memory
-            .max_http_response_bytes
-            .unwrap_or(DEFAULT_MAX_HTTP_RESPONSE_BYTES);
-        reader.take(max + 1).read_to_end(&mut buf)?;
-
-        if buf.len() > max as usize {
-            anyhow::bail!("HTTP response exceeds the configured maximum number of bytes: {max}");
-        }
-
-        let mem = data.memory_new(buf.as_slice())?;
-        output[0] = Val::I64(mem.offset() as i64);
-    } else {
-        output[0] = Val::I64(0);
+    let mut buf = Zeroizing::new(Vec::new());
+    let max = data
+        .manifest()
+        .memory
+        .max_http_response_bytes
+        .unwrap_or(DEFAULT_MAX_HTTP_RESPONSE_BYTES);
+    if reader.take(max + 1).read_to_end(&mut buf).is_err() {
+        // Headers may already report success, but an incomplete body must
+        // never reach the guest as a successful response.
+        return transport_failure(data, output, &state_arc);
     }
 
+    if buf.len() > max as usize {
+        anyhow::bail!("HTTP response exceeds the configured maximum number of bytes: {max}");
+    }
+
+    let mem = data.memory_new(buf.as_slice())?;
+    output[0] = Val::I64(mem.offset() as i64);
+    Ok(())
+}
+
+/// Status zero means no complete HTTP response. Returning normally lets the
+/// guest retain its vault and report a recoverable sync failure. A host error
+/// would trap across the WASM boundary, bypassing guest error handling and
+/// forcing the worker to discard the entire unlocked instance.
+fn transport_failure(
+    data: &mut CurrentPlugin,
+    output: &mut [Val],
+    state: &std::sync::Arc<std::sync::Mutex<HttpState>>,
+) -> Result<(), extism::Error> {
+    lock_state(state)?.clear_response();
+    if data.time_remaining().is_some_and(|d| d.is_zero()) {
+        anyhow::bail!("timeout");
+    }
+    output[0] = Val::I64(0);
     Ok(())
 }
 
@@ -362,8 +367,17 @@ mod tests {
     const HTTP_GUEST: &str = r#"(module
         (import "extism:host/env" "input_offset" (func $input (result i64)))
         (import "extism:host/env" "http_request" (func $http (param i64 i64) (result i64)))
+        (import "extism:host/env" "http_status_code" (func $status (result i32)))
+        (import "extism:host/env" "http_headers" (func $headers (result i64)))
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
         (import "extism:host/env" "length" (func $length (param i64) (result i64)))
         (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (func (export "metadata") (result i32) (local $p i64)
+            i64.const 2 call $alloc local.set $p
+            local.get $p call $status call $store
+            local.get $p i64.const 1 i64.add call $headers i64.eqz call $store
+            local.get $p i64.const 2 call $output i32.const 0)
         (func (export "request") (result i32) (local $response i64)
             call $input i64.const 0 call $http local.set $response
             local.get $response local.get $response call $length call $output
@@ -425,6 +439,41 @@ mod tests {
         let mut p = plugin(64, std::time::Duration::from_secs(2));
         let error = request(&mut p, "https://denied.invalid/?token=synthetic-secret").unwrap_err();
         assert!(!error.to_string().contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn incomplete_response_discards_body_status_and_headers() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Secret: synthetic\r\nConnection: close\r\n\r\npartial").unwrap();
+        });
+        let mut p = plugin(2048, std::time::Duration::from_secs(2));
+        assert!(request(&mut p, &url).unwrap().is_empty());
+        // Status is zero and http_headers returns the empty sentinel.
+        assert_eq!(p.call::<_, Vec<u8>>("metadata", ()).unwrap(), [0, 1]);
+        task.join().unwrap();
+        let (url, task) = server("complete", std::time::Duration::ZERO);
+        assert_eq!(request(&mut p, &url).unwrap(), b"complete");
+        assert_eq!(p.call::<_, Vec<u8>>("metadata", ()).unwrap(), [200, 0]);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn connection_failure_returns_empty_transport_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut p = plugin(64, std::time::Duration::from_secs(2));
+        assert!(request(&mut p, &url).unwrap().is_empty());
+        assert_eq!(p.call::<_, Vec<u8>>("metadata", ()).unwrap(), [0, 1]);
     }
 
     #[test]

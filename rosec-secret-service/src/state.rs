@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ExitStatus};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Cap how long we'll wait for a prompt subprocess. 120 s is comfortably past
 /// any human interaction window; beyond that the prompt is hung and we kill
@@ -34,6 +34,7 @@ use crate::item_cache::ItemCache;
 use crate::lock_policy::LockPolicy;
 use crate::prompt_manager::PromptManager;
 use crate::provider_registry::ProviderRegistry;
+use crate::sync_backoff::SyncBackoff;
 use rosec_core::dedup::is_stale;
 use rosec_core::router::Router;
 use rosec_core::{
@@ -1805,23 +1806,63 @@ impl ServiceState {
     /// Return (or lazily create) the per-provider `tokio::sync::Mutex` used to
     /// coalesce concurrent sync operations.
     ///
-    /// Two sync callers for the same provider will share one `Arc<Mutex<()>>`.
+    /// Two sync callers for the same provider share a mutex and retry state.
     /// An `await` caller serialises behind the in-flight sync; a `try_lock`
     /// caller (background timer, SignalR nudge) skips without redundant work.
-    fn sync_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn sync_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<SyncBackoff>> {
         self.locks.sync_mutex_for(provider_id)
+    }
+
+    /// Apply retry policy while the sync guard is held, before converting the
+    /// typed provider error to a D-Bus error. All triggers share this path.
+    async fn sync_failed(
+        &self,
+        provider: &Arc<dyn Provider>,
+        retry: &mut SyncBackoff,
+        error: ProviderError,
+    ) -> FdoError {
+        let auth_failed = matches!(error, ProviderError::AuthFailed);
+        let delay = retry.failed(Instant::now(), auth_failed);
+        if auth_failed {
+            warn!(
+                provider = provider.id(),
+                "sync credentials rejected; locking provider until re-unlock"
+            );
+            match provider.lock().await {
+                Ok(()) => {
+                    if self
+                        .provider_by_id(provider.id())
+                        .is_some_and(|current| Arc::ptr_eq(&current, provider))
+                    {
+                        self.clear_provider_unlocked(provider.id());
+                        self.mark_provider_locked_in_cache(provider.id());
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(provider = provider.id(), %error,
+                        "failed to lock provider after credential rejection; automatic retries remain disabled");
+                }
+            }
+        } else {
+            debug!(
+                provider = provider.id(),
+                retry_after_secs = delay.as_secs(),
+                "sync failed; automatic attempts delayed"
+            );
+        }
+        map_provider_error(error)
     }
 
     /// Sync a specific provider against the remote server, then rebuild the cache.
     ///
     /// Uses a per-provider mutex to coalesce concurrent calls:
     /// - The caller **awaits** the lock, so if another sync is already running
-    ///   it blocks until that one finishes (and returns immediately after,
-    ///   since the cache is now fresh).
+    ///   it blocks until that one finishes before attempting the requested sync.
     /// - Background callers (timer, SignalR) should use `try_sync_provider`
     ///   instead to skip rather than wait.
     ///
     /// Dispatches to Tokio so that network and cache futures run on the Tokio reactor.
+    /// Manual requests bypass the automatic retry delay; success resets it.
     pub async fn sync_provider(self: &Arc<Self>, provider_id: &str) -> Result<u32, FdoError> {
         let provider = self
             .provider_by_id(provider_id)
@@ -1835,9 +1876,13 @@ impl ServiceState {
         let provider_id = provider_id.to_string();
         self.tokio_handle
             .spawn(async move {
-                let _sync_guard = sync_guard; // held until task completes
+                let mut sync_guard = sync_guard; // held until task completes
                 this.ensure_provider_unlocked(&provider_id).await?;
-                provider.sync().await.map_err(map_provider_error)?;
+                sync_guard.observe_unlock(this.locks.provider_unlocked_at(&provider_id));
+                if let Err(error) = provider.sync().await {
+                    return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
+                }
+                sync_guard.succeeded();
                 let entries = this.rebuild_cache_inner().await?;
                 // Count only items belonging to this provider.
                 let count = entries
@@ -1851,15 +1896,34 @@ impl ServiceState {
     }
 
     /// Attempt a background sync for a specific provider, skipping if one is
-    /// already in progress.
+    /// already in progress, locked, or waiting for its retry cooldown.
     ///
     /// Intended for callers that have nothing to gain from waiting — the
     /// background refresh timer and the SignalR notification handler.  If a
     /// sync is already running the in-flight result will be fresh enough; no
     /// duplicate HTTP request is issued.
     ///
-    /// Returns `true` if a sync was started, `false` if one was already running.
+    /// Returns `true` on sync success, `false` when skipped. Temporary failures
+    /// back off for 30 seconds, doubling up to 5 minutes. Authentication failures
+    /// disable automatic retries until a fresh unlock or successful manual sync.
     pub async fn try_sync_provider(self: &Arc<Self>, provider_id: &str) -> Result<bool, FdoError> {
+        self.try_sync_provider_inner(provider_id, false).await
+    }
+
+    /// Scheduled variant of `try_sync_provider`: check for remote changes
+    /// under the same mutex and cooldown before deciding whether to sync.
+    pub async fn check_and_sync_provider(
+        self: &Arc<Self>,
+        provider_id: &str,
+    ) -> Result<bool, FdoError> {
+        self.try_sync_provider_inner(provider_id, true).await
+    }
+
+    async fn try_sync_provider_inner(
+        self: &Arc<Self>,
+        provider_id: &str,
+        check_remote: bool,
+    ) -> Result<bool, FdoError> {
         let provider = self
             .provider_by_id(provider_id)
             .ok_or_else(|| FdoError::Failed(format!("provider '{provider_id}' not found")))?;
@@ -1881,15 +1945,40 @@ impl ServiceState {
         let provider_id = provider_id.to_string();
         self.tokio_handle
             .spawn(async move {
-                let _sync_guard = sync_guard; // held until task completes
-                this.ensure_provider_unlocked(&provider_id).await?;
-                provider.sync().await.map_err(map_provider_error)?;
+                let mut sync_guard = sync_guard; // held until task completes
+                sync_guard.observe_unlock(this.locks.provider_unlocked_at(&provider_id));
+                if !sync_guard.ready(Instant::now()) {
+                    return Ok(false);
+                }
+                let status = match provider.status().await {
+                    Ok(status) => status,
+                    Err(error) => {
+                        return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
+                    }
+                };
+                if status.locked {
+                    return Ok(false);
+                }
+                if check_remote {
+                    match provider.check_remote_changed().await {
+                        Ok(false) if !status.cached && !sync_guard.has_failures() => {
+                            return Ok(false);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
+                        }
+                    }
+                }
+                if let Err(error) = provider.sync().await {
+                    return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
+                }
+                sync_guard.succeeded();
                 this.rebuild_cache_inner().await?;
-                Ok::<_, FdoError>(())
+                Ok(true)
             })
             .await
             .map_err(|e| FdoError::Failed(format!("sync task panicked: {e}")))?
-            .map(|_| true)
     }
 
     /// Ensure a *single* provider is unlocked.
@@ -2563,16 +2652,33 @@ impl ServiceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use rosec_core::router::RouterConfig;
     use rosec_core::{ProviderStatus, SecretBytes, UnlockInput};
+
+    #[derive(Debug, Default)]
+    struct MockSync {
+        sync_results: std::sync::Mutex<VecDeque<Result<(), ProviderError>>>,
+        check_results: std::sync::Mutex<VecDeque<Result<bool, ProviderError>>>,
+        sync_calls: AtomicUsize,
+        check_calls: AtomicUsize,
+        lock_calls: AtomicUsize,
+        locked: AtomicBool,
+        lock_fails: AtomicBool,
+        block_sync: AtomicBool,
+        sync_started: tokio::sync::Notify,
+        sync_resume: tokio::sync::Notify,
+    }
 
     #[derive(Debug)]
     struct MockProvider {
         items: Vec<ItemMeta>,
         id: String,
         caps: &'static [Capability],
+        sync: Option<Arc<MockSync>>,
     }
 
     impl MockProvider {
@@ -2581,6 +2687,7 @@ mod tests {
                 items,
                 id: "mock".to_string(),
                 caps: &[],
+                sync: None,
             }
         }
 
@@ -2591,7 +2698,19 @@ mod tests {
                 items: Vec::new(),
                 id: id.to_string(),
                 caps,
+                sync: None,
             }
+        }
+
+        fn syncable(id: &str) -> (Arc<Self>, Arc<MockSync>) {
+            let sync = Arc::new(MockSync::default());
+            let provider = Arc::new(Self {
+                items: vec![],
+                id: id.to_string(),
+                caps: &[Capability::Sync],
+                sync: Some(Arc::clone(&sync)),
+            });
+            (provider, sync)
         }
     }
 
@@ -2615,7 +2734,10 @@ mod tests {
 
         async fn status(&self) -> Result<ProviderStatus, ProviderError> {
             Ok(ProviderStatus {
-                locked: false,
+                locked: self
+                    .sync
+                    .as_ref()
+                    .is_some_and(|s| s.locked.load(Ordering::SeqCst)),
                 last_sync: None,
                 cached: false,
                 offline_cache: false,
@@ -2624,11 +2746,47 @@ mod tests {
         }
 
         async fn unlock(&self, _input: UnlockInput) -> Result<(), ProviderError> {
+            if let Some(sync) = &self.sync {
+                sync.locked.store(false, Ordering::SeqCst);
+            }
             Ok(())
         }
 
         async fn lock(&self) -> Result<(), ProviderError> {
+            if let Some(sync) = &self.sync {
+                sync.lock_calls.fetch_add(1, Ordering::SeqCst);
+                if sync.lock_fails.load(Ordering::SeqCst) {
+                    return Err(ProviderError::Unavailable("lock fixture".into()));
+                }
+                sync.locked.store(true, Ordering::SeqCst);
+            }
             Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), ProviderError> {
+            let sync = self.sync.as_ref().ok_or(ProviderError::NotSupported)?;
+            sync.sync_calls.fetch_add(1, Ordering::SeqCst);
+            if sync.block_sync.load(Ordering::SeqCst) {
+                sync.sync_started.notify_one();
+                sync.sync_resume.notified().await;
+            }
+            sync.sync_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+
+        async fn check_remote_changed(&self) -> Result<bool, ProviderError> {
+            let Some(sync) = &self.sync else {
+                return Ok(true);
+            };
+            sync.check_calls.fetch_add(1, Ordering::SeqCst);
+            sync.check_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(true))
         }
 
         async fn list_items(&self) -> Result<Vec<ItemMeta>, ProviderError> {
@@ -2720,6 +2878,178 @@ mod tests {
             conn,
             tokio::runtime::Handle::current(),
         ))
+    }
+
+    #[tokio::test]
+    async fn sync_cooldown_is_shared_by_timer_and_nudges_but_manual_sync_can_recover() {
+        let (provider, control) = MockProvider::syncable("mock");
+        let (healthy, healthy_control) = MockProvider::syncable("healthy");
+        control
+            .sync_results
+            .lock()
+            .unwrap()
+            .push_back(Err(ProviderError::Unavailable("temporary outage".into())));
+        let state = state_with(vec![provider, healthy]).await;
+
+        assert!(state.try_sync_provider("mock").await.is_err());
+        for _ in 0..20 {
+            assert!(!state.check_and_sync_provider("mock").await.unwrap());
+            assert!(!state.try_sync_provider("mock").await.unwrap());
+        }
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(control.lock_calls.load(Ordering::SeqCst), 0);
+        assert!(state.check_and_sync_provider("healthy").await.unwrap());
+        assert_eq!(healthy_control.sync_calls.load(Ordering::SeqCst), 1);
+
+        // An explicit request bypasses the delay and success clears it for
+        // subsequent automatic work, including the remote-change check.
+        state.sync_provider("mock").await.unwrap();
+        assert!(state.check_and_sync_provider("mock").await.unwrap());
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 1);
+        assert!(!state.sync_mutex_for("mock").lock().await.has_failures());
+    }
+
+    #[tokio::test]
+    async fn sync_cooldown_covers_failed_remote_checks_and_unlock_resets_it() {
+        let (provider, control) = MockProvider::syncable("mock");
+        control
+            .check_results
+            .lock()
+            .unwrap()
+            .push_back(Err(ProviderError::Unavailable("check outage".into())));
+        let state = state_with(vec![provider]).await;
+        assert!(state.check_and_sync_provider("mock").await.is_err());
+        assert!(!state.check_and_sync_provider("mock").await.unwrap());
+        assert!(!state.try_sync_provider("mock").await.unwrap());
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 0);
+
+        state
+            .auth_provider(
+                "mock",
+                HashMap::from([("password".into(), Zeroizing::new("fixture-password".into()))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 1);
+        assert!(state.check_and_sync_provider("mock").await.unwrap());
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_retries_after_cooldown_even_if_remote_reports_unchanged() {
+        let (provider, control) = MockProvider::syncable("mock");
+        control
+            .check_results
+            .lock()
+            .unwrap()
+            .extend([Ok(false), Ok(false)]);
+        let state = state_with(vec![provider]).await;
+        assert!(!state.check_and_sync_provider("mock").await.unwrap());
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 0);
+
+        // Seed a completed failure whose cooldown has already elapsed.
+        state
+            .sync_mutex_for("mock")
+            .lock()
+            .await
+            .failed(Instant::now() - Duration::from_secs(31), false);
+        assert!(state.check_and_sync_provider("mock").await.unwrap());
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 1);
+        assert!(!state.sync_mutex_for("mock").lock().await.has_failures());
+    }
+
+    #[tokio::test]
+    async fn sync_auth_failure_stops_all_automatic_paths_even_if_lock_fails() {
+        for check_failure in [false, true] {
+            for lock_fails in [false, true] {
+                let (provider, control) = MockProvider::syncable("mock");
+                control.lock_fails.store(lock_fails, Ordering::SeqCst);
+                if check_failure {
+                    control
+                        .check_results
+                        .lock()
+                        .unwrap()
+                        .push_back(Err(ProviderError::AuthFailed));
+                } else {
+                    control
+                        .sync_results
+                        .lock()
+                        .unwrap()
+                        .push_back(Err(ProviderError::AuthFailed));
+                }
+                let state = state_with(vec![provider]).await;
+                state.mark_provider_unlocked("mock");
+                let result = if check_failure {
+                    state.check_and_sync_provider("mock").await
+                } else {
+                    state.try_sync_provider("mock").await
+                };
+                assert!(result.unwrap_err().to_string().contains("auth_failed"));
+                for _ in 0..3 {
+                    assert!(!state.check_and_sync_provider("mock").await.unwrap());
+                    assert!(!state.try_sync_provider("mock").await.unwrap());
+                }
+                assert_eq!(control.lock_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(control.locked.load(Ordering::SeqCst), !lock_fails);
+                assert_eq!(
+                    control.check_calls.load(Ordering::SeqCst),
+                    usize::from(check_failure)
+                );
+                let syncs = usize::from(!check_failure);
+                assert_eq!(control.sync_calls.load(Ordering::SeqCst), syncs);
+                assert!(
+                    !state
+                        .sync_mutex_for("mock")
+                        .lock()
+                        .await
+                        .ready(Instant::now() + Duration::from_secs(86_400),)
+                );
+
+                state
+                    .auth_provider(
+                        "mock",
+                        HashMap::from([(
+                            "password".into(),
+                            Zeroizing::new("fixture-password".into()),
+                        )]),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(control.sync_calls.load(Ordering::SeqCst), syncs + 1);
+                assert!(!control.locked.load(Ordering::SeqCst));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_coalesces_checks_and_nudges_until_failure_sets_cooldown() {
+        let (provider, control) = MockProvider::syncable("mock");
+        control.block_sync.store(true, Ordering::SeqCst);
+        control
+            .sync_results
+            .lock()
+            .unwrap()
+            .push_back(Err(ProviderError::Unavailable("delayed failure".into())));
+        let state = state_with(vec![provider]).await;
+        let background_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { background_state.try_sync_provider("mock").await });
+        tokio::time::timeout(Duration::from_secs(5), control.sync_started.notified())
+            .await
+            .unwrap();
+        assert!(!state.check_and_sync_provider("mock").await.unwrap());
+        assert!(!state.try_sync_provider("mock").await.unwrap());
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 1);
+
+        control.sync_resume.notify_one();
+        assert!(first.await.unwrap().is_err());
+        assert!(!state.check_and_sync_provider("mock").await.unwrap());
+        assert!(!state.try_sync_provider("mock").await.unwrap());
+        assert_eq!(control.check_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(control.sync_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

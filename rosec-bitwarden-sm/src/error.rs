@@ -25,9 +25,8 @@ impl SmError {
     /// Map this error to a protocol `ErrorKind` for the host.
     pub fn to_error_kind(&self) -> ErrorKind {
         match self {
-            Self::Api(_) | Self::Crypto(_) | Self::InvalidToken(_) | Self::Http(_) => {
-                ErrorKind::Other
-            }
+            Self::Http(_) => ErrorKind::Unavailable,
+            Self::Api(_) | Self::Crypto(_) | Self::InvalidToken(_) => ErrorKind::Other,
         }
     }
 }

@@ -95,6 +95,7 @@ impl ApiClient {
             .map_err(|e| BitwardenError::Http(format!("prelogin request: {e}")))?;
 
         let status = resp.status_code();
+        check_http_status(status)?;
         if !(200..300).contains(&status) {
             let text = resp.body();
             let text_str = String::from_utf8_lossy(&text);
@@ -181,6 +182,7 @@ impl ApiClient {
         form_body.zeroize();
 
         let status = resp.status_code();
+        check_http_status(status)?;
         let body = Zeroizing::new(resp.body());
         let body_str = std::str::from_utf8(&body)
             .map_err(|_| BitwardenError::Api("invalid login response encoding".into()))?;
@@ -269,6 +271,7 @@ impl ApiClient {
         form_body.zeroize();
 
         let status = resp.status_code();
+        check_http_status(status)?;
         if !(200..300).contains(&status) {
             let body = resp.body();
             let body_str = String::from_utf8_lossy(&body);
@@ -311,12 +314,9 @@ impl ApiClient {
         form_body.zeroize();
 
         let status = resp.status_code();
+        check_http_status(status)?;
         if !(200..300).contains(&status) {
-            let body = resp.body();
-            let body_str = String::from_utf8_lossy(&body);
-            return Err(BitwardenError::Auth(format!(
-                "token refresh failed ({status}): {body_str}"
-            )));
+            return Err(refresh_error(status, &resp.body()));
         }
 
         let refresh: RefreshResponse = serde_json::from_slice(&resp.body())
@@ -344,6 +344,7 @@ impl ApiClient {
             .map_err(|e| BitwardenError::Http(format!("sync request: {e}")))?;
 
         let status = resp.status_code();
+        check_http_status(status)?;
         if status == 401 {
             return Err(BitwardenError::Auth("access token expired".to_string()));
         }
@@ -369,6 +370,32 @@ impl ApiClient {
         );
 
         Ok(sync)
+    }
+}
+
+// The host uses status zero when no complete response was received. Temporary
+// HTTP failures must not be mistaken for rejected credentials during login or
+// refresh, since AuthFailed causes the daemon to lock the provider.
+fn check_http_status(status: u16) -> Result<(), BitwardenError> {
+    match status {
+        0 | 408 | 429 | 500..=599 => Err(BitwardenError::Http(format!(
+            "server unavailable (status {status})"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn refresh_error(status: u16, body: &[u8]) -> BitwardenError {
+    // Only a structured rejection of this grant establishes that the refresh
+    // credential is unusable. Proxy errors and unexpected responses do not.
+    let rejected = matches!(status, 400 | 401 | 403)
+        && serde_json::from_slice::<LoginErrorResponse>(body)
+            .is_ok_and(|error| error.error.as_deref() == Some("invalid_grant"));
+    let message = format!("token refresh failed ({status})");
+    if rejected {
+        BitwardenError::Auth(message)
+    } else {
+        BitwardenError::Api(message)
     }
 }
 
@@ -775,7 +802,40 @@ pub struct SyncField {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginErrorResponse, LoginResponse};
+    use super::{LoginErrorResponse, LoginResponse, check_http_status, refresh_error};
+
+    #[test]
+    fn temporary_http_failures_are_unavailable() {
+        for status in [0, 408, 429, 500, 502, 503, 504] {
+            let error = check_http_status(status).unwrap_err();
+            assert!(matches!(
+                error.to_error_kind(),
+                crate::protocol::ErrorKind::Unavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn refresh_requires_confirmed_grant_rejection_to_fail_authentication() {
+        let error = refresh_error(400, br#"{"error":"invalid_grant"}"#);
+        assert!(matches!(
+            error.to_error_kind(),
+            crate::protocol::ErrorKind::AuthFailed
+        ));
+        for (status, body) in [
+            (400, "not JSON"),
+            (400, r#"{"error":"invalid_client"}"#),
+            (403, "proxy rejection"),
+            (404, r#"{"error":"invalid_grant"}"#),
+        ] {
+            let error = refresh_error(status, body.as_bytes());
+            assert!(matches!(
+                error.to_error_kind(),
+                crate::protocol::ErrorKind::Other
+            ));
+            assert!(!error.to_string().contains(body));
+        }
+    }
 
     /// Bitwarden SaaS returns provider codes as JSON strings: `["0","7","3"]`.
     #[test]

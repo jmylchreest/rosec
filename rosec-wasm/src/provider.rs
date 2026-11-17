@@ -2075,6 +2075,10 @@ fn leak_auth_field(w: crate::protocol::WasmAuthField) -> AuthField {
 }
 
 #[cfg(test)]
+#[path = "bitwarden_tests.rs"]
+mod bitwarden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{ErrorKind, TwoFactorMethod as ProtoTwoFactorMethod};

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::sync_backoff::SyncBackoff;
+
 #[derive(Default)]
 pub struct LockPolicy {
     /// Timestamp of the last client activity (D-Bus method call).
@@ -24,7 +26,7 @@ pub struct LockPolicy {
     /// from racing.
     unlock_in_progress: tokio::sync::Mutex<()>,
     /// Per-provider mutex coalescing concurrent `sync_provider` callers.
-    sync_in_progress: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    sync_in_progress: Mutex<HashMap<String, Arc<tokio::sync::Mutex<SyncBackoff>>>>,
 }
 
 impl LockPolicy {
@@ -143,14 +145,23 @@ impl LockPolicy {
         self.unlock_in_progress.lock().await
     }
 
-    /// Get or create a per-provider Tokio mutex for serialising sync calls.
-    pub fn sync_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn provider_unlocked_at(&self, provider_id: &str) -> Option<SystemTime> {
+        self.unlocked_since_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(provider_id)
+            .copied()
+    }
+
+    /// Get or create a per-provider mutex for serialising sync calls and
+    /// sharing retry state between all sync triggers.
+    pub(crate) fn sync_mutex_for(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<SyncBackoff>> {
         let mut map = self
             .sync_in_progress
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         map.entry(provider_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(SyncBackoff::default())))
             .clone()
     }
 }

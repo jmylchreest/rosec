@@ -4843,6 +4843,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "notify",
+ "pbkdf2 0.13.0",
  "rand 0.10.3",
  "rosec-core",
  "semver",
