@@ -99,6 +99,12 @@ Controls vault caching and deduplication behaviour.
 | `wasm_verify` | string | `"required"` | Provider authenticity verification: `"required"` (signature or embedded package hashes) or `"disabled"` (local plugin development only). |
 | `wasm_trusted_key` | array of tables | `[]` | Additional trust anchors for WASM plugin signatures. See [Trusted plugin signing keys](#trusted-plugin-signing-keys). |
 
+Inventory metadata refreshes when confirmed changes are published. A separate
+60-second reconciliation discovers missed notifications and changes from providers
+without notifications. This reconciliation reads provider state; it does not
+itself request a remote vault sync. Remote sync scheduling continues to use
+`refresh_interval_secs`. Successful unlocks and syncs also refresh the inventory.
+
 ### Trusted plugin signing keys
 
 By default a WASM plugin only loads when its bundle is signed by a rosec

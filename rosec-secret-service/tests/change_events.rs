@@ -118,3 +118,21 @@ async fn removal_during_refresh_cannot_resurrect_the_removed_provider() {
     assert!(task.await.unwrap().is_empty());
     assert!(state.change_snapshot().1.is_empty());
 }
+
+#[tokio::test]
+async fn count_only_refresh_commits_changes_and_preserves_locked_items() {
+    let provider = MutableProvider::new("a");
+    provider.put("one", "one");
+    let (_conn, state) = setup(vec![provider.clone()]).await;
+    assert_eq!(state.refresh_cache().await.unwrap(), 1);
+    let revision = state.change_snapshot().0;
+    assert_eq!(state.refresh_cache().await.unwrap(), 1);
+    assert_eq!(state.change_snapshot().0, revision);
+    provider.put("two", "two");
+    assert_eq!(state.refresh_cache().await.unwrap(), 1);
+    assert!(state.change_snapshot().0 > revision);
+    state.mark_provider_locked_in_cache("a");
+    provider.fail.store(true, Ordering::SeqCst);
+    assert_eq!(state.refresh_cache().await.unwrap(), 1);
+    assert!(state.change_snapshot().1.iter().all(|item| item.locked));
+}

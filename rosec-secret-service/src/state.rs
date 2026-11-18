@@ -1329,7 +1329,7 @@ impl ServiceState {
                 // libsecret clients overwrite their entries.
                 if let Err(e) = this.try_sync_provider(&provider_id).await {
                     warn!(provider = %provider_id, "post-auth sync failed: {e}");
-                    if let Err(rebuild_err) = this.rebuild_cache_inner().await {
+                    if let Err(rebuild_err) = this.refresh_cache_inner().await {
                         warn!(
                             provider = %provider_id,
                             error = %rebuild_err,
@@ -1883,11 +1883,15 @@ impl ServiceState {
                     return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
                 }
                 sync_guard.succeeded();
-                let entries = this.rebuild_cache_inner().await?;
-                // Count only items belonging to this provider.
-                let count = entries
-                    .iter()
-                    .filter(|(_, meta)| meta.provider_id == provider_id)
+                this.refresh_cache_inner().await?;
+                // Count only items belonging to this provider without copying metadata.
+                let count = this
+                    .cache
+                    .items
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .filter(|meta| meta.provider_id == provider_id)
                     .count() as u32;
                 Ok(count)
             })
@@ -1974,7 +1978,7 @@ impl ServiceState {
                     return Err(this.sync_failed(&provider, &mut sync_guard, error).await);
                 }
                 sync_guard.succeeded();
-                this.rebuild_cache_inner().await?;
+                this.refresh_cache_inner().await?;
                 Ok(true)
             })
             .await
@@ -2008,6 +2012,15 @@ impl ServiceState {
             .spawn(async move { this.rebuild_cache_inner().await })
             .await
             .map_err(|e| FdoError::Failed(format!("cache rebuild task panicked: {e}")))?
+    }
+
+    /// Refresh the inventory without cloning it for callers that only need a count.
+    pub async fn refresh_cache(self: &Arc<Self>) -> Result<usize, FdoError> {
+        let this = Arc::clone(self);
+        self.tokio_handle
+            .spawn(async move { this.refresh_cache_inner().await })
+            .await
+            .map_err(|e| FdoError::Failed(format!("cache refresh task panicked: {e}")))?
     }
 
     pub(crate) async fn ensure_cache_inner(
@@ -2048,6 +2061,18 @@ impl ServiceState {
     pub(crate) async fn rebuild_cache_inner(
         self: &Arc<Self>,
     ) -> Result<Vec<(String, ItemMeta)>, FdoError> {
+        self.refresh_cache_inner().await?;
+        Ok(self
+            .cache
+            .items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(path, meta)| (path.clone(), meta.clone()))
+            .collect())
+    }
+
+    async fn refresh_cache_inner(self: &Arc<Self>) -> Result<usize, FdoError> {
         let _refresh = self.events.refresh_guard().await;
         let epoch = self.events.begin_refresh();
         let outcomes = self.fetch_entries().await?;
@@ -2055,17 +2080,14 @@ impl ServiceState {
             self.router
                 .dedup(inventory.items(), &self.registry.order_snapshot())
         });
-        let entries = self
+        self.register_current_items().await?;
+        self.update_cache_time()?;
+        Ok(self
             .cache
             .items
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(path, meta)| (path.clone(), meta.clone()))
-            .collect();
-        self.register_current_items().await?;
-        self.update_cache_time()?;
-        Ok(entries)
+            .len())
     }
 
     async fn fetch_entries(&self) -> Result<Vec<(String, RefreshOutcome)>, FdoError> {

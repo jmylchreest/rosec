@@ -42,5 +42,6 @@ private-socket = ["dep:busd"]
 console = ["dep:console-subscriber"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 husky-rs = { workspace = true }

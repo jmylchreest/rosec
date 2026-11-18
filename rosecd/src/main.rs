@@ -139,7 +139,7 @@ async fn run() -> Result<()> {
     // Populate the cache before claiming the bus name so the first
     // SearchItems sees sidecar entries — otherwise Chromium-based clients
     // race in, read empty, and overwrite their libsecret entries.
-    if let Err(e) = state.rebuild_cache().await {
+    if let Err(e) = state.refresh_cache().await {
         tracing::warn!(error = %e, "initial cache rebuild failed");
     }
 
@@ -353,8 +353,9 @@ async fn run() -> Result<()> {
         });
     }
 
-    let cache_rebuild_state = Arc::clone(&state);
-    tokio::spawn(background_sync_loop(cache_rebuild_state));
+    tokio::spawn(background_sync_loop(Arc::clone(&state)));
+    let revisions = state.subscribe_changes();
+    tokio::spawn(inventory_refresh_loop(Arc::clone(&state), revisions));
 
     // Auto-lock policy background task.
     // Reads autolock settings from live_config on every tick so changes to the
@@ -385,7 +386,7 @@ async fn run() -> Result<()> {
 }
 
 /// Background sync loop: periodically checks each unlocked provider for remote
-/// changes, syncs when needed, and rebuilds the item cache as a safety net.
+/// changes and syncs when needed. Inventory reconciliation runs separately.
 ///
 /// **Per-provider scheduling:** Each provider tracks its own last-checked
 /// timestamp.  The loop ticks every [`SYNC_TICK_SECS`] seconds and only
@@ -407,7 +408,6 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
     use std::collections::HashMap;
     use std::time::Instant;
 
-    let mut consecutive_failures = 0u32;
     // Per-provider tracking: last time we checked, and per-provider failure
     // counter for log suppression.
     let mut last_checked: HashMap<String, Instant> = HashMap::new();
@@ -419,8 +419,6 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
         let config = state.live_config();
         let base_interval_secs = config.service.refresh_interval_secs.unwrap_or(60);
         let now = Instant::now();
-
-        let mut did_any_work = false;
 
         for provider in state.providers_ordered() {
             let provider_id = provider.id().to_string();
@@ -484,7 +482,6 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
             match state.check_and_sync_provider(&provider_id).await {
                 Ok(true) => {
                     tracing::debug!(provider = %provider_id, "background: sync ok");
-                    did_any_work = true;
                     provider_failures.remove(&provider_id);
                     if status.cached {
                         tracing::info!(provider = %provider_id,
@@ -501,22 +498,40 @@ async fn background_sync_loop(state: Arc<rosec_secret_service::ServiceState>) {
                 }
             }
         }
+    }
+}
 
-        // Safety-net rebuild: keep the in-process item cache consistent
-        // even if no per-provider sync ran.
-        if !did_any_work {
-            match state.rebuild_cache().await {
-                Ok(entries) => {
-                    tracing::debug!("background cache rebuild: {} items", entries.len());
-                    consecutive_failures = 0;
-                }
-                Err(err) => {
-                    log_background_failure(&mut consecutive_failures, None, "cache rebuild", &err);
-                }
-            }
-        } else {
-            consecutive_failures = 0;
+/// Confirmed changes wake reconciliation immediately. Periodic reconciliation
+/// still discovers changes from providers without notifications. Consume wakeups
+/// before refreshing: a concurrent mutation must remain pending for another pass.
+const INVENTORY_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn inventory_refresh_loop(
+    state: Arc<rosec_secret_service::ServiceState>,
+    mut revisions: tokio::sync::watch::Receiver<u64>,
+) {
+    let mut failures = 0;
+    loop {
+        if !wait_for_inventory_refresh(&mut revisions, INVENTORY_RECONCILE_INTERVAL).await {
+            return;
         }
+        match state.refresh_cache().await {
+            Ok(count) => {
+                tracing::debug!("background cache rebuild: {count} items");
+                failures = 0;
+            }
+            Err(err) => log_background_failure(&mut failures, None, "cache rebuild", &err),
+        }
+    }
+}
+
+async fn wait_for_inventory_refresh(
+    revisions: &mut tokio::sync::watch::Receiver<u64>,
+    fallback: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        result = revisions.changed() => result.is_ok(),
+        () = tokio::time::sleep(fallback) => true,
     }
 }
 
@@ -1743,7 +1758,7 @@ async fn log_non_provider_section_changes(
     if dedup_changed {
         tracing::info!("hot-reload: rebuilding cache for new dedup/ordering config");
         let state2 = Arc::clone(state);
-        if let Err(e) = state2.rebuild_cache().await {
+        if let Err(e) = state2.refresh_cache().await {
             tracing::warn!(error = %e, "hot-reload: cache rebuild failed after dedup config change");
         }
     }
@@ -2118,6 +2133,40 @@ fn load_or_create_device_id() -> String {
 #[cfg(test)]
 mod tests {
     use rosec_wasm::policy::extract_host_from_url;
+
+    #[tokio::test(start_paused = true)]
+    async fn inventory_refresh_waits_for_change_or_sixty_second_fallback() {
+        let (tx, mut rx) = tokio::sync::watch::channel(0u64);
+        let start = tokio::time::Instant::now();
+        {
+            let wait =
+                super::wait_for_inventory_refresh(&mut rx, super::INVENTORY_RECONCILE_INTERVAL);
+            tokio::pin!(wait);
+            tokio::select! {
+                _ = &mut wait => panic!("unchanged inventory refreshed on the old five-second cadence"),
+                () = tokio::time::sleep(std::time::Duration::from_secs(59)) => {}
+            }
+            assert!(wait.await);
+            assert_eq!(start.elapsed(), std::time::Duration::from_secs(60));
+        }
+        tx.send_replace(1);
+        let start = tokio::time::Instant::now();
+        assert!(
+            super::wait_for_inventory_refresh(&mut rx, super::INVENTORY_RECONCILE_INTERVAL).await
+        );
+        assert!(start.elapsed().is_zero());
+        // A change arriving during a refresh remains pending, even if watch coalesces it.
+        tx.send_replace(2);
+        tx.send_replace(3);
+        assert!(
+            super::wait_for_inventory_refresh(&mut rx, super::INVENTORY_RECONCILE_INTERVAL).await
+        );
+        assert_eq!(*rx.borrow(), 3);
+        drop(tx);
+        assert!(
+            !super::wait_for_inventory_refresh(&mut rx, super::INVENTORY_RECONCILE_INTERVAL).await
+        );
+    }
 
     #[test]
     fn extract_host_from_base_url() {

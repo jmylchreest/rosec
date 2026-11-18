@@ -191,16 +191,16 @@ impl<K: Eq + Hash> EventCoordinator<K> {
             }
         }
         let visible = project(&domain.inventory);
-        items.clear();
-        for meta in &visible {
-            items.insert((self.key)(meta), meta.clone());
-        }
         domain.epoch += 1;
         if let Some(batch) = domain
             .journal
             .commit_with_provider_changes(&visible, &inventory_changes)
         {
             self.revision.send_replace(batch.revision);
+        }
+        items.clear();
+        for meta in visible {
+            items.insert((self.key)(&meta), meta);
         }
         for provider in changed {
             if let Some(batch) = domain.journal.invalidate_provider(&provider) {
