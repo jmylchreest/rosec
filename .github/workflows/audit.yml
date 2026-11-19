@@ -8,7 +8,7 @@ on:
         description: Runner backend
         type: choice
         options: [hosted, arc]
-        default: hosted
+        default: arc
       source_sha:
         description: Exact source commit supplied by the fallback router
         type: string
@@ -26,11 +26,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Trusted pushes/schedules/dispatches use ephemeral homelab ARC runners.
+# Pull requests stay on GitHub-hosted runners; no fork code runs in the homelab.
 jobs:
   audit:
     name: cargo audit
     if: ${{ !inputs.source_sha || inputs.source_sha == github.workflow_sha }}
-    runs-on: ${{ github.event_name != 'pull_request' && inputs.backend == 'arc' && 'rosec-linux' || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name != 'pull_request' && inputs.backend != 'hosted' && 'rosec-linux' || 'ubuntu-latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

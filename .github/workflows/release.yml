@@ -14,13 +14,15 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Trusted pushes/schedules/dispatches use ephemeral homelab ARC runners.
+# Pull requests stay on GitHub-hosted runners; no fork code runs in the homelab.
 jobs:
   # ---------------------------------------------------------------------------
   # Determine version and whether to skip (commit already tagged for release)
   # ---------------------------------------------------------------------------
   prepare:
     name: Prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_tag: ${{ steps.version.outputs.version_tag }}
@@ -133,7 +135,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.cross && 'ubuntu-latest' || 'rosec-linux' }}
     needs:
       - prepare
       - ci
@@ -159,7 +161,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        if: matrix.cross == false
+        if: matrix.cross == false && runner.environment == 'github-hosted'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -250,7 +252,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-wasm:
     name: Build WASM Providers
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - ci
@@ -407,7 +409,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-sbom:
     name: Generate SBOM
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - ci
@@ -417,6 +419,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -453,7 +456,7 @@ jobs:
   # ---------------------------------------------------------------------------
   snapshot:
     name: Snapshot Release
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - build
@@ -514,7 +517,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - build

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "ci/arc-defaults-20261119"]
   pull_request:
   workflow_call: {}
 
@@ -12,10 +12,12 @@ env:
 
 # Keep dependency installation on a known OS release rather than allowing
 # ubuntu-latest migrations to change the runner and APT repositories implicitly.
+# Trusted pushes/schedules/dispatches use ephemeral homelab ARC runners.
+# Pull requests stay on GitHub-hosted runners; no fork code runs in the homelab.
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -35,7 +37,7 @@ jobs:
         run: dbus-run-session -- cargo test --workspace --locked
 
       - name: Install libsecret interoperability test dependencies
-        if: hashFiles('tests/libsecret_roundtrip.sh') != ''
+        if: runner.environment == 'github-hosted' && hashFiles('tests/libsecret_roundtrip.sh') != ''
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
 
       - name: Test real libsecret interoperability
@@ -44,7 +46,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -67,7 +69,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -89,7 +91,7 @@ jobs:
     if: needs.scope.outputs.providers == 'true'
   msrv:
     name: MSRV
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -130,7 +132,7 @@ jobs:
 
   docs:
     name: Docusaurus
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     defaults:
       run:
         working-directory: docs
@@ -157,7 +159,7 @@ jobs:
       - scope
     if: needs.scope.outputs.docs == 'true'
   scope:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     outputs:
       providers: ${{ steps.scope.outputs.providers }}
       docs: ${{ steps.scope.outputs.docs }}
@@ -190,7 +192,7 @@ jobs:
           fi
   complete:
     name: CI complete
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     needs:
       - scope
       - test

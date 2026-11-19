@@ -9,10 +9,12 @@ env:
 
 # Keep dependency installation on a known OS release rather than allowing
 # ubuntu-latest migrations to change the runner and APT repositories implicitly.
+# Trusted pushes/schedules/dispatches use ephemeral homelab ARC runners.
+# Pull requests stay on GitHub-hosted runners; no fork code runs in the homelab.
 jobs:
   provider:
     name: ${{ matrix.provider }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
