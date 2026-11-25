@@ -16,10 +16,9 @@ name = "rosec-uhid"
 path = "src/bin/broker.rs"
 
 [dependencies]
-rosec-core = { path = "../rosec-core" }
 anyhow = { workspace = true }
 libc = { workspace = true }
-nix = { version = "0.31", features = ["socket", "uio", "user", "fs"] }
+nix = { version = "0.32", features = ["socket", "uio", "user", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
@@ -29,12 +28,8 @@ coset = "0.4"
 sha2 = { workspace = true }
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 ed25519-dalek = { version = "3", features = ["pkcs8", "pem", "rand_core"] }
-# rsa stays 0.9: it is the only signing crate not yet on rand_core 0.9, but
-# RS256 here is assertion-only (deterministic PKCS#1 v1.5 signing needs no
-# RNG), so its transitive rand_core 0.6 never reaches our code.
-rsa = { version = "0.9", features = ["sha2"] }
-# For makeCredential keypair generation (ES256/EdDSA); rand_core 0.9 matches
-# p256 0.14 / ed25519-dalek 3.
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+# For makeCredential keypair generation (ES256/EdDSA).
 rand = { workspace = true }
 async-trait = { workspace = true }
 

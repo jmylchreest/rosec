@@ -59,7 +59,7 @@ jobs:
       # Excluded WASM provider crates carry their own lockfiles. cargo-audit
       # only reads a cwd-local .cargo/audit.toml, so the accepted advisories
       # are passed explicitly (see .cargo/audit.toml for the rationale):
-      #   RUSTSEC-2023-0071  rsa "Marvin" — no upstream fix (via ssh-key)
+      #   RUSTSEC-2023-0071  rsa "Marvin" in the KeePassXC SSH stack
       - name: Audit WASM provider crates
         run: |
           for crate in rosec-bitwarden-pm rosec-bitwarden-sm rosec-gnome-keyring rosec-keepassxc-file rosec-protonpass; do
@@ -69,9 +69,9 @@ jobs:
             # criteria are recorded in .cargo/audit.toml and PR #69.
             extra_ignores=()
             if [[ "$crate" == rosec-keepassxc-file ]]; then
-              extra_ignores+=(--ignore RUSTSEC-2026-0387)
+              extra_ignores+=(--ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2023-0071)
             fi
-            (cd "${crate}" && cargo audit --ignore RUSTSEC-2023-0071 "${extra_ignores[@]}")
+            (cd "${crate}" && cargo audit "${extra_ignores[@]}")
             echo "::endgroup::"
           done
 

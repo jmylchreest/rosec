@@ -163,7 +163,7 @@ network request fails. Cancellation/traps may prevent remote logout; lock does n
 revoke the registered PAT. Worker cancellation, timeout and malformed responses
 invalidate the guest before later requests can access its state.
 
-The host now uses Extism 1.41.0 / Wasmtime 49.0.2 and requires Rust 1.96 or newer.
+The host uses Extism 1.41.0 with Wasmtime 49.0.7 and requires Rust 1.96 or newer.
 Both host and guest cap Proton responses at 8 MiB. Guest execution is capped at
 60 seconds, caller waits at 65 seconds, and individual HTTP operations at 10 seconds.
 Secret cleanup covers owned guest allocations and rosec transport buffers, but

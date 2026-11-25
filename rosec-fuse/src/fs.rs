@@ -28,8 +28,15 @@ where
         self.0.access(req, ino, mask, reply);
     }
 
-    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.0.open(req, ino, flags, reply);
+    fn open(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        flags: OpenFlags,
+        kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
+        self.0.open(req, ino, flags, kill_suid_gid, reply);
     }
 
     fn opendir(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {

@@ -22,7 +22,7 @@ Source-build alternatives: `rosec` (release source) or `rosec-git` (latest `main
 
 ## Build from source
 
-Requires Rust 1.96+ and a `wasm32-wasip1` target for the WASM provider crates.
+Building the full project requires Rust 1.96 or newer and the `wasm32-wasip1` target. The standalone Bitwarden PM, Bitwarden SM, GNOME Keyring and KeePassXC providers can also be built with Rust 1.89.
 
 ```bash
 git clone https://github.com/jmylchreest/rosec
