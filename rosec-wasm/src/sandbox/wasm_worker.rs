@@ -27,11 +27,11 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::host_watch::WatchEvent;
-use crate::protocol::ReadinessProbe;
+use crate::protocol::{LockResponse, ReadinessProbe, ResumeSession, SimpleResponse, UnlockRequest};
 use crate::provider::{
-    CallOutcome, GUEST_CALL_TIMEOUT, call_guest_json, call_guest_json_no_input, init_guest,
-    query_attribute_descriptors, query_auth_fields, query_capabilities, query_readiness_probes,
-    query_registration_info,
+    CallOutcome, GUEST_CALL_TIMEOUT, call_guest_json, call_guest_json_no_input,
+    call_guest_json_sensitive, init_guest, query_attribute_descriptors, query_auth_fields,
+    query_capabilities, query_readiness_probes, query_registration_info,
 };
 
 // The guest and HTTP execution deadline expires before the caller deadline.
@@ -41,6 +41,8 @@ const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(185);
 struct Control {
     generation: u64,
     preserve_for_lock: bool,
+    // A successful lock can hand off a session across guest recreation.
+    resume_session: Option<ResumeSession>,
     next_id: u64,
     active: Option<(u64, extism::CancelHandle)>,
 }
@@ -320,10 +322,10 @@ impl WasmWorker {
         }
     }
 
-    /// Fence queued operations, let an idle guest revoke its session, then
+    /// Fence queued operations, let an idle guest clean up its session, then
     /// discard the instance regardless of cleanup success. Active execution is
     /// cancelled and discarded first; remote cleanup is best effort in that case.
-    pub(crate) async fn lock(&self) -> Result<crate::protocol::SimpleResponse, ProviderError> {
+    pub(crate) async fn lock(&self) -> Result<SimpleResponse, ProviderError> {
         struct LockGuard<'a>(&'a WasmWorker);
         impl Drop for LockGuard<'_> {
             fn drop(&mut self) {
@@ -331,7 +333,7 @@ impl WasmWorker {
             }
         }
         let _guard = LockGuard(self);
-        {
+        let generation = {
             let mut c = self.control.lock().unwrap_or_else(|e| e.into_inner());
             c.generation = c.generation.wrapping_add(1);
             c.preserve_for_lock = c.active.is_none();
@@ -339,10 +341,45 @@ impl WasmWorker {
                 let _ = handle.cancel();
             }
             let _ = self.wake.try_send(());
-        }
-        self.call(move |p| {
-            let (result, _) = call_guest_json_no_input(p, "lock");
+            c.generation
+        };
+        let control = Arc::clone(&self.control);
+        self.call_for_generation(generation, move |plugin| {
+            let (result, _) = call_guest_json_no_input::<LockResponse>(plugin, "lock");
+            let result = result.map(|response| {
+                let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
+                if c.generation == generation
+                    && response.result.ok
+                    && let Some(session) = response.resume_session
+                {
+                    c.resume_session = Some(session);
+                }
+                response.result
+            });
             (result, CallOutcome::PluginCallFailed)
+        })
+        .await
+    }
+
+    pub(crate) async fn unlock(
+        &self,
+        generation: u64,
+        mut request: UnlockRequest,
+    ) -> Result<SimpleResponse, ProviderError> {
+        let control = Arc::clone(&self.control);
+        self.call_for_generation(generation, move |plugin| {
+            {
+                let mut c = control.lock().unwrap_or_else(|e| e.into_inner());
+                if c.generation != generation {
+                    return (Err(ProviderError::Locked), CallOutcome::Clean);
+                }
+                // Refresh may rotate the credential, so submit it at most once.
+                let session = c.resume_session.take();
+                if request.registration_fields.is_none() && request.auth_fields.is_none() {
+                    request.resume_session = session;
+                }
+            }
+            call_guest_json_sensitive(plugin, "unlock", &request)
         })
         .await
     }

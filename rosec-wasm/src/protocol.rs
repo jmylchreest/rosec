@@ -34,12 +34,30 @@ pub struct StatusResponse {
     pub last_sync_epoch_secs: Option<u64>,
 }
 
+/// Session handed from a locking guest to the next instance, in memory only.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ResumeSession {
+    pub refresh_token: zeroize::Zeroizing<String>,
+    pub protected_key: zeroize::Zeroizing<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LockResponse {
+    #[serde(flatten)]
+    pub result: SimpleResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session: Option<ResumeSession>,
+}
+
 /// Sent to `unlock`.
 ///
 /// `Debug` is manually implemented to redact `password`,
 /// `registration_fields`, and `auth_fields` (which may contain secrets).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UnlockRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session: Option<ResumeSession>,
+
     /// Optional base64-encoded provider authentication state from its separate
     /// encrypted auth store. Must never contain vault items or vault keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]

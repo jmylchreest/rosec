@@ -850,6 +850,7 @@ impl Provider for WasmProvider {
 
         let req = match &input {
             UnlockInput::Password(pw) => UnlockRequest {
+                resume_session: None,
                 auth_state_b64,
                 password: pw.as_str().to_owned(),
                 registration_fields: None,
@@ -859,6 +860,7 @@ impl Provider for WasmProvider {
                 password,
                 registration_fields,
             } => UnlockRequest {
+                resume_session: None,
                 auth_state_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: Some(fields_to_plain(registration_fields)),
@@ -868,6 +870,7 @@ impl Provider for WasmProvider {
                 password,
                 auth_fields,
             } => UnlockRequest {
+                resume_session: None,
                 auth_state_b64,
                 password: password.as_str().to_owned(),
                 registration_fields: None,
@@ -879,13 +882,8 @@ impl Provider for WasmProvider {
 
         // Argon2 unlock can run for tens of seconds; dispatching to the worker
         // thread keeps the daemon's tokio runtime responsive throughout.
-        let req_for_call = req;
-        let result: Result<SimpleResponse, ProviderError> = self
-            .worker
-            .call_for_generation(generation, move |plugin| {
-                call_guest_json_sensitive::<_, SimpleResponse>(plugin, "unlock", &req_for_call)
-            })
-            .await;
+        let result: Result<SimpleResponse, ProviderError> =
+            self.worker.unlock(generation, req).await;
 
         // If the guest requires registration and none was provided, try
         // loading stored credentials from a previous session.
@@ -913,6 +911,7 @@ impl Provider for WasmProvider {
                             // whatever field names the provider registered with (e.g.
                             // "access_token" for SM, "client_id"/"client_secret" for PM).
                             let retry_req = UnlockRequest {
+                                resume_session: None,
                                 auth_state_b64: None,
                                 password: password_ref.as_str().to_owned(),
                                 registration_fields: Some(fields_to_plain(&stored_fields)),

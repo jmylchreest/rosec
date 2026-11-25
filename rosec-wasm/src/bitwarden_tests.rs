@@ -212,7 +212,7 @@ impl Drop for Server {
     }
 }
 
-async fn unlocked(server: &Server) -> WasmProvider {
+fn fixture_provider(server: &Server) -> WasmProvider {
     let wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../rosec-bitwarden-pm/target/wasm32-wasip1/release/rosec_bitwarden_pm.wasm");
     let wasm_bytes =
@@ -250,17 +250,22 @@ async fn unlocked(server: &Server) -> WasmProvider {
         unlock_timeout_secs: 30,
     })
     .unwrap();
-    // Exercise the production guest's password login while avoiding host-side
-    // credential persistence and unrelated readiness/notification requests.
     provider.readiness_probes.clear();
     provider.capabilities = &[Capability::Sync];
-    let response: SimpleResponse = provider
-        .worker
-        .call_json("unlock", json!({"password": PASSWORD}))
+    provider
+}
+
+async fn unlock(provider: &WasmProvider) {
+    provider
+        .unlock(UnlockInput::Password(Zeroizing::new(PASSWORD.to_owned())))
         .await
         .unwrap();
-    assert!(response.ok, "{response:?}");
-    assert_accessible(&provider).await;
+    assert_accessible(provider).await;
+}
+
+async fn unlocked(server: &Server) -> WasmProvider {
+    let provider = fixture_provider(server);
+    unlock(&provider).await;
     provider
 }
 
@@ -271,6 +276,57 @@ async fn assert_accessible(provider: &WasmProvider) {
         .await
         .unwrap();
     assert_eq!(secret.as_slice(), b"fixture-secret");
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled Bitwarden PM WASM guest; run in provider CI"]
+async fn bitwarden_sync_online_unlock_resumes_after_lock() {
+    let (login, sync) = fixture();
+    let mut steps = initial_steps(login.clone(), &sync);
+    for (token, refresh, fallback) in [
+        (
+            "grant_type=refresh_token&client_id=cli&refresh_token=initial-refresh",
+            Reply::Json(
+                200,
+                json!({
+                    "access_token": "new-access", "refresh_token": "rotated-refresh"
+                }),
+            ),
+            None,
+        ),
+        (
+            "grant_type=refresh_token&client_id=cli&refresh_token=rotated-refresh",
+            Reply::Json(400, json!({"error": "invalid_grant"})),
+            Some(login),
+        ),
+    ] {
+        steps.push_back(Step {
+            path: "/identity/accounts/prelogin",
+            body_contains: EMAIL,
+            reply: Reply::Json(200, json!({"kdf": 0, "kdfIterations": 1})),
+        });
+        steps.push_back(Step {
+            path: "/identity/connect/token",
+            body_contains: token,
+            reply: refresh,
+        });
+        if let Some(login) = fallback {
+            steps.push_back(Step {
+                path: "/identity/connect/token",
+                body_contains: "grant_type=password",
+                reply: Reply::Json(200, login),
+            });
+        }
+        steps.push_back(sync_step(Reply::Json(200, sync.clone())));
+    }
+
+    let server = Server::new(steps);
+    let provider = unlocked(&server).await;
+    for _ in 0..2 {
+        provider.lock().await.unwrap();
+        assert!(provider.status().await.unwrap().locked);
+        unlock(&provider).await;
+    }
 }
 
 #[tokio::test]

@@ -310,6 +310,7 @@ mod tests {
             std::fs::write(&vault_path, b"VAULT-PASSWORD-MARKER").unwrap();
             save("a", &key, &record(), MAX_AGE_SECS).unwrap();
             let req = crate::protocol::UnlockRequest {
+                resume_session: None,
                 password: "master".into(),
                 registration_fields: None,
                 auth_fields: None,
