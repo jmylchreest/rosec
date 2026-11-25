@@ -18,7 +18,7 @@ path = "src/bin/broker.rs"
 [dependencies]
 anyhow = { workspace = true }
 libc = { workspace = true }
-nix = { version = "0.32", features = ["socket", "uio", "user", "fs"] }
+nix = { version = "0.32", features = ["socket", "uio", "user", "fs", "poll"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }

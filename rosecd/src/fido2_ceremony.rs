@@ -280,7 +280,7 @@ use tracing::info;
 /// smaller but this bounds a single read.
 const UHID_EVENT_SIZE: usize = 4380;
 
-/// Connect to the broker, take the virtual authenticator device, and serve
+/// Connect to the broker, take the FIDO report socket, and serve
 /// CTAP2 ceremonies until the device closes. Returns on any fatal transport
 /// error; the caller decides whether to retry.
 pub async fn run_event_loop(state: Arc<ServiceState>, registry: Arc<Fido2Registry>) {
@@ -492,16 +492,8 @@ async fn write_message(async_fd: &AsyncFd<File>, msg: &Message) {
     }
 }
 
-/// Send one 64-byte CTAPHID report as a `UHID_INPUT2` event. The report-id is
-/// asymmetric for our unnumbered FIDO device: the host prefixes its writes with
-/// a report-id byte (stripped on OUTPUT), but reads raw reports, so INPUT2
-/// carries the payload with no prefix.
+/// Send a single FIDO report. The broker constructs the kernel event.
 async fn send_report(async_fd: &AsyncFd<File>, report: &[u8]) {
-    write_event(async_fd, &uhid::input2_event(report)).await;
-}
-
-/// Write one uhid event to the device fd, awaiting writability.
-async fn write_event(async_fd: &AsyncFd<File>, bytes: &[u8]) {
     loop {
         let mut guard = match async_fd.writable().await {
             Ok(g) => g,
@@ -512,7 +504,7 @@ async fn write_event(async_fd: &AsyncFd<File>, bytes: &[u8]) {
         };
         match guard.try_io(|inner| {
             let mut dev = inner.get_ref();
-            dev.write_all(bytes)
+            dev.write_all(report)
         }) {
             Ok(Ok(())) => return,
             Ok(Err(e)) => {

@@ -1,14 +1,4 @@
-//! Client side of the broker handshake — how rosecd obtains the virtual
-//! authenticator device fd, with the checks that make trusting a world-
-//! connectable system socket safe.
-//!
-//! The broker socket lives at a shared system path (`/run/rosec/uhid.sock`)
-//! and is mode `0666`, so before rosecd trusts anything it receives it must
-//! verify two things: the peer really is root (an imposter that squatted the
-//! path would not be), and the passed fd really is the uhid character device
-//! (not some other fd a squatter handed over to turn rosecd into a signing
-//! oracle). Either check failing means the handshake is untrustworthy and we
-//! refuse rather than drive a forged device.
+//! Receive a FIDO report socket from the privileged broker.
 
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -19,48 +9,31 @@ use anyhow::{Context, Result, bail};
 
 use crate::broker::peer_uid;
 
-/// The virtual HID device the broker creates and passes back.
+/// The kernel UHID device opened by the privileged broker.
 pub const UHID_DEVICE: &str = "/dev/uhid";
 
-/// Connect to the privileged broker, verify it is root, receive the virtual
-/// authenticator device fd, and confirm it is the uhid device.
+/// Connect to the broker, authenticate its uid and receive a report socket.
 pub fn connect_and_receive(socket_path: &Path) -> Result<File> {
     let stream = UnixStream::connect(socket_path)
         .with_context(|| format!("connecting to broker at {}", socket_path.display()))?;
-
-    // The broker must be root. A non-root peer at this path is an imposter
-    // (the real broker is a root system service); refuse before trusting any
-    // fd it sends.
     let broker_uid = peer_uid(&stream)?;
     if broker_uid != 0 {
-        bail!(
-            "broker peer is uid {broker_uid}, not root — refusing possible imposter at {}",
-            socket_path.display()
-        );
+        bail!("broker peer is uid {broker_uid}, expected root");
     }
 
-    receive_device_fd(&stream, Path::new(UHID_DEVICE))
+    receive_report_socket(&stream)
 }
 
-/// Receive one fd via `SCM_RIGHTS` and confirm it is the character device at
-/// `expected_device` (matched by device number). Split from the uid check so
-/// it is testable with a socketpair and a stand-in character device.
-pub fn receive_device_fd(stream: &UnixStream, expected_device: &Path) -> Result<File> {
-    let fd = recv_fd(stream)?;
-    // SAFETY: `recv_fd` returned a freshly received, owned fd.
-    let file = unsafe { File::from_raw_fd(fd) };
+fn receive_report_socket(stream: &UnixStream) -> Result<File> {
+    use nix::sys::socket::{SockType, getsockopt, sockopt};
 
-    let got = nix::sys::stat::fstat(&file).context("fstat received fd")?;
-    if got.st_mode & libc::S_IFMT != libc::S_IFCHR {
-        bail!("received fd is not a character device — refusing");
-    }
-    let want = nix::sys::stat::stat(expected_device)
-        .with_context(|| format!("stat {}", expected_device.display()))?;
-    if got.st_rdev != want.st_rdev {
-        bail!(
-            "received fd is not {} (device-number mismatch) — refusing",
-            expected_device.display()
-        );
+    let fd = recv_fd(stream)?;
+    // SAFETY: recv_fd returns a freshly received, owned descriptor.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let socket_type = getsockopt(&file, sockopt::SockType)
+        .context("broker did not send a report socket; update the system broker")?;
+    if socket_type != SockType::SeqPacket {
+        bail!("broker sent an unexpected socket type");
     }
     Ok(file)
 }
@@ -101,38 +74,27 @@ fn recv_fd(stream: &UnixStream) -> Result<RawFd> {
 mod tests {
     use super::*;
     use crate::broker::send_fd;
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
     #[test]
-    fn accepts_the_expected_char_device() {
-        let (broker_end, client_end) = UnixStream::pair().unwrap();
-        // /dev/null stands in for the uhid char device.
-        let devnull = File::open("/dev/null").unwrap();
-        send_fd(&broker_end, devnull.as_raw_fd()).unwrap();
-
-        let got = receive_device_fd(&client_end, Path::new("/dev/null")).unwrap();
-        let st = nix::sys::stat::fstat(&got).unwrap();
-        assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFCHR);
+    fn receives_a_sequenced_packet_socket() {
+        let (broker, client) = UnixStream::pair().unwrap();
+        let (report_socket, _peer) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        send_fd(&broker, report_socket.as_raw_fd()).unwrap();
+        receive_report_socket(&client).unwrap();
     }
 
     #[test]
-    fn rejects_a_regular_file_fd() {
-        let (broker_end, client_end) = UnixStream::pair().unwrap();
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let f = File::open(tmp.path()).unwrap();
-        send_fd(&broker_end, f.as_raw_fd()).unwrap();
-
-        let err = receive_device_fd(&client_end, Path::new("/dev/null")).unwrap_err();
-        assert!(err.to_string().contains("not a character device"));
-    }
-
-    #[test]
-    fn rejects_the_wrong_char_device() {
-        // Sent /dev/null but expecting /dev/zero → device-number mismatch.
-        let (broker_end, client_end) = UnixStream::pair().unwrap();
-        let devnull = File::open("/dev/null").unwrap();
-        send_fd(&broker_end, devnull.as_raw_fd()).unwrap();
-
-        let err = receive_device_fd(&client_end, Path::new("/dev/zero")).unwrap_err();
-        assert!(err.to_string().contains("device-number mismatch"));
+    fn rejects_a_device_descriptor() {
+        let (broker, client) = UnixStream::pair().unwrap();
+        let device = File::open("/dev/null").unwrap();
+        send_fd(&broker, device.as_raw_fd()).unwrap();
+        assert!(receive_report_socket(&client).is_err());
     }
 }

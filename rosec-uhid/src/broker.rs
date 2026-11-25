@@ -145,16 +145,21 @@ fn find_hidraw_by_uniq(uniq: &str) -> Option<PathBuf> {
 }
 
 /// Send `fd` to the peer of `stream` via `SCM_RIGHTS` with a one-byte
-/// payload. After this the caller may drop its copy of `fd` — the peer owns
-/// a duplicate and its lifetime now governs the device.
+/// payload. The peer receives its own reference to the descriptor.
 pub fn send_fd(stream: &UnixStream, fd: RawFd) -> Result<()> {
     use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
     use std::io::IoSlice;
     let fds = [fd];
     let cmsg = [ControlMessage::ScmRights(&fds)];
     let iov = [IoSlice::new(&[0u8])];
-    sendmsg::<()>(stream.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None)
-        .context("sendmsg SCM_RIGHTS")?;
+    sendmsg::<()>(
+        stream.as_raw_fd(),
+        &iov,
+        &cmsg,
+        MsgFlags::MSG_NOSIGNAL,
+        None,
+    )
+    .context("sendmsg SCM_RIGHTS")?;
     Ok(())
 }
 
