@@ -594,8 +594,16 @@ async fn add_password_enables_second_unlock() {
         .await
         .unwrap();
 
+    assert!(matches!(
+        provider
+            .add_password(b"wrong", b"new", "new".to_string())
+            .await,
+        Err(ProviderError::AuthFailed)
+    ));
+    assert_eq!(provider.list_passwords().await.unwrap().len(), 1);
+
     let entry_id = provider
-        .add_password(b"login-password", "login".to_string())
+        .add_password(b"master", b"login-password", "login".to_string())
         .await
         .unwrap();
     assert!(!entry_id.is_empty());
@@ -630,11 +638,19 @@ async fn remove_password_prevents_unlock() {
         .unwrap();
 
     let entry_id = provider
-        .add_password(b"second", "second".to_string())
+        .add_password(b"master", b"second", "second".to_string())
         .await
         .unwrap();
 
-    provider.remove_password(&entry_id).await.unwrap();
+    assert!(matches!(
+        provider.remove_password(b"wrong", &entry_id).await,
+        Err(ProviderError::AuthFailed)
+    ));
+    assert_eq!(provider.list_passwords().await.unwrap().len(), 2);
+    provider
+        .remove_password(b"master", &entry_id)
+        .await
+        .unwrap();
 
     let entries = provider.list_passwords().await.unwrap();
     assert_eq!(entries.len(), 1);
@@ -663,7 +679,7 @@ async fn cannot_remove_last_password() {
     let entries = provider.list_passwords().await.unwrap();
     assert_eq!(entries.len(), 1);
 
-    let result = provider.remove_password(&entries[0].0).await;
+    let result = provider.remove_password(b"master", &entries[0].0).await;
     assert!(matches!(result, Err(ProviderError::InvalidInput(_))));
 }
 
@@ -676,7 +692,9 @@ async fn add_password_rejects_empty_label() {
         .await
         .unwrap();
 
-    let result = provider.add_password(b"another", String::new()).await;
+    let result = provider
+        .add_password(b"master", b"another", String::new())
+        .await;
     assert!(matches!(result, Err(ProviderError::InvalidInput(_))));
 }
 
@@ -690,12 +708,12 @@ async fn add_password_rejects_duplicate_label() {
         .unwrap();
 
     provider
-        .add_password(b"login-pw", "login".to_string())
+        .add_password(b"master", b"login-pw", "login".to_string())
         .await
         .unwrap();
 
     let result = provider
-        .add_password(b"other-pw", "login".to_string())
+        .add_password(b"master", b"other-pw", "login".to_string())
         .await;
     assert!(matches!(result, Err(ProviderError::InvalidInput(_))));
 
@@ -828,7 +846,7 @@ async fn change_password_only_affects_matched_entry() {
         .unwrap();
 
     provider
-        .add_password(b"second-pw", "login".to_string())
+        .add_password(b"master-pw", b"second-pw", "login".to_string())
         .await
         .unwrap();
 
