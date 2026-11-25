@@ -213,13 +213,13 @@ pub fn decrypt_asymmetric(
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, BitwardenError> {
     use rsa::pkcs8::DecodePrivateKey;
-    use rsa::{Oaep, RsaPrivateKey};
+    use rsa::{Oaep, PrivateKey};
 
-    let private_key = RsaPrivateKey::from_pkcs8_der(private_key_der)
+    let private_key = PrivateKey::from_pkcs8_der(private_key_der)
         .map_err(|e| BitwardenError::Crypto(format!("pkcs8 parse: {e}")))?;
 
     // SHA-1 is required by the Bitwarden wire protocol for cipher type 4.
-    let padding = Oaep::new::<sha1::Sha1>();
+    let padding = Oaep::<sha1::Sha1>::new();
     let plaintext = private_key
         .decrypt(padding, ciphertext)
         .map_err(|e| BitwardenError::Crypto(format!("rsa decrypt: {e}")))?;

@@ -22,5 +22,5 @@ zeroize = { workspace = true }
 # QR code scanning
 image = { version = "0.25", default-features = false, features = ["png"] }
 rqrr = "0.11"
-ashpd = { version = "0.13", features = ["screenshot"] }
+ashpd = { version = "0.14", features = ["screenshot"] }
 tokio = { workspace = true }

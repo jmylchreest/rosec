@@ -354,7 +354,14 @@ impl Filesystem for SshFuse {
         tree::access(&self.snapshot, ino, reply);
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         tree::open(&self.snapshot, ino, reply);
     }
 
