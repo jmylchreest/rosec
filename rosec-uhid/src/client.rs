@@ -12,6 +12,18 @@ use crate::broker::peer_uid;
 /// The kernel UHID device opened by the privileged broker.
 pub const UHID_DEVICE: &str = "/dev/uhid";
 
+/// A root broker returned a kernel device using the legacy handoff.
+#[derive(Debug)]
+pub struct LegacyBroker;
+
+impl std::fmt::Display for LegacyBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy UHID broker returned a kernel device")
+    }
+}
+
+impl std::error::Error for LegacyBroker {}
+
 /// Connect to the broker, authenticate its uid and receive a report socket.
 pub fn connect_and_receive(socket_path: &Path) -> Result<File> {
     let stream = UnixStream::connect(socket_path)
@@ -21,17 +33,30 @@ pub fn connect_and_receive(socket_path: &Path) -> Result<File> {
         bail!("broker peer is uid {broker_uid}, expected root");
     }
 
-    receive_report_socket(&stream)
+    receive_report_socket(&stream, Path::new(UHID_DEVICE))
 }
 
-fn receive_report_socket(stream: &UnixStream) -> Result<File> {
+fn receive_report_socket(stream: &UnixStream, uhid_device: &Path) -> Result<File> {
     use nix::sys::socket::{SockType, getsockopt, sockopt};
 
     let fd = recv_fd(stream)?;
     // SAFETY: recv_fd returns a freshly received, owned descriptor.
     let file = unsafe { File::from_raw_fd(fd) };
-    let socket_type = getsockopt(&file, sockopt::SockType)
-        .context("broker did not send a report socket; update the system broker")?;
+    let socket_type = match getsockopt(&file, sockopt::SockType) {
+        Ok(socket_type) => socket_type,
+        Err(nix::errno::Errno::ENOTSOCK) => {
+            use nix::sys::stat::{SFlag, fstat, stat};
+
+            if let (Ok(received), Ok(expected)) = (fstat(&file), stat(uhid_device))
+                && received.st_mode & libc::S_IFMT == SFlag::S_IFCHR.bits()
+                && received.st_rdev == expected.st_rdev
+            {
+                return Err(LegacyBroker.into());
+            }
+            bail!("broker did not send a report socket");
+        }
+        Err(error) => return Err(error).context("checking broker report socket type"),
+    };
     if socket_type != SockType::SeqPacket {
         bail!("broker sent an unexpected socket type");
     }
@@ -87,14 +112,24 @@ mod tests {
         )
         .unwrap();
         send_fd(&broker, report_socket.as_raw_fd()).unwrap();
-        receive_report_socket(&client).unwrap();
+        receive_report_socket(&client, Path::new(UHID_DEVICE)).unwrap();
     }
 
     #[test]
-    fn rejects_a_device_descriptor() {
+    fn identifies_a_legacy_device_descriptor() {
         let (broker, client) = UnixStream::pair().unwrap();
         let device = File::open("/dev/null").unwrap();
         send_fd(&broker, device.as_raw_fd()).unwrap();
-        assert!(receive_report_socket(&client).is_err());
+        let error = receive_report_socket(&client, Path::new("/dev/null")).unwrap_err();
+        assert!(error.is::<LegacyBroker>());
+    }
+
+    #[test]
+    fn unrelated_device_is_not_reported_as_a_legacy_broker() {
+        let (broker, client) = UnixStream::pair().unwrap();
+        let device = File::open("/dev/null").unwrap();
+        send_fd(&broker, device.as_raw_fd()).unwrap();
+        let error = receive_report_socket(&client, Path::new("/dev/zero")).unwrap_err();
+        assert!(!error.is::<LegacyBroker>());
     }
 }

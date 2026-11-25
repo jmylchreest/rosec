@@ -283,17 +283,34 @@ const UHID_EVENT_SIZE: usize = 4380;
 /// Connect to the broker, take the FIDO report socket, and serve
 /// CTAP2 ceremonies until the device closes. Returns on any fatal transport
 /// error; the caller decides whether to retry.
-pub async fn run_event_loop(state: Arc<ServiceState>, registry: Arc<Fido2Registry>) {
-    let device =
-        match rosec_uhid::client::connect_and_receive(Path::new(rosec_uhid::BROKER_SOCKET_PATH)) {
-            Ok(d) => d,
-            Err(e) => {
-                // Expected and retried (the broker may not be up yet); debug so
-                // an idle retry loop doesn't spam warnings every few seconds.
-                tracing::debug!(error = %e, "fido2: broker handshake failed, will retry");
-                return;
+pub async fn run_event_loop(
+    state: Arc<ServiceState>,
+    registry: Arc<Fido2Registry>,
+    warned_legacy_broker: &mut bool,
+) {
+    let device = match rosec_uhid::client::connect_and_receive(Path::new(
+        rosec_uhid::BROKER_SOCKET_PATH,
+    )) {
+        Ok(d) => {
+            *warned_legacy_broker = false;
+            d
+        }
+        Err(e) if e.is::<rosec_uhid::client::LegacyBroker>() => {
+            if !*warned_legacy_broker {
+                warn!(
+                    "FIDO2 is unavailable with the legacy rosec-uhid broker. Upgrade rosec-uhid to match rosecd and restart the system rosec-uhid.service."
+                );
+                *warned_legacy_broker = true;
             }
-        };
+            return;
+        }
+        Err(e) => {
+            // Expected and retried (the broker may not be up yet); debug so
+            // an idle retry loop doesn't spam warnings every few seconds.
+            tracing::debug!(error = %e, "fido2: broker handshake failed, will retry");
+            return;
+        }
+    };
     if let Err(e) = set_nonblocking(&device) {
         warn!(error = %e, "fido2: could not set device non-blocking");
         return;
