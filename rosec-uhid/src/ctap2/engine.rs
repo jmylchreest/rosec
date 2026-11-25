@@ -26,15 +26,8 @@ use super::sign::SigningKey;
 /// passkey. No real relying party uses ".dummy" (it is not a valid domain).
 const TOUCH_SELECTION_RP_ID: &str = ".dummy";
 
-/// authenticatorData flags for every rosec ceremony: user present + verified
-/// (the rosec-prompt gesture is our UP+UV), plus backup-eligible (BE) and
-/// backed-up (BS). rosec serves *software / synced* passkeys — the same class
-/// as Bitwarden/KeePassXC/1Password, never hardware-bound ones — so BE and BS
-/// are always set. They must be identical across a credential's makeCredential
-/// and every getAssertion (WebAuthn L3 §6.1.3), which sharing one constant
-/// guarantees. AT/ED are added by `assemble()` when attested data is present.
-const CEREMONY_FLAGS: u8 =
-    authdata::flag::UP | authdata::flag::UV | authdata::flag::BE | authdata::flag::BS;
+/// Approval establishes user presence. Synced passkeys also carry BE and BS.
+const CEREMONY_FLAGS: u8 = authdata::flag::UP | authdata::flag::BE | authdata::flag::BS;
 
 /// Where the store fetches a credential's private key from.
 #[derive(Debug, Clone)]
@@ -109,10 +102,10 @@ pub enum ConfirmAction {
     Select,
 }
 
-/// User presence/verification, via rosec-prompt.
+/// User presence via rosec-prompt.
 #[async_trait]
 pub trait UserGesture: Send + Sync {
-    /// Confirm an `action` for a single account. `true` = approved (UP+UV).
+    /// Confirm an `action` for a single account. `true` = approved (user presence).
     async fn confirm(&self, action: ConfirmAction, rp_id: &str, account: &str) -> bool;
 
     /// Choose among several accounts; `Some(index)` or `None` if cancelled.
@@ -130,6 +123,10 @@ pub async fn get_assertion(
     store: &dyn PasskeyStore,
     gesture: &dyn UserGesture,
 ) -> Result<GetAssertionResponse, Ctap2Status> {
+    if req.uv {
+        return Err(Ctap2Status::InvalidOption);
+    }
+
     let allow_ids: Vec<Vec<u8>> = req.allow_list.iter().map(|d| d.id.clone()).collect();
     let matches = store.find(&req.rp_id, &allow_ids).await;
 
@@ -161,7 +158,7 @@ pub async fn get_assertion(
     let key = SigningKey::from_pem(chosen.algorithm, &pem).map_err(|_| Ctap2Status::Other)?;
 
     let rp_hash = authdata::rp_id_hash(&req.rp_id);
-    // The account confirmation/choice is the user presence + verification;
+    // The account confirmation or choice establishes user presence;
     // BE/BS mark it as a synced passkey (see CEREMONY_FLAGS).
     let auth_data = authdata::assemble(&rp_hash, CEREMONY_FLAGS, chosen.counter, None, None);
     let message = authdata::signed_message(&auth_data, &req.client_data_hash);
@@ -191,6 +188,10 @@ pub async fn make_credential(
     store: &dyn PasskeyStore,
     gesture: &dyn UserGesture,
 ) -> Result<MakeCredentialResponse, Ctap2Status> {
+    if req.uv {
+        return Err(Ctap2Status::InvalidOption);
+    }
+
     // excludeList: refuse if we already hold one of the listed credentials.
     let exclude_ids: Vec<Vec<u8>> = req.exclude_list.iter().map(|d| d.id.clone()).collect();
     if !exclude_ids.is_empty() && !store.find(&req.rp_id, &exclude_ids).await.is_empty() {
@@ -360,6 +361,31 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
     }
 
     #[tokio::test]
+    async fn rejects_requests_requiring_user_verification_before_prompting() {
+        let store = MockStore { creds: vec![] };
+        let gesture = MockGesture {
+            confirm: true,
+            select: None,
+            seen: Mutex::new(vec![]),
+        };
+
+        let mut assertion = req(&[]);
+        assertion.uv = true;
+        assert!(matches!(
+            get_assertion(&assertion, &store, &gesture).await,
+            Err(Ctap2Status::InvalidOption)
+        ));
+
+        let mut registration = mkreq(&[-7], &[]);
+        registration.uv = true;
+        assert!(matches!(
+            make_credential(&registration, &store, &gesture).await,
+            Err(Ctap2Status::InvalidOption)
+        ));
+        assert!(gesture.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn no_match_is_silent_no_credentials() {
         let store = MockStore { creds: vec![] };
         let gesture = MockGesture {
@@ -390,10 +416,10 @@ Ujz/li9W7GD/hsON2LbfjwOb84yfhDiVAHEDDNbPytYRXp33/HqOjWsu
         assert_eq!(resp.number_of_credentials, Some(1));
         assert_eq!(resp.auth_data.len(), 37); // rpIdHash+flags+counter, no ACD
 
-        // UP, UV, and the synced-passkey backup flags (BE, BS) set.
+        // UP and backup flags are set. UV is clear.
         let flags = resp.auth_data[32];
         assert_eq!(flags & authdata::flag::UP, authdata::flag::UP);
-        assert_eq!(flags & authdata::flag::UV, authdata::flag::UV);
+        assert_eq!(flags & authdata::flag::UV, 0);
         assert_eq!(flags & authdata::flag::BE, authdata::flag::BE);
         assert_eq!(flags & authdata::flag::BS, authdata::flag::BS);
 
