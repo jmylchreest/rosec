@@ -179,6 +179,21 @@ enum SessionResult {
     ConnectFailed(String),
 }
 
+fn notification_uri(url: &str, allowed_hosts: &[String]) -> Result<http::Uri, &'static str> {
+    let url = url::Url::parse(url).map_err(|_| "invalid WebSocket URL")?;
+    if url.scheme() != "wss" {
+        return Err("notifications require a secure WebSocket URL");
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err("WebSocket URL contains credentials or a fragment");
+    }
+    let host = url.host_str().ok_or("WebSocket URL has no host")?;
+    if !crate::provider::is_host_allowed(host, allowed_hosts) {
+        return Err("WebSocket host is outside allowed_hosts");
+    }
+    url.as_str().parse().map_err(|_| "invalid WebSocket URI")
+}
+
 async fn run_session(
     config: &NotificationsConfig,
     subscription: &WebSocketSubscription,
@@ -186,9 +201,9 @@ async fn run_session(
 ) -> SessionResult {
     let provider_id = &config.provider_id;
 
-    let ws_uri = match subscription.url.parse::<http::Uri>() {
-        Ok(u) => u,
-        Err(e) => return SessionResult::ConnectFailed(format!("invalid WebSocket URI: {e}")),
+    let ws_uri = match notification_uri(&subscription.url, &config.allowed_hosts) {
+        Ok(uri) => uri,
+        Err(reason) => return SessionResult::ConnectFailed(reason.into()),
     };
 
     debug!(provider = %provider_id, "notifications: connecting");
@@ -381,4 +396,19 @@ fn redact_tokens(s: &str) -> std::borrow::Cow<'_, str> {
     }
     out.push_str(rest);
     std::borrow::Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notification_uri;
+
+    #[test]
+    fn applies_host_policy_and_requires_secure_transport() {
+        let hosts = ["*.example.test".to_owned()];
+        assert!(notification_uri("wss://notify.example.test:8443/updates", &hosts).is_ok());
+        assert!(notification_uri("wss://notify.example.test/updates", &[]).is_err());
+        assert!(notification_uri("wss://other.test/updates", &hosts).is_err());
+        assert!(notification_uri("ws://notify.example.test/updates", &hosts).is_err());
+        assert!(notification_uri("wss://user@notify.example.test/updates", &hosts).is_err());
+    }
 }

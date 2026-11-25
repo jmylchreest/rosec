@@ -6,7 +6,7 @@
 use anyhow::Result;
 
 use crate::cli::ProviderRemovePasswordArgs;
-use crate::conn;
+use crate::{conn, prompt_field};
 
 pub async fn run(args: &ProviderRemovePasswordArgs) -> Result<()> {
     let vault_id = args.id.as_str();
@@ -39,7 +39,10 @@ pub async fn run(args: &ProviderRemovePasswordArgs) -> Result<()> {
 
     println!("Removing password entry: {entry_id} {label_display}");
 
-    let _: () = proxy.call("RemovePassword", &(vault_id, entry_id)).await?;
+    let current = prompt_field("Current vault password", "", "password").await?;
+    let _: () = proxy
+        .call("RemovePassword", &(vault_id, current.as_bytes(), entry_id))
+        .await?;
 
     println!("Removed password entry '{entry_id}' from vault '{vault_id}'.");
     Ok(())

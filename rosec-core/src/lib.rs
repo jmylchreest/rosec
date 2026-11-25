@@ -1311,6 +1311,7 @@ pub trait Provider: Send + Sync {
     /// Default: `NotSupported` (providers without key wrapping).
     async fn add_password(
         &self,
+        _current_password: &[u8],
         _password: &[u8],
         _label: String,
     ) -> Result<String, ProviderError> {
@@ -1323,7 +1324,11 @@ pub trait Provider: Send + Sync {
     /// (the last entry cannot be removed).
     ///
     /// Default: `NotSupported`.
-    async fn remove_password(&self, _entry_id: &str) -> Result<(), ProviderError> {
+    async fn remove_password(
+        &self,
+        _current_password: &[u8],
+        _entry_id: &str,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::NotSupported)
     }
 

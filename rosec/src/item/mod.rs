@@ -208,12 +208,20 @@ pub(super) fn editor_command() -> String {
 /// highlighting.  Returns `None` if the user quit without saving (content
 /// unchanged from the initial template) or if the file is empty.
 pub(super) fn open_editor(initial_content: &str) -> Result<Option<String>> {
+    use std::fs::{OpenOptions, Permissions};
     use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir()?;
     let file_path = dir.path().join("rosec-item.toml");
     {
-        let mut f = std::fs::File::create(&file_path)?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file_path)?;
         f.write_all(initial_content.as_bytes())?;
         f.flush()?;
     }

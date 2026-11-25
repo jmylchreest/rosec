@@ -1555,7 +1555,7 @@ where
         .collect()
 }
 
-fn is_host_allowed(hostname: &str, allowed_hosts: &[String]) -> bool {
+pub(crate) fn is_host_allowed(hostname: &str, allowed_hosts: &[String]) -> bool {
     allowed_hosts
         .iter()
         .any(|pattern| match glob::Pattern::new(pattern) {
