@@ -15,6 +15,14 @@ pub struct Entry {
     pub totp_fields: Vec<String>,
 }
 pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
+    map_item_with_version(id, bytes, crate::ITEM_CONTENT_FORMAT_VERSION)
+}
+
+pub fn map_item_with_version(
+    id: String,
+    bytes: &[u8],
+    version: u64,
+) -> Result<Entry, &'static str> {
     if bytes.len() > 1024 * 1024 {
         return Err("Item content too large");
     }
@@ -48,8 +56,18 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
     match content {
         item_v1::content::Content::Login(login) => {
             e.public.insert("rosec:type".into(), "login".into());
-            e.public
-                .insert("username".into(), std::mem::take(&mut login.item_username));
+            // Versions 1–4 used tag 1 for the single login identifier.
+            let email_or_legacy_username = std::mem::take(&mut login.item_email);
+            let (username, email) = if (1..=4).contains(&version) {
+                (email_or_legacy_username, String::new())
+            } else {
+                (
+                    std::mem::take(&mut login.item_username),
+                    email_or_legacy_username,
+                )
+            };
+            e.public.insert("username".into(), username);
+            e.public.insert("email".into(), email);
             e.public.insert(
                 "uri".into(),
                 login.urls.first().cloned().unwrap_or_default(),
@@ -65,8 +83,6 @@ pub fn map_item(id: String, bytes: &[u8]) -> Result<Entry, &'static str> {
                     Zeroizing::new(std::mem::take(&mut login.totp_uri)),
                 );
             }
-            e.public
-                .insert("email".into(), std::mem::take(&mut login.item_email));
             for p in &login.passkeys {
                 e.passkeys.push(crate::passkey::decode(p)?);
             }

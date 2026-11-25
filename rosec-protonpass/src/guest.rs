@@ -3,7 +3,7 @@
 // REST envelope and PAT flow adapted from Proton pass-cli 2.4.2; see UPSTREAM.txt.
 use crate::{
     crypto,
-    mapping::{Entry, map_item},
+    mapping::{Entry, map_item_with_version},
     parse_pat,
     sensitive::SensitiveJson,
 };
@@ -277,9 +277,16 @@ fn fetch_items(s: &mut State) -> Result<BTreeMap<String, Entry>, &'static str> {
                 if row["State"].as_u64() != Some(1) {
                     continue;
                 }
-                if row["ContentFormatVersion"].as_u64() != Some(crate::ITEM_CONTENT_FORMAT_VERSION)
-                {
-                    return Err("Unsupported item format");
+                let item_id = field(row, "ItemID")?;
+                let version = row["ContentFormatVersion"].as_u64();
+                let version_label =
+                    || version.map_or_else(|| "missing or invalid".into(), |v| v.to_string());
+                if !version.is_some_and(|v| (1..=crate::ITEM_CONTENT_FORMAT_VERSION).contains(&v)) {
+                    extism_pdk::warn!(
+                        "Unknown Proton Pass item content format {} for share {sid:?}, item {item_id:?}. Attempting to decode. Please report this at {}",
+                        version_label(),
+                        crate::ROSEC_ISSUE_REPORT_URL
+                    );
                 }
                 let rotation = row["KeyRotation"].as_u64().ok_or("Missing key rotation")?;
                 if !row["FolderID"].is_null() && folders.is_none() {
@@ -300,23 +307,48 @@ fn fetch_items(s: &mut State) -> Result<BTreeMap<String, Entry>, &'static str> {
                     Some(_) => return Err("Folder key rotation mismatch"),
                     None => keys.get(&rotation).ok_or("Missing share key")?,
                 };
-                let item_key =
-                    crypto::decrypt(&decode(field(row, "ItemKey")?)?, key, crypto::ITEM_KEY)?;
                 if result.len() >= 10_000 {
                     return Err("Too many items");
                 }
-                let content = crypto::decrypt(
-                    &decode(field(row, "Content")?)?,
-                    &item_key,
-                    crypto::ITEM_CONTENT,
-                )?;
+                let content = (|| {
+                    let item_key =
+                        crypto::decrypt(&decode(field(row, "ItemKey")?)?, key, crypto::ITEM_KEY)?;
+                    crypto::decrypt(
+                        &decode(field(row, "Content")?)?,
+                        &item_key,
+                        crypto::ITEM_CONTENT,
+                    )
+                })();
+                let content = match content {
+                    Ok(content) => content,
+                    Err(error) => {
+                        extism_pdk::warn!(
+                            "Skipping Proton Pass item {item_id:?} in share {sid:?} (content format {}): {error}",
+                            version_label()
+                        );
+                        continue;
+                    }
+                };
                 total_bytes = total_bytes
                     .checked_add(content.len())
                     .ok_or("Vault too large")?;
                 if total_bytes > 32 * 1024 * 1024 {
                     return Err("Vault too large");
                 }
-                let mut entry = map_item(format!("{sid}/{}", field(row, "ItemID")?), &content)?;
+                let mut entry = match map_item_with_version(
+                    format!("{sid}/{item_id}"),
+                    &content,
+                    version.unwrap_or(crate::ITEM_CONTENT_FORMAT_VERSION),
+                ) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        extism_pdk::warn!(
+                            "Skipping Proton Pass item {item_id:?} in share {sid:?} (content format {}): {error}",
+                            version_label()
+                        );
+                        continue;
+                    }
+                };
                 if let Some(folder) = folder {
                     entry.public.insert("folder".into(), folder.path.to_owned());
                 }

@@ -1,0 +1,3 @@
+metadata { name: "Format 7" note: "synthetic note" }
+content { wifi { ssid: "Fixture Wi-Fi" password: "synthetic password" security: WPA3 } }
+extra_fields { field_name: "created" timestamp { timestamp { seconds: 1700000000 } } }

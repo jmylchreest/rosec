@@ -14,6 +14,8 @@ pub mod upstream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use zeroize::Zeroizing;
 
+pub const ROSEC_ISSUE_REPORT_URL: &str = "https://github.com/jmylchreest/rosec/issues/new";
+
 /// pass-cli 2.4.2 pass/src/constants.rs. Pin to the format exercised live.
 pub const ITEM_CONTENT_FORMAT_VERSION: u64 = 7;
 

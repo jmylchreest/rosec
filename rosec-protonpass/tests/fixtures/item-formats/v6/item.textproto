@@ -1,0 +1,7 @@
+metadata { name: "Format 6" note: "synthetic note" }
+content {
+  identity {
+    full_name: "Fixture Person"
+    extra_sections { section_name: "work" section_fields { field_name: "desk" text { content: "synthetic desk" } } }
+  }
+}

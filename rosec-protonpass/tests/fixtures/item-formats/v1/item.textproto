@@ -1,0 +1,8 @@
+metadata { name: "Format 1" note: "synthetic note" }
+content {
+  login {
+    username: "legacy-user"
+    password: "synthetic password"
+    urls: "https://fixture.example"
+  }
+}

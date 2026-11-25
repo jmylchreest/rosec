@@ -1,0 +1,9 @@
+metadata { name: "Format 2" note: "synthetic note" }
+content {
+  login {
+    username: "legacy-user"
+    password: "synthetic password"
+    urls: "https://fixture.example"
+  }
+}
+extra_fields { field_name: "recovery" hidden { content: "synthetic recovery" } }

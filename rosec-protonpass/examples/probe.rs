@@ -10,13 +10,13 @@ use base64::{
 };
 use extism::{Manifest, Plugin, Wasm};
 use protobuf::{Message, MessageField};
-use rosec_protonpass::{crypto, upstream::item_v1};
+use rosec_protonpass::{ROSEC_ISSUE_REPORT_URL, crypto, upstream::item_v1};
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     net::TcpListener,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -116,6 +116,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Benchmarks must use synthetic data".into());
     }
     let check_fixture = std::env::args().any(|a| a == "--check-fixture");
+    let item_logs = Arc::new(Mutex::new(Vec::new()));
+    if !live && !bench {
+        let item_logs = Arc::clone(&item_logs);
+        extism::set_log_callback(
+            move |line| {
+                if line.contains("Unknown Proton Pass item content format")
+                    || line.contains("Skipping Proton Pass item")
+                {
+                    item_logs.lock().unwrap().push(line.to_owned());
+                }
+            },
+            "warn",
+        )?;
+    }
     let mode = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(AtomicUsize::new(0));
@@ -274,6 +288,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 row
                             })
                             .collect()
+                    } else if current == 15 {
+                        let mut legacy = item.clone();
+                        legacy["ItemID"] = json!("legacy");
+                        legacy["ContentFormatVersion"] = json!(4);
+                        legacy["Content"] = json!(seal(
+                            include_bytes!("../tests/fixtures/item-formats/v4/item.bin"),
+                            &[3; 32],
+                            crypto::ITEM_CONTENT,
+                            8
+                        ));
+                        let mut future = item.clone();
+                        future["ItemID"] = json!("future");
+                        future["ContentFormatVersion"] = json!(8);
+                        let mut unreadable = future.clone();
+                        unreadable["ItemID"] = json!("unreadable");
+                        unreadable["Content"] =
+                            json!(seal(&[0xff], &[3; 32], crypto::ITEM_CONTENT, 9));
+                        vec![unreadable, legacy, future, item]
                     } else if current == 5 {
                         vec![item.clone(), item]
                     } else if current == 6 {
@@ -621,25 +653,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?["error_kind"],
             "not_found"
         );
+        mode.store(15, Ordering::SeqCst);
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        let items = call(&mut p, "list_items", Value::Null)?;
+        let ids: Vec<_> = items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["share1/future", "share1/item1", "share1/legacy"]);
+        let legacy = call(&mut p, "get_item_attributes", json!({"id":"share1/legacy"}))?;
+        assert_eq!(legacy["public"]["username"], "legacy-user");
+        assert_eq!(legacy["public"]["email"], "");
+
+        {
+            let logs = item_logs.lock().unwrap();
+            for id in ["future", "unreadable"] {
+                assert!(logs.iter().any(|line| {
+                    line.contains("Unknown Proton Pass item content format 8")
+                        && line.contains("share1")
+                        && line.contains(id)
+                        && line.contains(ROSEC_ISSUE_REPORT_URL)
+                }));
+            }
+            assert!(logs.iter().any(|line| {
+                line.contains("Skipping Proton Pass item")
+                    && line.contains("unreadable")
+                    && line.contains("Invalid item protobuf")
+            }));
+            assert!(!logs.iter().any(|line| {
+                line.contains("Skipping Proton Pass item") && line.contains("future")
+            }));
+        }
+
         mode.store(1, Ordering::SeqCst);
-        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], false);
-        assert_eq!(
-            call(
-                &mut p,
-                "get_secret_attr",
-                json!({"id":"share1/item1","attr":"totp"})
-            )?["error_kind"],
-            "locked"
-        );
+        assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);
+        assert_eq!(call(&mut p, "list_items", Value::Null)?["items"], json!([]));
+        assert_eq!(call(&mut p, "status", Value::Null)?["locked"], false);
         mode.store(0, Ordering::SeqCst);
-        assert_eq!(
-            call(
-                &mut p,
-                "unlock",
-                json!({"password":"test","registration_fields":{"personal_access_token":pat.as_str()}})
-            )?["ok"],
-            true
-        );
         mode.store(9, Ordering::SeqCst);
         let before = requests.load(Ordering::SeqCst);
         assert_eq!(call(&mut p, "sync", Value::Null)?["ok"], true);

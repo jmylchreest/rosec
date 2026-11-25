@@ -1,0 +1,8 @@
+metadata { name: "Format 5" note: "synthetic note" }
+content {
+  login {
+    item_email: "fixture@example.test" item_username: "fixture-user"
+    password: "synthetic password"
+    urls: "https://fixture.example"
+  }
+}

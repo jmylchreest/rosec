@@ -169,6 +169,10 @@ Both host and guest cap Proton responses at 8 MiB. Guest execution is capped at
 Secret cleanup covers owned guest allocations and rosec transport buffers, but
 complete erasure of upstream library and compiler copies is not proven.
 
+The provider tries to decode items in unknown content formats. It logs the share
+ID, item ID, and format with a link to report it. An unreadable item is logged and
+skipped so other items in the vault can still sync.
+
 Passkeys with unknown encodings, unsupported curves or nonzero stored counters
 are rejected rather than silently misused. Canonical identity fields include
 `ssn`, `phone`, `address1`, `postal_code`, `state` and `country`; other Proton
