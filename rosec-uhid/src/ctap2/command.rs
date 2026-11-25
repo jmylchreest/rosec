@@ -41,9 +41,11 @@ pub enum Ctap2Status {
     InvalidCommand = 0x01,
     InvalidParameter = 0x02,
     InvalidLength = 0x03,
+    InvalidOption = 0x2c,
+    PinAuthInvalid = 0x33,
     OperationDenied = 0x27,
     UnsupportedAlgorithm = 0x26,
-    NoCredentials = 0x2b,
+    NoCredentials = 0x2e,
     CredentialExcluded = 0x19,
     UserActionTimeout = 0x2f,
     NotAllowed = 0x30,
@@ -58,18 +60,13 @@ pub const ROSEC_AAGUID: [u8; 16] = [
 ];
 
 /// Build the CBOR body of an `authenticatorGetInfo` response (the bytes after
-/// the `0x00` status byte). Advertises FIDO2, resident keys, and that user
-/// presence/verification are available (our UV is the rosec-prompt
-/// confirmation).
+/// the `0x00` status byte). Advertises resident keys and user presence.
 pub fn get_info_response() -> Vec<u8> {
     use coset::cbor::value::Value;
 
-    // options map: rk (discoverable creds), up (user presence), uv (user
-    // verification — satisfied by rosec-prompt).
     let options = Value::Map(vec![
         (Value::Text("rk".into()), Value::Bool(true)),
         (Value::Text("up".into()), Value::Bool(true)),
-        (Value::Text("uv".into()), Value::Bool(true)),
     ]);
 
     let map = Value::Map(vec![
@@ -134,7 +131,7 @@ mod tests {
             .expect("aaguid present");
         assert!(matches!(aaguid, Value::Bytes(b) if b.len() == 16));
 
-        // options (key 4) has rk/up/uv = true.
+        // options (key 4) has rk/up = true.
         let options = entries
             .iter()
             .find(|(k, _)| matches!(k, Value::Integer(i) if *i == 4.into()))
@@ -143,7 +140,12 @@ mod tests {
         let Value::Map(opts) = options else {
             panic!("options is map")
         };
-        for name in ["rk", "up", "uv"] {
+        assert!(
+            !opts
+                .iter()
+                .any(|(key, _)| matches!(key, Value::Text(t) if t == "uv"))
+        );
+        for name in ["rk", "up"] {
             let found = opts
                 .iter()
                 .any(|(k, v)| matches!(k, Value::Text(t) if t == name) && *v == Value::Bool(true));
@@ -154,7 +156,7 @@ mod tests {
     #[test]
     fn status_codes_are_spec_values() {
         assert_eq!(Ctap2Status::Ok as u8, 0x00);
-        assert_eq!(Ctap2Status::NoCredentials as u8, 0x2b);
+        assert_eq!(Ctap2Status::NoCredentials as u8, 0x2e);
         assert_eq!(Ctap2Status::OperationDenied as u8, 0x27);
         assert_eq!(Ctap2Status::CredentialExcluded as u8, 0x19);
     }

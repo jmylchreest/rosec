@@ -56,6 +56,9 @@ pub struct GetAssertionRequest {
 impl GetAssertionRequest {
     pub fn decode(bytes: &[u8]) -> Result<Self, Ctap2Status> {
         let map = top_map(bytes)?;
+        if int_get(&map, 6).is_some() || int_get(&map, 7).is_some() {
+            return Err(Ctap2Status::PinAuthInvalid);
+        }
         let rp_id = int_text(&map, 1).ok_or(Ctap2Status::InvalidParameter)?;
         let client_data_hash = int_bytes(&map, 2).ok_or(Ctap2Status::InvalidParameter)?;
         let allow_list = match int_get(&map, 3) {
@@ -155,6 +158,9 @@ pub struct MakeCredentialRequest {
 impl MakeCredentialRequest {
     pub fn decode(bytes: &[u8]) -> Result<Self, Ctap2Status> {
         let map = top_map(bytes)?;
+        if int_get(&map, 8).is_some() || int_get(&map, 9).is_some() {
+            return Err(Ctap2Status::PinAuthInvalid);
+        }
         let client_data_hash = int_bytes(&map, 1).ok_or(Ctap2Status::InvalidParameter)?;
 
         let rp = int_get(&map, 2)
