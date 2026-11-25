@@ -31,29 +31,29 @@ license = "MIT"
 repository = "https://github.com/jmylchreest/rosec"
 
 [workspace.dependencies]
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.152"
+serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 async-trait = "0.1.92"
-zeroize = { version = "1.9.1", features = ["serde"] }
+zeroize = { version = "1.9.2", features = ["serde"] }
 iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "advanced"] }
-tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process"] }
 wait-timeout = "0.2"
-landlock = "0.4.7"
+landlock = "0.4.8"
 crossbeam-channel = "0.5"
-toml = "1.1.8"
+toml = "1.2.3"
 sha1 = "0.11.0"
-sha2 = "0.11.0"
+sha2 = "0.11.2"
 data-encoding = "2.11.1"
-aes = { version = "0.9.3", features = ["zeroize"] }
+aes = { version = "0.9.4", features = ["zeroize"] }
 cbc = { version = "0.2.1", features = ["alloc", "zeroize"] }
 hmac = "0.13.0"
 hkdf = "0.13.0"
 base64 = "0.23.1"
-rand = "0.10.3"
+rand = "0.10.4"
 block-padding = "0.4.2"
 num-bigint = "0.5.1"
 rpassword = "7"
@@ -61,7 +61,7 @@ libc = "0.2"
 toml_edit = "0.25"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-websockets = { version = "0.13", features = ["client", "rustls-native-roots", "sha1_smol", "fastrand"] }
-wildmatch = "2.6.1"
+wildmatch = "2.7.0"
 chrono = { version = "0.4", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
 minisign = "0.10"
@@ -72,14 +72,13 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 url = "2"
 
 # Hoisted from per-crate declarations to ensure version consistency
-zbus = { version = "6.0.0", features = ["tokio"] }
-uuid = { version = "1.28.0", features = ["v4"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
-notify = "8"
-busd = "0.5"
+zbus = { version = "6.5.0", features = ["tokio"] }
+uuid = { version = "1.29.3", features = ["v4"] }
+notify = "9"
+busd = "0.8"
 ssh-key = { version = "0.6.7", features = ["alloc", "ed25519", "rsa", "p256", "encryption"] }
 ssh-agent-lib = "0.6.0"
-fuser = "0.18.0"
+fuser = "0.19.0"
 # ssh-key 0.6 implements the signature 2 traits.
 signature = "2.2.0"
 
