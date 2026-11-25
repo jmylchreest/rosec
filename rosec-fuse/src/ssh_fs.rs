@@ -225,12 +225,16 @@ impl Snapshot {
                 continue;
             }
             let pubkey_line = entry.public_key_openssh.trim();
-            if pubkey_line.is_empty() {
+            if pubkey_line.is_empty() || pubkey_line.chars().any(char::is_control) {
                 continue;
             }
             for principal in &entry.signing_principals {
                 let principal = principal.trim();
-                if principal.is_empty() {
+                if principal.is_empty()
+                    || !principal
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-@+".contains(&byte))
+                {
                     continue;
                 }
                 if !seen.insert((principal.to_string(), pubkey_line.to_string())) {
