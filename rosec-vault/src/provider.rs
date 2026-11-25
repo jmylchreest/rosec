@@ -1048,7 +1048,17 @@ impl Provider for LocalVault {
         Ok(())
     }
 
-    async fn add_password(&self, password: &[u8], label: String) -> Result<String, ProviderError> {
+    async fn add_password(
+        &self,
+        current_password: &[u8],
+        password: &[u8],
+        label: String,
+    ) -> Result<String, ProviderError> {
+        if password.is_empty() {
+            return Err(ProviderError::InvalidInput(
+                "password cannot be empty".into(),
+            ));
+        }
         if label.is_empty() {
             return Err(ProviderError::InvalidInput(
                 "password label cannot be empty".into(),
@@ -1057,6 +1067,15 @@ impl Provider for LocalVault {
 
         let mut guard = self.state.write().await;
         let state = guard.as_mut().ok_or(ProviderError::Locked)?;
+
+        if !state.wrapping_entries.iter().any(|entry| {
+            crypto::unwrap_vault_key(entry, current_password)
+                .ok()
+                .flatten()
+                .is_some_and(|key| *key == *state.vault_key)
+        }) {
+            return Err(ProviderError::AuthFailed);
+        }
 
         if state
             .wrapping_entries
@@ -1081,9 +1100,22 @@ impl Provider for LocalVault {
         Ok(id)
     }
 
-    async fn remove_password(&self, entry_id: &str) -> Result<(), ProviderError> {
+    async fn remove_password(
+        &self,
+        current_password: &[u8],
+        entry_id: &str,
+    ) -> Result<(), ProviderError> {
         let mut guard = self.state.write().await;
         let state = guard.as_mut().ok_or(ProviderError::Locked)?;
+
+        if !state.wrapping_entries.iter().any(|entry| {
+            crypto::unwrap_vault_key(entry, current_password)
+                .ok()
+                .flatten()
+                .is_some_and(|key| *key == *state.vault_key)
+        }) {
+            return Err(ProviderError::AuthFailed);
+        }
 
         if state.wrapping_entries.len() <= 1 {
             return Err(ProviderError::InvalidInput(

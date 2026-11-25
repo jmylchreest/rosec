@@ -448,6 +448,7 @@ impl RosecManagement {
     async fn add_password(
         &self,
         provider_id: String,
+        current_password: Vec<u8>,
         password: Vec<u8>,
         label: String,
         #[zbus(header)] header: Header<'_>,
@@ -456,6 +457,7 @@ impl RosecManagement {
 
         // Wrap in Zeroizing at the D-Bus boundary so the password is scrubbed on drop.
         let password = zeroize::Zeroizing::new(password);
+        let current_password = zeroize::Zeroizing::new(current_password);
 
         let provider = self
             .state
@@ -471,7 +473,7 @@ impl RosecManagement {
         self.state
             .run_on_tokio(async move {
                 provider
-                    .add_password(&password, label)
+                    .add_password(&current_password, &password, label)
                     .await
                     .map_err(|e| FdoError::Failed(format!("add_password failed: {e}")))
             })
@@ -485,10 +487,12 @@ impl RosecManagement {
     async fn remove_password(
         &self,
         provider_id: String,
+        current_password: Vec<u8>,
         entry_id: String,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("management", "RemovePassword", &header);
+        let current_password = zeroize::Zeroizing::new(current_password);
 
         let provider = self
             .state
@@ -498,7 +502,7 @@ impl RosecManagement {
         self.state
             .run_on_tokio(async move {
                 provider
-                    .remove_password(&entry_id)
+                    .remove_password(&current_password, &entry_id)
                     .await
                     .map_err(|e| FdoError::Failed(format!("remove_password failed: {e}")))
             })

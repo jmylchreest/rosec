@@ -16,6 +16,7 @@ pub async fn run(args: ProviderAddPasswordArgs) -> Result<()> {
     // Default label: user@hostname
     let label = args.label.unwrap_or_else(default_password_label);
 
+    let current = prompt_field("Current vault password", "", "password").await?;
     let pw = prompt_field("New password", "", "password").await?;
     if pw.is_empty() {
         bail!("password cannot be empty");
@@ -35,7 +36,10 @@ pub async fn run(args: ProviderAddPasswordArgs) -> Result<()> {
     .await?;
 
     let entry_id: String = proxy
-        .call("AddPassword", &(vault_id, pw.as_bytes().to_vec(), &label))
+        .call(
+            "AddPassword",
+            &(vault_id, current.as_bytes(), pw.as_bytes(), &label),
+        )
         .await?;
 
     println!("Added password entry {entry_id} (label: {label}) to vault '{vault_id}'.");
