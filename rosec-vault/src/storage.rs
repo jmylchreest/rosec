@@ -3,10 +3,36 @@ use crate::types::VaultFile;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{self, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
+pub(crate) const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn read_vault(path: &Path) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular vault file",
+        ));
+    }
+    let too_large = || io::Error::new(io::ErrorKind::InvalidData, "vault file exceeds 64 MiB");
+    if metadata.len() > MAX_VAULT_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_VAULT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_VAULT_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
 pub(crate) fn revision(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -92,7 +118,11 @@ pub(crate) fn replace(
     force_snapshot: bool,
 ) -> anyhow::Result<()> {
     let path = &lease.path;
-    let old = match std::fs::read(path) {
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_VAULT_BYTES,
+        "vault file exceeds 64 MiB"
+    );
+    let old = match read_vault(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
