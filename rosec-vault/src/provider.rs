@@ -754,7 +754,7 @@ impl Provider for LocalVault {
         let bytes = item
             .secrets
             .get(attr)
-            .and_then(|s| BASE64_STANDARD.decode(s).ok())
+            .and_then(|s| BASE64_STANDARD.decode(s.as_str()).ok())
             .ok_or(ProviderError::NotFound)?;
         Ok(SecretValue {
             bytes: SecretBytes::new(bytes),
@@ -844,7 +844,12 @@ impl Provider for LocalVault {
             existing.secrets = item
                 .secrets
                 .iter()
-                .map(|(k, v)| (k.clone(), BASE64_STANDARD.encode(v.as_slice())))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        Zeroizing::new(BASE64_STANDARD.encode(v.as_slice())),
+                    )
+                })
                 .collect();
             existing.content_types = item.content_types.clone();
             existing.modified = chrono::Utc::now().timestamp();
@@ -861,10 +866,15 @@ impl Provider for LocalVault {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();
 
-        let secrets: HashMap<String, String> = item
+        let secrets: HashMap<_, _> = item
             .secrets
             .iter()
-            .map(|(k, v)| (k.clone(), BASE64_STANDARD.encode(v.as_slice())))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    Zeroizing::new(BASE64_STANDARD.encode(v.as_slice())),
+                )
+            })
             .collect();
 
         let new_item = VaultItemData {
@@ -936,7 +946,8 @@ impl Provider for LocalVault {
 
         if let Some(secrets) = update.secrets {
             for (k, v) in secrets {
-                item.secrets.insert(k, BASE64_STANDARD.encode(v.as_slice()));
+                item.secrets
+                    .insert(k, Zeroizing::new(BASE64_STANDARD.encode(v.as_slice())));
             }
         }
 
