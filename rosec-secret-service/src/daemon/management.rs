@@ -398,22 +398,12 @@ impl RosecManagement {
     ) -> Result<bool, FdoError> {
         log_dbus_caller("management", "AuthProviderFromPipe", &header);
 
-        use std::os::unix::io::AsRawFd as _;
-        let raw: libc::c_int = unsafe { libc::dup(pipe_fd.as_raw_fd()) };
-        if raw < 0 {
-            return Err(FdoError::Failed(format!(
-                "dup(pipe_fd) failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
+        let permit = credential_pipe_permit()?;
         let state = Arc::clone(&self.state);
         self.state
             .run_on_tokio(async move {
-                // Read the password off the pipe on a blocking thread bounded
-                // by a timeout, so a caller that never writes cannot pin a
-                // runtime worker (see read_pipe_password).
-                let password = read_pipe_password(raw, "auth").await?;
+                let _permit = permit;
+                let password = read_pipe_password(pipe_fd, "auth", PIPE_READ_TIMEOUT).await?;
 
                 // Look up the password field ID for this provider.
                 let provider = state.provider_by_id(&provider_id).ok_or_else(|| {
@@ -589,31 +579,15 @@ impl RosecManagement {
     ) -> Result<(), FdoError> {
         log_dbus_caller("management", "ChangeProviderPassword", &header);
 
-        use std::os::unix::io::AsRawFd as _;
-        let old_raw: libc::c_int = unsafe { libc::dup(old_password_fd.as_raw_fd()) };
-        if old_raw < 0 {
-            return Err(FdoError::Failed(format!(
-                "dup(old_password_fd) failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let new_raw: libc::c_int = unsafe { libc::dup(new_password_fd.as_raw_fd()) };
-        if new_raw < 0 {
-            unsafe { libc::close(old_raw) };
-            return Err(FdoError::Failed(format!(
-                "dup(new_password_fd) failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
+        let permit = credential_pipe_permit()?;
         let state = Arc::clone(&self.state);
         self.state
             .run_on_tokio(async move {
-                // Read both passwords off the pipes on blocking threads bounded
-                // by a timeout (see read_pipe_password), so a caller that never
-                // writes cannot pin a runtime worker.
-                let old_password = read_pipe_password(old_raw, "old").await?;
-                let new_password = read_pipe_password(new_raw, "new").await?;
+                let _permit = permit;
+                let (old_password, new_password) = tokio::try_join!(
+                    read_pipe_password(old_password_fd, "old", PIPE_READ_TIMEOUT),
+                    read_pipe_password(new_password_fd, "new", PIPE_READ_TIMEOUT),
+                )?;
 
                 let provider = state.provider_by_id(&provider_id).ok_or_else(|| {
                     FdoError::Failed(format!("provider '{provider_id}' not found"))
@@ -628,60 +602,86 @@ impl RosecManagement {
     }
 }
 
-/// Give up waiting for a password on a caller-supplied pipe after this long,
-/// so a peer that passes a pipe and never writes cannot tie up a thread.
 const PIPE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_PASSWORD_BYTES: usize = 4096;
+static CREDENTIAL_PIPE_REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
 
-/// Blocking read of a password from a raw pipe fd into a `Zeroizing<String>`.
-/// Takes ownership of `raw` and closes it on return.
-fn read_pipe_password_blocking(
-    raw: std::os::unix::io::RawFd,
-    name: &str,
-) -> Result<zeroize::Zeroizing<String>, FdoError> {
-    use std::io::Read as _;
-    use std::os::unix::io::FromRawFd as _;
-    // SAFETY: `raw` is a valid, owned dup'd fd handed to this function.
-    let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
-    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
-    file.read_to_end(&mut buf)
-        .map_err(|e| FdoError::Failed(format!("read from {name} pipe failed: {e}")))?;
-    // Strip a trailing null (pam_exec null-terminates) then a trailing newline.
-    if buf.last() == Some(&0) {
-        buf.pop();
-    }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-    }
-    if buf.is_empty() {
-        return Err(FdoError::Failed(format!("{name} password is empty")));
-    }
-    // Validate UTF-8 against the zeroizing buffer and copy into a
-    // Zeroizing<String>; a mem::take would move the bytes out of the zeroizing
-    // wrapper and drop a plain Vec on the error path.
-    let s = std::str::from_utf8(&buf)
-        .map_err(|_| FdoError::Failed(format!("{name} password is not valid UTF-8")))?;
-    Ok(zeroize::Zeroizing::new(s.to_owned()))
+fn credential_pipe_permit() -> Result<tokio::sync::SemaphorePermit<'static>, FdoError> {
+    CREDENTIAL_PIPE_REQUESTS.try_acquire().map_err(|_| {
+        FdoError::LimitsExceeded("too many concurrent credential pipe requests".into())
+    })
 }
 
-/// Read a password from a caller-supplied pipe fd *off* the async runtime: the
-/// blocking read runs on a `spawn_blocking` thread and is bounded by
-/// [`PIPE_READ_TIMEOUT`]. A caller that passes a pipe read-end and never writes
-/// therefore cannot pin a Tokio worker — which would otherwise starve the
-/// runtime that every provider/secret operation funnels through.
-async fn read_pipe_password(
-    raw: std::os::unix::io::RawFd,
-    name: &'static str,
-) -> Result<zeroize::Zeroizing<String>, FdoError> {
-    let handle = tokio::task::spawn_blocking(move || read_pipe_password_blocking(raw, name));
-    match tokio::time::timeout(PIPE_READ_TIMEOUT, handle).await {
-        Ok(join) => {
-            join.map_err(|e| FdoError::Failed(format!("{name} pipe read task failed: {e}")))?
-        }
-        Err(_) => Err(FdoError::Failed(format!(
-            "{name} password pipe read timed out after {}s",
-            PIPE_READ_TIMEOUT.as_secs()
-        ))),
+/// Reopen the pipe via procfs to acquire an independent file description.
+/// Setting O_NONBLOCK on a dup would let the sender unset it again.
+fn nonblocking_pipe(fd: OwnedFd) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+
+    let file = std::fs::File::from(std::os::fd::OwnedFd::from(fd));
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    if flags & (libc::O_ACCMODE | libc::O_PATH) != libc::O_RDONLY
+        || !file.metadata()?.file_type().is_fifo()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected a read-only pipe descriptor",
+        ));
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+async fn read_pipe_password(
+    fd: OwnedFd,
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<zeroize::Zeroizing<String>, FdoError> {
+    use std::io::Read as _;
+
+    let read_error = |e| FdoError::Failed(format!("read from {name} pipe failed: {e}"));
+    let file = nonblocking_pipe(fd).map_err(read_error)?;
+    // SAFETY: AsyncFd owns the file and its descriptor is stable until drop.
+    let pipe = unsafe { tokio::io::unix::AsyncFd::register(file) }
+        .map_err(|e| FdoError::Failed(format!("register {name} password pipe: {e}")))?;
+    let mut buf = zeroize::Zeroizing::new([0u8; MAX_PASSWORD_BYTES + 1]);
+    let count = tokio::time::timeout(timeout, async {
+        let mut used = 0;
+        loop {
+            let mut ready = pipe.readable().await.map_err(read_error)?;
+            match ready.try_io(|inner| inner.get_ref().read(&mut buf[used..])) {
+                Ok(Ok(0)) => return Ok(used),
+                Ok(Ok(count)) => {
+                    used += count;
+                    if used > MAX_PASSWORD_BYTES {
+                        return Err(FdoError::LimitsExceeded(format!(
+                            "{name} password pipe exceeds {MAX_PASSWORD_BYTES} bytes"
+                        )));
+                    }
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Ok(Err(e)) => return Err(read_error(e)),
+                Err(_) => continue,
+            }
+        }
+    })
+    .await
+    .map_err(|_| FdoError::Failed(format!("{name} password pipe read timed out")))??;
+
+    let bytes = &buf[..count];
+    let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if bytes.is_empty() {
+        return Err(FdoError::Failed(format!("{name} password is empty")));
+    }
+    let password = std::str::from_utf8(bytes)
+        .map_err(|_| FdoError::Failed(format!("{name} password is not valid UTF-8")))?;
+    Ok(zeroize::Zeroizing::new(password.to_owned()))
 }
 
 /// Create a `(read_fd, write_fd)` pipe used to signal cancellation.
@@ -857,4 +857,47 @@ pub struct PasswordEntry {
     pub id: String,
     /// Human-readable label (empty if none was set).
     pub label: String,
+}
+
+#[cfg(test)]
+mod credential_pipe_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn completed_pipe_preserves_password_protocol() {
+        let (read, mut write) = std::io::pipe().unwrap();
+        write.write_all(b"fixture\n\0").unwrap();
+        drop(write);
+        let read = OwnedFd::from(std::os::fd::OwnedFd::from(read));
+        let password = read_pipe_password(read, "fixture", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(password.as_str(), "fixture");
+    }
+
+    #[tokio::test]
+    async fn timeout_cancels_pending_pipe_read() {
+        let (read, mut write) = std::io::pipe().unwrap();
+        let read = OwnedFd::from(std::os::fd::OwnedFd::from(read));
+        let error = read_pipe_password(read, "fixture", Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            write.write_all(b"x").unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_credentials_fail_with_a_limit_error() {
+        let (read, mut write) = std::io::pipe().unwrap();
+        let writer = std::thread::spawn(move || write.write_all(&[b'a'; MAX_PASSWORD_BYTES + 1]));
+        let read = OwnedFd::from(std::os::fd::OwnedFd::from(read));
+        let result = read_pipe_password(read, "fixture", Duration::from_secs(1)).await;
+        writer.join().unwrap().unwrap();
+        assert!(matches!(result, Err(FdoError::LimitsExceeded(_))));
+    }
 }
