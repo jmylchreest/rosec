@@ -33,7 +33,7 @@ pub enum PendingOperation {
     Unlock,
 
     /// Requested objects still awaiting a provider unlock.
-    UnlockTargets(Vec<String>),
+    UnlockTargets(Vec<crate::unlock_plan::UnlockTarget>),
 
     /// Deferred `CreateItem`: execute `provider.create_item()` after unlock.
     CreateItem {

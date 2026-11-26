@@ -176,7 +176,7 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         .call("CreateItem", &(properties("new"), &secret, false))
         .await
         .unwrap();
-    assert!(path.as_str().contains("/work/primary_"), "{path}");
+    assert!(path.as_str().contains("/default/primary_"), "{path}");
     assert_eq!(prompt.as_str(), "/");
     assert_eq!(primary.items.lock().unwrap()[0].label, "new");
     let matches_path = |msg: &zbus::Message| {
@@ -262,7 +262,7 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         .await
         .unwrap();
     assert_eq!(prompt.as_str(), "/");
-    assert!(path.as_str().contains("/all/unassigned_"), "{path}");
+    assert!(path.as_str().contains("/default/unassigned_"), "{path}");
     assert_eq!(
         unassigned.items.lock().unwrap()[0].label,
         "service-selected destination"
@@ -294,6 +294,66 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     assert_eq!(item.as_str(), "/");
     assert_ne!(prompt.as_str(), "/");
     assert_eq!(primary.items.lock().unwrap()[0].label, "new");
+
+    // Reuse the same bus and alias proxy while applying new membership and writers.
+    let mut next = collection_config();
+    next.collection.remove(1);
+    next.collection[0].providers = vec!["secondary".into(), "external".into()];
+    next.collection[0].write_provider = Some("secondary".into());
+    next.collection[0].aliases.clear();
+    next.collection.push(rosec_core::config::CollectionConfig {
+        id: "new_view".into(),
+        providers: vec!["secondary".into()],
+        write_provider: None,
+        aliases: vec!["default".into()],
+    });
+    state.reload_collections(&next).await.unwrap();
+    let default: OwnedObjectPath = service.call("ReadAlias", &("default",)).await.unwrap();
+    assert!(default.as_str().ends_with("/new_view"));
+    let items: Vec<OwnedObjectPath> = work
+        .call("SearchItems", &(HashMap::<String, String>::new(),))
+        .await
+        .unwrap();
+    assert_eq!(
+        items, archive_items,
+        "the original alias proxy sees the new view and stable item path"
+    );
+    assert!(
+        archive
+            .call_method("SearchItems", &(HashMap::<String, String>::new(),))
+            .await
+            .is_err()
+    );
+
+    let changed_work = Proxy::new(
+        &client,
+        dest,
+        format!("{SERVICE_PATH}/collection/work"),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    let (written, prompt): (OwnedObjectPath, OwnedObjectPath) = changed_work
+        .call("CreateItem", &(properties("after reload"), &secret, false))
+        .await
+        .unwrap();
+    assert_eq!(written, archive_items[0]);
+    assert_eq!(prompt.as_str(), "/");
+    assert_eq!(secondary.items.lock().unwrap()[0].label, "after reload");
+
+    next.collection[0].write_provider = Some("primary".into());
+    assert!(state.reload_collections(&next).await.is_err());
+    let default: OwnedObjectPath = service.call("ReadAlias", &("default",)).await.unwrap();
+    assert!(default.as_str().ends_with("/new_view"));
+
+    state.reload_collections(&Config::default()).await.unwrap();
+    let default: OwnedObjectPath = service.call("ReadAlias", &("default",)).await.unwrap();
+    assert!(default.as_str().ends_with("/default"));
+    let items: Vec<OwnedObjectPath> = work
+        .call("SearchItems", &(HashMap::<String, String>::new(),))
+        .await
+        .unwrap();
+    assert!(items.contains(&written));
 }
 
 fn collection_config() -> Config {

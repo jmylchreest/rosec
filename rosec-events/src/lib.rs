@@ -20,12 +20,12 @@ struct DomainState {
 pub struct EventCoordinator<K> {
     domain: Mutex<DomainState>,
     items: Arc<Mutex<HashMap<K, ItemMeta>>>,
-    key: Box<dyn Fn(&ItemMeta) -> K + Send + Sync>,
+    key: fn(&ItemMeta) -> K,
     revision: tokio::sync::watch::Sender<u64>,
     refresh: tokio::sync::Mutex<()>,
 }
 impl<K: Eq + Hash> EventCoordinator<K> {
-    pub fn new(key: impl Fn(&ItemMeta) -> K + Send + Sync + 'static) -> Self {
+    pub fn new(key: fn(&ItemMeta) -> K) -> Self {
         Self {
             domain: Mutex::new(DomainState {
                 inventory: Inventory::default(),
@@ -34,7 +34,7 @@ impl<K: Eq + Hash> EventCoordinator<K> {
                 dirty: HashSet::new(),
             }),
             items: Arc::new(Mutex::new(HashMap::new())),
-            key: Box::new(key),
+            key,
             revision: tokio::sync::watch::channel(0).0,
             refresh: tokio::sync::Mutex::new(()),
         }
@@ -162,6 +162,20 @@ impl<K: Eq + Hash> EventCoordinator<K> {
             self.revision.send_replace(batch.revision);
         }
     }
+    pub fn reproject(&self, project: impl FnOnce(&Inventory) -> Vec<ItemMeta>) {
+        let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        let visible = project(&domain.inventory);
+        if let Some(batch) = domain.journal.commit(&visible) {
+            self.revision.send_replace(batch.revision);
+        }
+        *items = visible
+            .into_iter()
+            .map(|meta| ((self.key)(&meta), meta))
+            .collect();
+        domain.epoch += 1;
+    }
+
     pub async fn refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.refresh.lock().await
     }

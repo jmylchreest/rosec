@@ -4,21 +4,30 @@ use crate::state::{ServiceState, map_provider_error};
 
 pub(crate) struct UnlockPlan {
     pub unlocked: Vec<String>,
-    pub pending: Vec<String>,
+    pub pending: Vec<UnlockTarget>,
     pub next_provider: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UnlockTarget {
+    pub path: String,
+    pub providers: Vec<String>,
+    collection: bool,
 }
 
 pub(crate) fn targets<'a>(
     state: &ServiceState,
     paths: impl IntoIterator<Item = &'a str>,
-) -> Vec<(String, Vec<String>)> {
+) -> Vec<UnlockTarget> {
     let mut targets = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let layout = state.collections();
     for path in paths {
         if !seen.insert(path) {
             continue;
         }
-        let providers = if let Some(view) = state.collections.at(path) {
+        let view = layout.at(path);
+        let providers = if let Some(view) = view {
             state
                 .providers_ordered()
                 .iter()
@@ -30,21 +39,24 @@ pub(crate) fn targets<'a>(
         } else {
             continue;
         };
-        targets.push((path.to_owned(), providers));
+        targets.push(UnlockTarget {
+            path: path.to_owned(),
+            providers,
+            collection: view.is_some(),
+        });
     }
     targets
 }
 
 pub(crate) async fn resolve(
     state: &ServiceState,
-    paths: &[String],
+    targets: &[UnlockTarget],
 ) -> zbus::fdo::Result<UnlockPlan> {
-    let targets = targets(state, paths.iter().map(String::as_str));
     let mut statuses = std::collections::HashMap::new();
     for provider in state.providers_ordered() {
         if targets
             .iter()
-            .any(|(_, ids)| ids.iter().any(|id| id == provider.id()))
+            .any(|target| target.providers.iter().any(|id| id == provider.id()))
         {
             statuses.insert(
                 provider.id().to_owned(),
@@ -58,17 +70,21 @@ pub(crate) async fn resolve(
         next_provider: None,
     };
     let mut collection_candidate = None;
-    for (path, ids) in targets {
+    for target in targets {
+        let ids = &target.providers;
         if ids.iter().any(|id| statuses.get(id) == Some(&false)) {
-            plan.unlocked.push(path);
+            plan.unlocked.push(target.path.clone());
         } else {
-            let candidate = ids.into_iter().find(|id| statuses.get(id) == Some(&true));
-            if state.collections.at(&path).is_some() {
+            let candidate = ids
+                .iter()
+                .find(|id| statuses.get(*id) == Some(&true))
+                .cloned();
+            if target.collection {
                 collection_candidate = collection_candidate.or(candidate);
             } else {
                 plan.next_provider = plan.next_provider.or(candidate);
             }
-            plan.pending.push(path);
+            plan.pending.push(target.clone());
         }
     }
     plan.next_provider = plan.next_provider.or(collection_candidate);

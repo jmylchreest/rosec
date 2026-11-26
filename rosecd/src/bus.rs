@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rosec_secret_service::server::re_register_top_level_objects;
+use rosec_secret_service::server::migrate_objects;
 use rosec_secret_service::state::ServiceState;
 use zbus::Connection;
 use zbus::fdo::RequestNameFlags;
@@ -237,12 +237,9 @@ async fn migrate_to_session_bus(
     session_conn: &Connection,
 ) -> Result<()> {
     // Register top-level D-Bus objects on the session bus.
-    re_register_top_level_objects(session_conn, state)
+    migrate_objects(session_conn, state)
         .await
         .context("re-register top-level objects on session bus")?;
-
-    // Swap the connection so dynamic item registration uses the new bus.
-    state.swap_conn(session_conn.clone());
 
     // Clear registered items so rebuild_cache re-registers them all on the
     // new connection's ObjectServer.

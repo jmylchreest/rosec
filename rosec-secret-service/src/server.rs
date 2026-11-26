@@ -98,7 +98,16 @@ pub async fn re_register_top_level_objects(
     conn: &Connection,
     state: &Arc<ServiceState>,
 ) -> zbus::Result<()> {
-    register_all_objects(conn, state).await
+    let _reload = state.collection_reload.lock().await;
+    register_all_objects(conn, state).await?;
+    Ok(())
+}
+
+pub async fn migrate_objects(conn: &Connection, state: &Arc<ServiceState>) -> zbus::Result<()> {
+    let _reload = state.collection_reload.lock().await;
+    register_all_objects(conn, state).await?;
+    state.swap_conn(conn.clone());
+    Ok(())
 }
 
 /// Shared registration logic — single source of truth for all D-Bus object
@@ -131,22 +140,30 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
         )
         .await?;
 
-    for (path, view) in state.collections.objects() {
-        let collection_state = CollectionState {
-            label: view.label.clone(),
-            items: Arc::clone(&state.cache.items),
-            service_state: Arc::clone(state),
-            sessions: Arc::clone(&state.sessions),
-            tokio_handle: tokio::runtime::Handle::current(),
-        };
-        server
-            .at(
-                path,
-                SecretCollection::for_view(collection_state, Arc::clone(view)),
-            )
-            .await?;
+    for (path, _) in state.collections().objects() {
+        register_collection(conn, state, &path).await?;
     }
+    Ok(())
+}
 
+pub(crate) async fn register_collection(
+    conn: &Connection,
+    state: &Arc<ServiceState>,
+    path: &str,
+) -> zbus::Result<()> {
+    let collection = CollectionState {
+        label: String::new(),
+        items: Arc::clone(&state.cache.items),
+        service_state: Arc::clone(state),
+        sessions: Arc::clone(&state.sessions),
+        tokio_handle: tokio::runtime::Handle::current(),
+    };
+    conn.object_server()
+        .at(
+            path,
+            SecretCollection::for_path(collection, path.to_owned()),
+        )
+        .await?;
     Ok(())
 }
 

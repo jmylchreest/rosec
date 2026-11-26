@@ -1539,15 +1539,6 @@ async fn config_watcher(
         if let Err(error) = update_config_watches(&mut watcher, &mut watched_dirs, &config_path) {
             tracing::warn!(%error, "could not update config fragment watches");
         }
-        if new_config.collection != initial_config.collection
-            || new_config.all_collection_aliases != initial_config.all_collection_aliases
-        {
-            tracing::warn!(
-                "Secret Service collections changed; restart rosecd to apply the new configuration"
-            );
-            continue;
-        }
-
         if new_config.service.wasm_trusted_key != initial_config.service.wasm_trusted_key
             || new_config.service.wasm_verify != initial_config.service.wasm_verify
             || new_config.service.wasm_prefer != initial_config.service.wasm_prefer
@@ -1573,7 +1564,7 @@ async fn config_watcher(
         let new_fingerprints = fingerprint_providers(&new_config);
 
         let config_value = serde_json::to_value(&new_config)?;
-        if config_value == known_config {
+        if config_value == known_config && new_fingerprints == known {
             tracing::debug!("config unchanged, no reload needed");
             continue;
         }
@@ -1591,6 +1582,12 @@ async fn config_watcher(
             &mut plugin_registry,
         )
         .await;
+
+        if let Err(error) = state.reload_collections(&new_config).await {
+            tracing::warn!(%error, "could not reload Secret Service collections; keeping the current collection layout");
+            known = new_fingerprints;
+            continue;
+        }
 
         log_non_provider_section_changes(&state, &new_config).await;
 

@@ -49,6 +49,7 @@ struct View {
     bus: Option<(String, String)>,
     items: BTreeMap<ItemIdentity, ItemMeta>,
     collection_locked: HashMap<String, bool>,
+    layout: Option<Arc<crate::collection_layout::CollectionLayout>>,
 }
 impl View {
     async fn reconcile(&mut self, state: &Arc<ServiceState>) -> zbus::Result<()> {
@@ -62,6 +63,7 @@ impl View {
         if self.bus.as_ref() != Some(&bus) {
             self.items.clear();
             self.collection_locked.clear();
+            self.layout = None;
             self.revision = 0;
             self.bus = Some(bus);
         }
@@ -81,15 +83,6 @@ impl View {
                 invalidated.extend(current.keys().cloned());
             }
         }
-        let added: Vec<_> = current
-            .keys()
-            .filter(|key| !self.items.contains_key(*key))
-            .collect();
-        let removed: Vec<_> = self
-            .items
-            .keys()
-            .filter(|key| !current.contains_key(*key))
-            .collect();
         let changed: Vec<_> = current
             .iter()
             .filter(|(key, meta)| {
@@ -116,28 +109,62 @@ impl View {
             );
         }
         let mut collection_locked = HashMap::new();
-        for (path, view) in state.collections.objects() {
+        let layout = state.collections();
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|old| old.canonical.keys().ne(layout.canonical.keys()))
+        {
+            invalidate(
+                &conn,
+                crate::server::SERVICE_PATH,
+                "org.freedesktop.Secret.Service",
+                &["Collections"],
+            )
+            .await?;
+        }
+        for (path, view) in layout.objects() {
             let locked = !locks
                 .iter()
                 .any(|(id, unlocked)| *unlocked && view.includes(id));
             collection_locked.insert(path.clone(), locked);
-            let includes = |key: &&ItemIdentity| view.includes(&key.provider_id);
+            let old_view = self.layout.as_ref().and_then(|old| old.at(&path));
+            let previously_visible = |key: &ItemIdentity| {
+                self.items.contains_key(key)
+                    && old_view.is_some_and(|view| view.includes(&key.provider_id))
+            };
+            let visible =
+                |key: &ItemIdentity| current.contains_key(key) && view.includes(&key.provider_id);
             let emitter = SignalEmitter::new(&conn, path.as_str())?;
-            for key in removed.iter().copied().filter(includes) {
+            let mut items_changed = false;
+            for key in self
+                .items
+                .keys()
+                .filter(|key| previously_visible(key) && !visible(key))
+            {
+                items_changed = true;
                 SecretCollection::item_deleted(
                     &emitter,
                     to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
                 )
                 .await?;
             }
-            for key in added.iter().copied().filter(includes) {
+            for key in current
+                .keys()
+                .filter(|key| visible(key) && !previously_visible(key))
+            {
+                items_changed = true;
                 SecretCollection::item_created(
                     &emitter,
                     to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
                 )
                 .await?;
             }
-            for key in changed.iter().copied().filter(includes) {
+            for key in changed
+                .iter()
+                .copied()
+                .filter(|key| visible(key) && previously_visible(key))
+            {
                 SecretCollection::item_changed(
                     &emitter,
                     to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
@@ -145,7 +172,7 @@ impl View {
                 .await?;
             }
             let mut properties = Vec::new();
-            if added.iter().chain(&removed).any(includes) {
+            if items_changed {
                 properties.push("Items");
             }
             if self
@@ -154,6 +181,9 @@ impl View {
                 .is_some_and(|old| *old != locked)
             {
                 properties.push("Locked");
+            }
+            if old_view.is_some_and(|old| old.label != view.label) {
+                properties.push("Label");
             }
             if !properties.is_empty() {
                 invalidate(
@@ -165,6 +195,7 @@ impl View {
                 .await?;
             }
         }
+        self.layout = Some(layout);
         self.items = current;
         self.revision = revision;
         self.collection_locked = collection_locked;

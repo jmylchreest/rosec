@@ -114,7 +114,7 @@ only read-only members rejects new items. Replacing or deleting an existing item
 uses the provider that owns it, so a read-only item stays read-only even in a
 collection that accepts new items.
 
-The commands edit your user config. Restart `rosecd` to apply the changes.
+The commands edit your user config. A running `rosecd` applies the changes automatically.
 You can also set them directly:
 
 ```toml
@@ -143,8 +143,7 @@ collections come from config includes, the CLI writes the effective collection
 list into the main config file.
 
 Providers can belong to multiple collections. Those views share the same item
-and provider lock state. Changing the first collection that contains a provider
-can change the D-Bus paths of its items after restart. With configured
+and provider lock state. Moving a provider between views keeps its existing item paths. With configured
 collections, collection searches return items from their members. Service-wide
 searches include every provider and keep copies from different providers visible.
 The existing `[[provider]].collection` setting still adds an item attribute for

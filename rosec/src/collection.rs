@@ -129,7 +129,7 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
 
     rosec_core::config_edit::set_collections(&path, &collections, &all_aliases)?;
     println!(
-        "Updated {}. Restart rosecd to apply collection changes.",
+        "Updated {}. rosecd reloads collection changes automatically.",
         path.display()
     );
     Ok(())

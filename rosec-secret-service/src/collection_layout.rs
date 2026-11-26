@@ -9,6 +9,7 @@ use crate::server::DEFAULT_COLLECTION_PATH;
 pub(crate) const COLLECTION_ROOT: &str = "/org/freedesktop/secrets/collection";
 const ALIAS_ROOT: &str = "/org/freedesktop/secrets/aliases";
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct CollectionView {
     pub label: String,
     pub providers: Vec<String>,
@@ -31,11 +32,10 @@ impl CollectionView {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct CollectionLayout {
     pub canonical: BTreeMap<String, Arc<CollectionView>>,
     aliases: BTreeMap<String, String>,
-    all_path: String,
-    item_parents: BTreeMap<String, String>,
     pub legacy: bool,
 }
 
@@ -56,7 +56,6 @@ impl CollectionLayout {
             .iter()
             .map(|alias| (alias.clone(), all_path.clone()))
             .collect();
-        let mut item_parents = BTreeMap::new();
         let mut all = CollectionView::legacy();
         if !legacy {
             all.label = ALL_COLLECTION_ID.into();
@@ -70,11 +69,6 @@ impl CollectionLayout {
         })?;
         for (entry, writer) in config.iter().zip(writers) {
             let path = format!("{COLLECTION_ROOT}/{}", entry.id);
-            for provider in &entry.providers {
-                item_parents
-                    .entry(provider.clone())
-                    .or_insert_with(|| path.clone());
-            }
             for alias in &entry.aliases {
                 aliases.insert(alias.clone(), path.clone());
             }
@@ -96,8 +90,6 @@ impl CollectionLayout {
         Ok(Self {
             canonical,
             aliases,
-            all_path,
-            item_parents,
             legacy,
         })
     }
@@ -123,13 +115,5 @@ impl CollectionLayout {
                     .iter()
                     .map(|(alias, path)| (format!("{ALIAS_ROOT}/{alias}"), &self.canonical[path])),
             )
-    }
-
-    // A provider can appear in several views. Keep a single item object,
-    // underneath the first collection that includes the provider.
-    pub fn item_parent(&self, provider: &str) -> &str {
-        self.item_parents
-            .get(provider)
-            .map_or(self.all_path.as_str(), String::as_str)
     }
 }

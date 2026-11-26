@@ -26,20 +26,31 @@ pub struct CollectionState {
 
 pub struct SecretCollection {
     state: CollectionState,
-    view: Arc<CollectionView>,
+    path: Option<String>,
 }
 
 impl SecretCollection {
     pub fn new(state: CollectionState) -> Self {
-        Self::for_view(state, Arc::new(CollectionView::legacy()))
+        Self { state, path: None }
     }
 
-    pub(crate) fn for_view(state: CollectionState, view: Arc<CollectionView>) -> Self {
-        Self { state, view }
+    pub(crate) fn for_path(state: CollectionState, path: String) -> Self {
+        Self {
+            state,
+            path: Some(path),
+        }
+    }
+
+    fn view(&self) -> Option<Arc<CollectionView>> {
+        match &self.path {
+            Some(path) => self.state.service_state.collections().at(path).cloned(),
+            None => Some(Arc::new(CollectionView::legacy())),
+        }
     }
 
     fn scoped_writer(
         &self,
+        view: &CollectionView,
         item: &NewItem,
         replace: bool,
     ) -> Result<Arc<dyn Provider>, SecretServiceError> {
@@ -54,7 +65,7 @@ impl SecretCollection {
             items
                 .values()
                 .filter(|meta| {
-                    self.view.includes(&meta.provider_id)
+                    view.includes(&meta.provider_id)
                         && if item.attributes.is_empty() {
                             meta.label == item.label
                         } else {
@@ -77,12 +88,9 @@ impl SecretCollection {
         } else {
             None
         };
-        let id = owner
-            .as_ref()
-            .or(self.view.writer.as_ref())
-            .ok_or_else(|| {
-                SecretServiceError::NotSupported("collection has no write-capable provider".into())
-            })?;
+        let id = owner.as_ref().or(view.writer.as_ref()).ok_or_else(|| {
+            SecretServiceError::NotSupported("collection has no write-capable provider".into())
+        })?;
         let provider = state.provider_by_id(id).ok_or_else(|| {
             SecretServiceError::Failed(format!("collection provider '{id}' is unavailable"))
         })?;
@@ -113,15 +121,21 @@ impl SecretCollection {
         item: OwnedObjectPath,
     ) -> zbus::Result<()>;
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn label(&self) -> String {
-        self.state.label.clone()
+        if self.path.is_none() {
+            return self.state.label.clone();
+        }
+        self.view()
+            .map_or_else(String::new, |view| view.label.clone())
     }
 
     #[zbus(property(emits_changed_signal = "invalidates"))]
     async fn locked(&self) -> bool {
         let state = Arc::clone(&self.state.service_state);
-        let view = Arc::clone(&self.view);
+        let Some(view) = self.view() else {
+            return true;
+        };
         self.state
             .tokio_handle
             .spawn(async move { state.collection_is_locked(&view).await })
@@ -131,13 +145,16 @@ impl SecretCollection {
 
     #[zbus(property(emits_changed_signal = "invalidates"))]
     fn items(&self) -> Vec<OwnedObjectPath> {
+        let Some(view) = self.view() else {
+            return vec![];
+        };
         self.state
             .items
             .lock()
             .map(|items| {
                 items
                     .iter()
-                    .filter(|(_, meta)| self.view.includes(&meta.provider_id))
+                    .filter(|(_, meta)| view.includes(&meta.provider_id))
                     .map(|(path, _)| to_object_path(path))
                     .collect()
             })
@@ -148,6 +165,9 @@ impl SecretCollection {
         &self,
         attributes: HashMap<String, String>,
     ) -> Result<Vec<OwnedObjectPath>, FdoError> {
+        let view = self
+            .view()
+            .ok_or_else(|| FdoError::UnknownObject("collection retired".into()))?;
         let items = self
             .state
             .items
@@ -159,7 +179,7 @@ impl SecretCollection {
         let matched: Vec<OwnedObjectPath> = items
             .iter()
             .filter(|(_, item)| {
-                self.view.includes(&item.provider_id) && meta_matches_query(item, &attributes)
+                view.includes(&item.provider_id) && meta_matches_query(item, &attributes)
             })
             .map(|(path, _)| to_object_path(path))
             .collect();
@@ -223,8 +243,11 @@ impl SecretCollection {
         // A read-only provider that owns a matching item does not block the
         // write — we shadow it with a new item in a writable provider.  The
         // dedup layer surfaces the priority winner to clients.
-        let write_provider = if !self.view.legacy {
-            self.scoped_writer(&item, replace)?
+        let view = self
+            .view()
+            .ok_or_else(|| SecretServiceError::Failed("collection retired".into()))?;
+        let write_provider = if !view.legacy {
+            self.scoped_writer(&view, &item, replace)?
         } else {
             match self
                 .state

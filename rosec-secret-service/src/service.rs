@@ -41,10 +41,10 @@ impl SecretService {
 
 #[interface(name = "org.freedesktop.Secret.Service")]
 impl SecretService {
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn collections(&self) -> Vec<OwnedObjectPath> {
         self.state
-            .collections
+            .collections()
             .canonical
             .keys()
             .map(|path| to_object_path(path))
@@ -205,7 +205,7 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<OwnedObjectPath, FdoError> {
         log_dbus_caller("service", "ReadAlias", &header);
-        Ok(to_object_path(self.state.collections.alias(name)))
+        Ok(to_object_path(self.state.collections().alias(name)))
     }
 
     fn set_alias(
@@ -215,8 +215,8 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("service", "SetAlias", &header);
-        if self.state.collections.legacy
-            || self.state.collections.alias(name) == collection.as_str()
+        if self.state.collections().legacy
+            || self.state.collections().alias(name) == collection.as_str()
         {
             return Ok(());
         }
@@ -231,14 +231,14 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "Lock", &header);
-        let targets = (!self.state.collections.legacy).then(|| {
+        let targets = (!self.state.collections().legacy).then(|| {
             crate::unlock_plan::targets(&self.state, objects.iter().map(|path| path.as_str()))
         });
         for provider in self.state.providers_ordered() {
             if targets.as_ref().is_some_and(|targets| {
                 !targets
                     .iter()
-                    .any(|(_, ids)| ids.iter().any(|id| id == provider.id()))
+                    .any(|target| target.providers.iter().any(|id| id == provider.id()))
             }) {
                 continue;
             }
@@ -257,7 +257,7 @@ impl SecretService {
             }
             Some(targets) => targets
                 .into_iter()
-                .map(|(path, _)| to_object_path(&path))
+                .map(|target| to_object_path(&target.path))
                 .collect(),
         };
         Ok((locked, to_object_path("/")))
@@ -271,11 +271,12 @@ impl SecretService {
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "Unlock", &header);
 
-        let paths: Vec<String> = objects.iter().map(|path| path.to_string()).collect();
+        let targets =
+            crate::unlock_plan::targets(&self.state, objects.iter().map(|path| path.as_str()));
         let state = Arc::clone(&self.state);
         let plan = self
             .state
-            .run_on_tokio(async move { crate::unlock_plan::resolve(&state, &paths).await })
+            .run_on_tokio(async move { crate::unlock_plan::resolve(&state, &targets).await })
             .await??;
         let unlocked = plan
             .unlocked
@@ -309,8 +310,9 @@ impl SecretService {
         // Preserve the empty-alias shortcut used by clients at startup.
         // For an existing alias the spec returns its collection without a prompt.
         let name = if alias.is_empty() { "default" } else { &alias };
-        let path = self.state.collections.alias(name);
-        if path == "/" && !self.state.collections.legacy {
+        let layout = self.state.collections();
+        let path = layout.alias(name);
+        if path == "/" && !layout.legacy {
             return Err(FdoError::NotSupported(
                 "manage collections with rosec collection".into(),
             ));
