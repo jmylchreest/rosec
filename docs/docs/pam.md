@@ -98,6 +98,21 @@ is no stash-and-replay for the `session` phase:
 auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
 ```
 
+## Daemon identity
+
+The daemon runs as the signed-in user. For automatic PAM unlock, the helper
+verifies that the daemon is running a root-owned executable from a trusted
+installation. It discovers `bin/rosecd` in the same installation as the
+helper, including helpers installed under `lib/rosec` or `libexec/rosec`.
+It also checks `/usr/bin/rosecd`.
+A user profile can point into a system-managed package store.
+
+For split packages or custom layouts, set `ROSEC_PAM_DAEMON_PATH` at build
+time to a comma-separated list of absolute or helper-relative daemon paths. This replaces the
+default list. If the helper cannot
+verify the daemon, or the installation is user-writable, OS login proceeds
+and the vault can be unlocked manually.
+
 ## Security
 
 - **Cannot block login:** `pam_rosec.so` returns `PAM_SUCCESS` on every

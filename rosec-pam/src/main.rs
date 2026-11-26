@@ -32,7 +32,10 @@ use std::os::unix::io::FromRawFd as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 use zeroize::Zeroizing;
 
+mod daemon_identity;
 mod sandbox;
+
+use daemon_identity::daemon_proxy;
 
 /// Exit codes for pam_exec. PAM_SUCCESS = 0, PAM_IGNORE = 25.
 /// We use PAM_SUCCESS on success and PAM_IGNORE on any failure so that
@@ -372,7 +375,7 @@ const CONNECT_RETRY_DELAYS_MS: &[u64] = &[
     250, 1000, 1000, 1000, 1000, 1000,
 ];
 
-async fn connect_and_wait_for_daemon() -> Result<zbus::Connection> {
+async fn connect_and_wait_for_daemon() -> Result<zbus::Proxy<'static>> {
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
@@ -401,34 +404,17 @@ async fn connect_and_wait_for_daemon() -> Result<zbus::Connection> {
     }
 }
 
-async fn probe_once() -> Result<zbus::Connection> {
-    let conn = pam_connect().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+async fn probe_once() -> Result<zbus::Proxy<'static>> {
+    let proxy = daemon_proxy(pam_connect().await?).await?;
     let _: Vec<ProviderEntry> = proxy
         .call("ProviderList", &())
         .await
         .context("ProviderList probe")?;
-    Ok(conn)
+    Ok(proxy)
 }
 
 async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
-    let conn = connect_and_wait_for_daemon().await?;
-
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+    let proxy = connect_and_wait_for_daemon().await?;
 
     debug_log("calling ProviderList");
     let providers: Vec<ProviderEntry> = proxy
@@ -571,16 +557,7 @@ fn change_vault_passwords(old_password: &[u8], new_password: &[u8]) -> Result<()
 }
 
 async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) -> Result<()> {
-    let conn = pam_connect().await?;
-
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+    let proxy = daemon_proxy(pam_connect().await?).await?;
 
     debug_log("calling ProviderList");
     let providers: Vec<ProviderEntry> = proxy
