@@ -100,11 +100,16 @@ auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unloc
 
 ## Daemon identity
 
-The PAM helper expects a root-owned daemon installed at `/usr/bin/rosecd`.
-When packaging a different installation path, build `rosec-pam-unlock` with
-`ROSEC_PAM_DAEMON_PATH` set to the absolute path of the installed executable.
-If the session bus cannot identify that executable, the helper leaves the
-vault locked for manual unlock and OS login continues.
+The daemon runs as the signed-in user. For automatic PAM unlock, the helper
+verifies that the daemon is running a root-owned executable from a trusted
+installation. It discovers `bin/rosecd` in the same installation as the
+helper, including helpers installed under `lib/rosec` or `libexec/rosec`.
+A user profile can point into a system-managed package store.
+
+For split packages or custom layouts, set `ROSEC_PAM_DAEMON_PATH` at build
+time to the absolute path of the installed daemon. If the helper cannot
+verify the daemon, or the installation is user-writable, OS login proceeds
+and the vault can be unlocked manually.
 
 ## Security
 

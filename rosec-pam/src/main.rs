@@ -401,10 +401,24 @@ async fn connect_and_wait_for_daemon() -> Result<zbus::Proxy<'static>> {
     }
 }
 
-const DAEMON_EXECUTABLE: &str = match option_env!("ROSEC_PAM_DAEMON_PATH") {
-    Some(path) => path,
-    None => "/usr/bin/rosecd",
-};
+fn packaged_daemon_path(helper: &std::path::Path) -> Option<std::path::PathBuf> {
+    let directory = helper.parent()?;
+    if directory.ends_with("lib/rosec") || directory.ends_with("libexec/rosec") {
+        Some(directory.parent()?.parent()?.join("bin/rosecd"))
+    } else if directory.ends_with("bin") {
+        Some(directory.join("rosecd"))
+    } else {
+        None
+    }
+}
+
+fn daemon_executable() -> Result<std::path::PathBuf> {
+    if let Some(path) = option_env!("ROSEC_PAM_DAEMON_PATH") {
+        return Ok(path.into());
+    }
+    let helper = std::env::current_exe().context("locate installed PAM helper")?;
+    Ok(packaged_daemon_path(&helper).unwrap_or_else(|| "/usr/bin/rosecd".into()))
+}
 
 fn check_daemon_executable(executable: &std::path::Path, peer: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
@@ -420,16 +434,16 @@ fn check_daemon_executable(executable: &std::path::Path, peer: &std::path::Path)
     let canonical = executable
         .canonicalize()
         .context("resolve configured rosecd executable")?;
-    for directory in executable
-        .ancestors()
-        .skip(1)
-        .chain(canonical.ancestors().skip(1))
-    {
-        let metadata =
-            std::fs::metadata(directory).context("stat rosecd installation directory")?;
+    for entry in executable.ancestors().chain(canonical.ancestors()) {
+        let metadata = std::fs::symlink_metadata(entry).context("stat rosecd installation path")?;
+        // Root-owned entries in a root-owned sticky directory cannot be
+        // replaced by the users who can add their own entries there.
+        let trusted_mode = metadata.is_symlink()
+            || metadata.mode() & 0o022 == 0
+            || (metadata.is_dir() && metadata.mode() & 0o1000 != 0);
         anyhow::ensure!(
-            metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
-            "configured rosecd must be under root-owned, non-writable directories"
+            metadata.uid() == 0 && trusted_mode,
+            "configured rosecd must be under a trusted system installation"
         );
     }
     let running = std::fs::metadata(peer).context("stat D-Bus peer executable")?;
@@ -456,7 +470,7 @@ async fn daemon_proxy(conn: zbus::Connection) -> Result<zbus::Proxy<'static>> {
         .get_connection_unix_process_id(destination.clone())
         .await?;
     check_daemon_executable(
-        std::path::Path::new(DAEMON_EXECUTABLE),
+        &daemon_executable()?,
         std::path::Path::new(&format!("/proc/{pid}/exe")),
     )?;
     drop(bus);
@@ -697,6 +711,23 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
 #[cfg(test)]
 mod daemon_identity_tests {
     use super::*;
+
+    #[test]
+    fn locates_daemon_in_package_layouts() {
+        for (helper, daemon) in [
+            ("/usr/lib/rosec/rosec-pam-unlock", "/usr/bin/rosecd"),
+            ("/usr/local/bin/rosec-pam-unlock", "/usr/local/bin/rosecd"),
+            (
+                "/nix/store/example-rosec/libexec/rosec/rosec-pam-unlock",
+                "/nix/store/example-rosec/bin/rosecd",
+            ),
+        ] {
+            assert_eq!(
+                packaged_daemon_path(std::path::Path::new(helper)).unwrap(),
+                std::path::Path::new(daemon)
+            );
+        }
+    }
 
     #[test]
     fn only_matches_the_configured_executable_inode() {
