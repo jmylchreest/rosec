@@ -283,10 +283,11 @@ mod tests {
         let mut unconfirmed_copy = entry.clone();
         unconfirmed_copy.item_id = "another-item".into();
         unconfirmed_copy.require_confirm = false;
-        let mut keys = store.write().unwrap();
-        keys.insert(unconfirmed_copy);
-        keys.insert(entry);
-        drop(keys);
+        {
+            let mut keys = store.write().unwrap();
+            keys.insert(unconfirmed_copy);
+            keys.insert(entry);
+        }
         let mut agent = SshAgent::new(store, PathBuf::new())
             .with_confirm(Arc::new(|_, _| Box::pin(async { false })));
         let mut identities = agent.request_identities().await.unwrap();
