@@ -98,6 +98,14 @@ is no stash-and-replay for the `session` phase:
 auth  optional  pam_exec.so  expose_authtok quiet /usr/lib/rosec/rosec-pam-unlock
 ```
 
+## Daemon identity
+
+The PAM helper expects a root-owned daemon installed at `/usr/bin/rosecd`.
+When packaging a different installation path, build `rosec-pam-unlock` with
+`ROSEC_PAM_DAEMON_PATH` set to the absolute path of the installed executable.
+If the session bus cannot identify that executable, the helper leaves the
+vault locked for manual unlock and OS login continues.
+
 ## Security
 
 - **Cannot block login:** `pam_rosec.so` returns `PAM_SUCCESS` on every

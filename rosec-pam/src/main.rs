@@ -372,7 +372,7 @@ const CONNECT_RETRY_DELAYS_MS: &[u64] = &[
     250, 1000, 1000, 1000, 1000, 1000,
 ];
 
-async fn connect_and_wait_for_daemon() -> Result<zbus::Connection> {
+async fn connect_and_wait_for_daemon() -> Result<zbus::Proxy<'static>> {
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
@@ -401,34 +401,83 @@ async fn connect_and_wait_for_daemon() -> Result<zbus::Connection> {
     }
 }
 
-async fn probe_once() -> Result<zbus::Connection> {
-    let conn = pam_connect().await?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+const DAEMON_EXECUTABLE: &str = match option_env!("ROSEC_PAM_DAEMON_PATH") {
+    Some(path) => path,
+    None => "/usr/bin/rosecd",
+};
+
+fn check_daemon_executable(executable: &std::path::Path, peer: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let installed = std::fs::metadata(executable).context("stat configured rosecd executable")?;
+    anyhow::ensure!(
+        executable.is_absolute()
+            && installed.is_file()
+            && installed.uid() == 0
+            && installed.mode() & 0o022 == 0,
+        "configured rosecd must be an absolute path to a root-owned executable"
+    );
+    let canonical = executable
+        .canonicalize()
+        .context("resolve configured rosecd executable")?;
+    for directory in executable
+        .ancestors()
+        .skip(1)
+        .chain(canonical.ancestors().skip(1))
+    {
+        let metadata =
+            std::fs::metadata(directory).context("stat rosecd installation directory")?;
+        anyhow::ensure!(
+            metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            "configured rosecd must be under root-owned, non-writable directories"
+        );
+    }
+    let running = std::fs::metadata(peer).context("stat D-Bus peer executable")?;
+    anyhow::ensure!(
+        (installed.dev(), installed.ino()) == (running.dev(), running.ino()),
+        "D-Bus peer executable differs from the installed rosecd"
+    );
+    Ok(())
+}
+
+async fn daemon_proxy(conn: zbus::Connection) -> Result<zbus::Proxy<'static>> {
+    let bus = zbus::fdo::DBusProxy::new(&conn).await?;
+    let owner = bus
+        .get_name_owner(zbus::names::BusName::try_from("org.freedesktop.secrets")?)
+        .await
+        .context("resolve the Secret Service owner")?;
+    let destination = zbus::names::BusName::Unique(owner.into_inner());
+    let uid = bus.get_connection_unix_user(destination.clone()).await?;
+    anyhow::ensure!(
+        uid == unsafe { libc::getuid() },
+        "rosecd is running under a different uid"
+    );
+    let pid = bus
+        .get_connection_unix_process_id(destination.clone())
+        .await?;
+    check_daemon_executable(
+        std::path::Path::new(DAEMON_EXECUTABLE),
+        std::path::Path::new(&format!("/proc/{pid}/exe")),
+    )?;
+    drop(bus);
+    // Bind every subsequent request, including credential transfer, to the
+    // verified unique connection. A new well-known name owner cannot take over.
+    zbus::Proxy::new_owned(conn, destination, "/org/rosec/Daemon", "org.rosec.Daemon")
+        .await
+        .context("create verified rosec daemon proxy")
+}
+
+async fn probe_once() -> Result<zbus::Proxy<'static>> {
+    let proxy = daemon_proxy(pam_connect().await?).await?;
     let _: Vec<ProviderEntry> = proxy
         .call("ProviderList", &())
         .await
         .context("ProviderList probe")?;
-    Ok(conn)
+    Ok(proxy)
 }
 
 async fn unlock_vaults_async(password: &[u8]) -> Result<()> {
-    let conn = connect_and_wait_for_daemon().await?;
-
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+    let proxy = connect_and_wait_for_daemon().await?;
 
     debug_log("calling ProviderList");
     let providers: Vec<ProviderEntry> = proxy
@@ -571,16 +620,7 @@ fn change_vault_passwords(old_password: &[u8], new_password: &[u8]) -> Result<()
 }
 
 async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) -> Result<()> {
-    let conn = pam_connect().await?;
-
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.secrets",
-        "/org/rosec/Daemon",
-        "org.rosec.Daemon",
-    )
-    .await
-    .context("create org.rosec.Daemon proxy")?;
+    let proxy = daemon_proxy(pam_connect().await?).await?;
 
     debug_log("calling ProviderList");
     let providers: Vec<ProviderEntry> = proxy
@@ -652,4 +692,16 @@ async fn change_vault_passwords_async(old_password: &[u8], new_password: &[u8]) 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod daemon_identity_tests {
+    use super::*;
+
+    #[test]
+    fn only_matches_the_configured_executable_inode() {
+        let installed = std::path::Path::new("/usr/bin/false");
+        assert!(check_daemon_executable(installed, installed).is_ok());
+        assert!(check_daemon_executable(installed, std::path::Path::new("/usr/bin/true")).is_err());
+    }
 }
