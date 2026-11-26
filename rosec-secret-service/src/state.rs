@@ -84,6 +84,8 @@ pub struct ServiceState {
     /// Registered providers, ordering, and per-provider config (return-attr
     /// patterns and optional collection label).  See [`ProviderRegistry`].
     pub registry: ProviderRegistry,
+    collections: RwLock<Arc<crate::collection_layout::CollectionLayout>>,
+    pub(crate) collection_reload: tokio::sync::Mutex<()>,
     pub router: Arc<Router>,
     pub sessions: Arc<SessionManager>,
     /// Item registry (mounted items, registered D-Bus paths, last-sync
@@ -142,6 +144,7 @@ impl ServiceState {
             PromptConfig::default(),
             Config::default(),
         )
+        .expect("implicit collection layout is valid")
     }
 
     /// Like `new`, but accepts per-provider `return_attr` patterns from config.
@@ -167,6 +170,7 @@ impl ServiceState {
             PromptConfig::default(),
             Config::default(),
         )
+        .expect("implicit collection layout is valid")
     }
 
     /// Full constructor: accepts `return_attr` patterns, collection map, `PromptConfig`,
@@ -182,14 +186,26 @@ impl ServiceState {
         collection_map: HashMap<String, String>,
         prompt_config: PromptConfig,
         initial_config: Config,
-    ) -> Self {
-        let events =
-            rosec_events::EventCoordinator::new(|meta| make_item_path(&meta.provider_id, &meta.id));
+    ) -> anyhow::Result<Self> {
+        let collections = Arc::new(crate::collection_layout::CollectionLayout::new(
+            &initial_config.collection,
+            &initial_config.all_collection_aliases,
+            &providers,
+        )?);
+        let events = rosec_events::EventCoordinator::new(|meta| {
+            make_item_path(
+                crate::server::DEFAULT_COLLECTION_PATH,
+                &meta.provider_id,
+                &meta.id,
+            )
+        });
         let cache = ItemCache {
             items: events.projection(),
             ..ItemCache::new()
         };
-        Self {
+        Ok(Self {
+            collections: RwLock::new(collections),
+            collection_reload: tokio::sync::Mutex::new(()),
             registry: ProviderRegistry::new(providers, return_attr_map, collection_map),
             router,
             sessions,
@@ -202,7 +218,86 @@ impl ServiceState {
             live_config: Arc::new(RwLock::new(initial_config)),
             events,
             object_lock: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    pub(crate) fn collections(&self) -> Arc<crate::collection_layout::CollectionLayout> {
+        Arc::clone(&self.collections.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub async fn reload_collections(self: &Arc<Self>, config: &Config) -> anyhow::Result<()> {
+        let _reload = self.collection_reload.lock().await;
+        let layout = Arc::new(crate::collection_layout::CollectionLayout::new(
+            &config.collection,
+            &config.all_collection_aliases,
+            &self.providers_ordered(),
+        )?);
+        let old = self.collections();
+        if *old == *layout {
+            return Ok(());
         }
+        let conn = self.conn();
+        let server = conn.object_server();
+        let mut added: Vec<String> = Vec::new();
+        for (path, _) in layout.objects().filter(|(path, _)| old.at(path).is_none()) {
+            if let Err(error) = crate::server::register_collection(&conn, self, &path).await {
+                for path in &added {
+                    let _ = server
+                        .remove::<crate::collection::SecretCollection, _>(path.as_str())
+                        .await;
+                }
+                return Err(error.into());
+            }
+            added.push(path);
+        }
+        {
+            let projection_changed = old.legacy != layout.legacy;
+            let _refresh = if projection_changed {
+                Some(self.events.refresh_guard().await)
+            } else {
+                None
+            };
+            let mut current = self.collections.write().unwrap_or_else(|e| e.into_inner());
+            if projection_changed {
+                self.events.reproject(|inventory| {
+                    if layout.legacy {
+                        self.router
+                            .dedup(inventory.items(), &self.registry.order_snapshot())
+                    } else {
+                        inventory.items()
+                    }
+                });
+            }
+            *current = Arc::clone(&layout);
+        }
+        for (path, _) in old.objects().filter(|(path, _)| layout.at(path).is_none()) {
+            if let Err(error) = server
+                .remove::<crate::collection::SecretCollection, _>(path.as_str())
+                .await
+            {
+                tracing::warn!(%path, %error, "could not remove retired collection object");
+            }
+        }
+        self.events.wake();
+        Ok(())
+    }
+
+    pub(crate) fn item_path(&self, provider: &str, item_id: &str) -> String {
+        make_item_path(crate::server::DEFAULT_COLLECTION_PATH, provider, item_id)
+    }
+
+    pub(crate) async fn collection_is_locked(
+        &self,
+        view: &crate::collection_layout::CollectionView,
+    ) -> bool {
+        for provider in self.providers_ordered() {
+            if view.includes(provider.id())
+                && provider.status().await.is_ok_and(|status| !status.locked)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Subscribe to revision wakeups. Read `changes_since` after each wakeup;
@@ -2077,8 +2172,13 @@ impl ServiceState {
         let epoch = self.events.begin_refresh();
         let outcomes = self.fetch_entries().await?;
         self.events.commit_refresh(epoch, outcomes, |inventory| {
-            self.router
-                .dedup(inventory.items(), &self.registry.order_snapshot())
+            if self.collections().legacy {
+                self.router
+                    .dedup(inventory.items(), &self.registry.order_snapshot())
+            } else {
+                // Global deduplication could hide the only copy visible in another collection.
+                inventory.items()
+            }
         });
         self.register_current_items().await?;
         self.update_cache_time()?;
@@ -2251,7 +2351,7 @@ impl ServiceState {
     ) -> Result<(), FdoError> {
         let server = conn.object_server();
         for item in entries {
-            let path = make_item_path(&item.provider_id, &item.id);
+            let path = self.item_path(&item.provider_id, &item.id);
             let Some(provider) = self.provider_by_id(&item.provider_id) else {
                 continue;
             };
@@ -2318,7 +2418,7 @@ impl ServiceState {
         self.register_items_inner(&conn, &snapshot).await?;
         let current: HashSet<_> = snapshot
             .iter()
-            .map(|meta| make_item_path(&meta.provider_id, &meta.id))
+            .map(|meta| self.item_path(&meta.provider_id, &meta.id))
             .collect();
         let removed: Vec<_> = self
             .cache
@@ -2617,11 +2717,11 @@ fn partition_by_glob<'a>(
     (unlocked, locked)
 }
 
-pub(crate) fn make_item_path(provider: &str, item_id: &str) -> String {
+fn make_item_path(parent: &str, provider: &str, item_id: &str) -> String {
     let provider_part = sanitize_component(provider);
     let item_part = sanitize_component(item_id);
     let hash = hash_id(&format!("{provider}:{item_id}"));
-    format!("/org/freedesktop/secrets/collection/default/{provider_part}_{item_part}_{hash:016x}")
+    format!("{parent}/{provider_part}_{item_part}_{hash:016x}")
 }
 
 fn sanitize_component(raw: &str) -> String {
@@ -3160,7 +3260,7 @@ mod tests {
         let mut receiver = state.subscribe_changes();
         let before = *receiver.borrow_and_update();
         state.patch_cached_item(
-            &make_item_path("mock", "item-1"),
+            &state.item_path("mock", "item-1"),
             Some("renamed"),
             None,
             None,

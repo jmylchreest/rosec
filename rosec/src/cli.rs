@@ -102,6 +102,12 @@ pub enum Commands {
         action: Option<ConfigCommands>,
     },
 
+    /// Manage provider-backed Secret Service collections
+    Collection {
+        #[command(subcommand)]
+        action: CollectionCommands,
+    },
+
     /// Show daemon status
     Status,
 
@@ -580,6 +586,29 @@ pub struct ProviderRemovePasswordArgs {
     /// Password entry ID to remove
     pub entry_id: String,
 }
+#[derive(clap::Subcommand, Debug)]
+pub enum CollectionCommands {
+    /// Show configured collections, members, write targets and aliases
+    List,
+    /// Create a collection or replace its provider membership
+    Set {
+        id: String,
+        /// Member provider ID (repeat for each member)
+        #[arg(long = "provider", required = true)]
+        providers: Vec<String>,
+        /// Destination for new items when several members support writes
+        #[arg(long)]
+        write_provider: Option<String>,
+    },
+    /// Remove a collection and its aliases
+    Remove { id: String },
+    /// Point an alias at a collection, or omit COLLECTION to remove the alias
+    Alias {
+        name: String,
+        collection: Option<String>,
+    },
+}
+
 // config subcommands
 #[derive(Subcommand)]
 pub enum ConfigCommands {

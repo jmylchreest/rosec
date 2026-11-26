@@ -43,3 +43,5 @@ mod tests {
 mod prompt_subprocess_tests;
 
 mod unlock_plan;
+
+mod collection_layout;

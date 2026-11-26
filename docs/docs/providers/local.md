@@ -93,6 +93,62 @@ write_provider = "local"
 
 If a provider with id `"local"` exists and `write_provider` is not set, it is used automatically.
 
+### Secret Service collections
+
+The default setup presents one collection across all providers. To show separate
+collections in desktop applications, pick the provider IDs for each view and map
+the `default` alias to the collection where applications should save secrets:
+
+```bash
+rosec collection set work --provider work_vault --provider company_passwords
+rosec collection set personal --provider personal_vault
+rosec collection alias default personal
+rosec collection alias login personal
+rosec collection list
+```
+
+`rosec collection set` checks capabilities against the running daemon. A
+collection with one writable member uses it for new items. With several writable
+members, pass `--write-provider <id>` to choose the destination. A collection with
+only read-only members rejects new items. Replacing or deleting an existing item
+uses the provider that owns it, so a read-only item stays read-only even in a
+collection that accepts new items.
+
+The commands edit your user config. A running `rosecd` applies the changes automatically.
+You can also set them directly:
+
+```toml
+[[collection]]
+id = "work"
+providers = ["work_vault", "company_passwords"]
+
+[[collection]]
+id = "personal"
+providers = ["personal_vault"]
+aliases = ["default", "login"]
+```
+
+Collection IDs and aliases accept ASCII letters, digits and underscores. The
+built-in `all` collection includes every provider, including providers added
+later. Its fallback writer is the existing `[service].write_provider`.
+Run `rosec collection alias default all` or `rosec collection alias login all`
+to point an alias there while keeping your named collections. Clearing an alias
+with `rosec collection alias <name>` resets it to its usual behavior.
+`default` points to `all`, and `login` follows `default`.
+To assign aliases to `all` in TOML, set a top-level list such as
+`all_collection_aliases = ["login"]`. The name `all` is reserved for the
+built-in collection.
+Use `rosec collection remove <id>` to remove a named view and its aliases. When
+collections come from config includes, the CLI writes the effective collection
+list into the main config file.
+
+Providers can belong to multiple collections. Those views share the same item
+and provider lock state. Moving a provider between views keeps its existing item paths. With configured
+collections, collection searches return items from their members. Service-wide
+searches include every provider and keep copies from different providers visible.
+The existing `[[provider]].collection` setting still adds an item attribute for
+filtering.
+
 ## Cryptography
 
 | Parameter | Value |

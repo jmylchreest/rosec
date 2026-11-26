@@ -162,6 +162,20 @@ impl<K: Eq + Hash> EventCoordinator<K> {
             self.revision.send_replace(batch.revision);
         }
     }
+    pub fn reproject(&self, project: impl FnOnce(&Inventory) -> Vec<ItemMeta>) {
+        let mut domain = self.domain.lock().unwrap_or_else(|e| e.into_inner());
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        let visible = project(&domain.inventory);
+        if let Some(batch) = domain.journal.commit(&visible) {
+            self.revision.send_replace(batch.revision);
+        }
+        *items = visible
+            .into_iter()
+            .map(|meta| ((self.key)(&meta), meta))
+            .collect();
+        domain.epoch += 1;
+    }
+
     pub async fn refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.refresh.lock().await
     }

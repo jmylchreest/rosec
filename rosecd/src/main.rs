@@ -1564,7 +1564,7 @@ async fn config_watcher(
         let new_fingerprints = fingerprint_providers(&new_config);
 
         let config_value = serde_json::to_value(&new_config)?;
-        if config_value == known_config {
+        if config_value == known_config && new_fingerprints == known {
             tracing::debug!("config unchanged, no reload needed");
             continue;
         }
@@ -1582,6 +1582,12 @@ async fn config_watcher(
             &mut plugin_registry,
         )
         .await;
+
+        if let Err(error) = state.reload_collections(&new_config).await {
+            tracing::warn!(%error, "could not reload Secret Service collections; keeping the current collection layout");
+            known = new_fingerprints;
+            continue;
+        }
 
         log_non_provider_section_changes(&state, &new_config).await;
 

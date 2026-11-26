@@ -879,6 +879,22 @@ mod credential_pipe_tests {
 
     #[tokio::test]
     async fn timeout_cancels_pending_pipe_read() {
+        // A concurrent fork inherits read descriptors until exec, even with
+        // close-on-exec. Isolate this test so BrokenPipe checks only our reader.
+        const CHILD: &str = "ROSEC_CREDENTIAL_PIPE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::management::credential_pipe_tests::timeout_cancels_pending_pipe_read",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let (read, mut write) = std::io::pipe().unwrap();
         let read = OwnedFd::from(std::os::fd::OwnedFd::from(read));
         let error = read_pipe_password(read, "fixture", Duration::from_millis(20))

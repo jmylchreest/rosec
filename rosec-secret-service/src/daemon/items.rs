@@ -8,7 +8,7 @@ use zbus::interface;
 use zbus::message::Header;
 
 use super::log_dbus_caller;
-use crate::state::{ServiceState, make_item_path, map_provider_error};
+use crate::state::{ServiceState, map_provider_error};
 
 /// Tuple shape returned by `ReadItemsFromProvider`:
 /// `(item_id, label, attributes, secret_bytes)`.  Extracted to satisfy
@@ -108,7 +108,7 @@ impl RosecItems {
 
         info!(item_id = %id, provider = %provider_id, item_type = %item_type, "created item via D-Bus (extended)");
 
-        let item_path = make_item_path(&provider_id, &id);
+        let item_path = self.state.item_path(&provider_id, &id);
         let meta = ItemMeta::from_new_item(id, provider_id, &item);
 
         self.state
