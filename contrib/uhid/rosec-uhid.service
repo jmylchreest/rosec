@@ -1,9 +1,9 @@
-# rosec virtual authenticator broker (privileged, disposable).
+# rosec virtual authenticator broker (privileged).
 #
 # Socket-activated system service. Opens /dev/uhid (root-only), creates a
 # device with a hard-coded FIDO usage-page descriptor, chowns the resulting
-# hidraw node to the requesting user (0600), passes the device fd over
-# SCM_RIGHTS, and exits. Speaks no CTAP and holds no state.
+# hidraw node to the requesting user (0600), and relays fixed-size FIDO
+# reports over a local socket while retaining the kernel device descriptor.
 
 [Unit]
 Description=rosec virtual authenticator broker

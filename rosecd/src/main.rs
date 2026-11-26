@@ -291,9 +291,14 @@ async fn run() -> Result<()> {
         let loop_state = Arc::clone(&state);
         let loop_registry = Arc::clone(fr);
         tokio::spawn(async move {
+            let mut warned_legacy_broker = false;
             loop {
-                fido2_ceremony::run_event_loop(Arc::clone(&loop_state), Arc::clone(&loop_registry))
-                    .await;
+                fido2_ceremony::run_event_loop(
+                    Arc::clone(&loop_state),
+                    Arc::clone(&loop_registry),
+                    &mut warned_legacy_broker,
+                )
+                .await;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });

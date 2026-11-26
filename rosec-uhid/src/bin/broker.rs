@@ -1,15 +1,8 @@
-//! `rosec-uhid` — privileged, socket-activated helper that creates a
-//! FIDO uhid device per requesting user and passes its fd back.
-//!
-//! It runs as root only long enough to open `/dev/uhid`, materialise a device
-//! whose descriptor is hard-coded to the FIDO usage page, chown the resulting
-//! hidraw node to the caller, and hand the device fd over `SCM_RIGHTS`. It
-//! speaks no CTAP and keeps no state; the caller's daemon owns the device
-//! lifetime thereafter (closing the fd destroys it).
-//!
-//! Invoked via systemd socket activation: the listening socket arrives on
-//! fd 3 (`LISTEN_FDS`). One device is granted per uid.
+//! Privileged, socket-activated FIDO report relay. The broker retains the
+//! UHID device and gives each admitted uid a connected report socket.
 
+use std::fs::File;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -66,7 +59,7 @@ fn take_listener() -> Result<UnixListener> {
 }
 
 /// Serve one request: identify the caller, enforce one-live-device-per-uid,
-/// create the device, chown its hidraw node to the caller, pass the fd.
+/// create the device, chown its hidraw node to the caller, start its report relay.
 fn handle(stream: &UnixStream, granted: &mut Vec<Grant>) -> Result<()> {
     let uid = broker::peer_uid(stream)?;
 
@@ -96,9 +89,128 @@ fn handle(stream: &UnixStream, granted: &mut Vec<Grant>) -> Result<()> {
     };
     debug!(uid, node = %node.display(), "granted virtual authenticator");
 
-    broker::send_fd(stream, device.as_raw_fd()).context("passing device fd")?;
+    let (relay_end, client_end) = nix::sys::socket::socketpair(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::SeqPacket,
+        None,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC | nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+    )
+    .context("creating report socket pair")?;
+    std::thread::Builder::new()
+        .name("rosec-uhid-relay".into())
+        .spawn(move || {
+            if let Err(e) = relay(device, relay_end.into()) {
+                debug!(uid, "report relay stopped: {e:#}");
+            }
+        })
+        .context("starting report relay")?;
+    broker::send_fd(stream, client_end.as_raw_fd()).context("passing report socket")?;
     granted.push(grant);
-    // `device` drops here — but the peer now holds a dup'd fd via SCM_RIGHTS,
-    // so the device stays alive as long as the peer keeps it.
     Ok(())
+}
+
+fn relay(mut device: File, mut channel: File) -> Result<()> {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use rosec_uhid::uhid;
+    use std::os::fd::AsFd;
+
+    use rosec_uhid::ctaphid::REPORT_SIZE;
+    let mut frame = [0u8; REPORT_SIZE + 1];
+    let mut event = [0u8; uhid::EVENT_BUF_SIZE];
+    let disconnected = PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL;
+    loop {
+        let (from_client, from_device) = {
+            let mut fds = [
+                PollFd::new(channel.as_fd(), PollFlags::POLLIN),
+                PollFd::new(device.as_fd(), PollFlags::POLLIN),
+            ];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Err(nix::errno::Errno::EINTR) => continue,
+                result => result?,
+            };
+            (
+                fds[0].revents().unwrap_or(PollFlags::empty()),
+                fds[1].revents().unwrap_or(PollFlags::empty()),
+            )
+        };
+        if from_client.intersects(disconnected) || from_device.intersects(disconnected) {
+            return Ok(());
+        }
+
+        if from_client.contains(PollFlags::POLLIN) {
+            let size = channel.read(&mut frame)?;
+            if size == 0 {
+                return Ok(());
+            }
+            anyhow::ensure!(size == REPORT_SIZE, "invalid FIDO report length");
+            device.write_all(&uhid::input2_event(&frame[..size]))?;
+        }
+        if from_device.contains(PollFlags::POLLIN) {
+            let size = device.read(&mut event)?;
+            if size == 0 {
+                return Ok(());
+            }
+            if matches!(
+                uhid::parse_event(&event[..size]),
+                Some(uhid::Event::Output(_))
+            ) {
+                channel.write_all(&event[..size])?;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+    use rosec_uhid::{ctaphid::REPORT_SIZE, uhid};
+
+    fn packet_pair() -> (File, File) {
+        let (a, b) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        for socket in [&a, &b] {
+            nix::sys::socket::setsockopt(
+                socket,
+                nix::sys::socket::sockopt::ReceiveTimeout,
+                &nix::sys::time::TimeVal::new(2, 0),
+            )
+            .unwrap();
+        }
+        (a.into(), b.into())
+    }
+
+    #[test]
+    fn concurrent_relays_keep_reports_and_lifetimes_separate() {
+        let (mut client_a, channel_a) = packet_pair();
+        let (mut client_b, channel_b) = packet_pair();
+        let (mut kernel_a, device_a) = packet_pair();
+        let (mut kernel_b, device_b) = packet_pair();
+        let a = std::thread::spawn(|| relay(device_a, channel_a));
+        let b = std::thread::spawn(|| relay(device_b, channel_b));
+
+        let report_a = [0x11; REPORT_SIZE];
+        let report_b = [0x22; REPORT_SIZE];
+        client_a.write_all(&report_a).unwrap();
+        client_b.write_all(&report_b).unwrap();
+        let mut received = [0; REPORT_SIZE + 6];
+        kernel_a.read_exact(&mut received).unwrap();
+        assert_eq!(received.as_slice(), uhid::input2_event(&report_a));
+        kernel_b.read_exact(&mut received).unwrap();
+        assert_eq!(received.as_slice(), uhid::input2_event(&report_b));
+
+        drop(client_a);
+        a.join().unwrap().unwrap();
+        assert_eq!(kernel_a.read(&mut received).unwrap(), 0);
+        client_b.write_all(&report_b).unwrap();
+        kernel_b.read_exact(&mut received).unwrap();
+        assert_eq!(received.as_slice(), uhid::input2_event(&report_b));
+        drop(client_b);
+        b.join().unwrap().unwrap();
+    }
 }
