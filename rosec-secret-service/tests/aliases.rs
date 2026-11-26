@@ -67,7 +67,6 @@ async fn advertised_aliases_expose_the_same_virtual_collection() {
         ("default", canonical),
         ("", canonical),
         ("login", canonical),
-        ("custom", "/"),
     ] {
         let (collection, prompt): (OwnedObjectPath, OwnedObjectPath) = service
             .call(
@@ -79,6 +78,14 @@ async fn advertised_aliases_expose_the_same_virtual_collection() {
         assert_eq!(collection.as_str(), expected);
         assert_eq!(prompt.as_str(), "/");
     }
+    let error = service
+        .call_method(
+            "CreateCollection",
+            &(HashMap::<String, Variant<'static>>::new(), "custom"),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("NotSupported"));
     let unknown: OwnedObjectPath = service.call("ReadAlias", &("custom",)).await.unwrap();
     assert_eq!(unknown.as_str(), "/");
 }

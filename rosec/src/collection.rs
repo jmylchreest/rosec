@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, ensure};
-use rosec_core::config::{
-    ALL_COLLECTION_ID, CollectionConfig, resolve_collections, valid_collection_component,
-};
+use rosec_core::config::{ALL_COLLECTION_ID, CollectionConfig, resolve_collections};
 
 use crate::cli::CollectionCommands;
 
 pub async fn dispatch(action: CollectionCommands) -> Result<()> {
     let path = crate::config_path();
+    let _edit_lock = if matches!(action, CollectionCommands::List) {
+        None
+    } else {
+        Some(rosec_core::config_edit::lock_collection_config(&path)?)
+    };
     let config = rosec_core::config_load::load(&path)?.config;
     let mut collections = config.collection;
     let mut all_aliases = config.all_collection_aliases;
@@ -96,30 +99,12 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
             collections.remove(index);
         }
         CollectionCommands::Alias { name, collection } => {
-            ensure!(
-                name != ALL_COLLECTION_ID && valid_collection_component(&name),
-                "invalid or reserved collection alias '{name}'"
-            );
-            if let Some(id) = &collection {
-                ensure!(
-                    id == ALL_COLLECTION_ID || collections.iter().any(|entry| &entry.id == id),
-                    "unknown collection '{id}'"
-                );
-            }
-            let mut removed = all_aliases.contains(&name);
-            all_aliases.retain(|alias| alias != &name);
-            if collection.as_deref() == Some(ALL_COLLECTION_ID) {
-                all_aliases.push(name.clone());
-            }
-            for entry in &mut collections {
-                if let Some(index) = entry.aliases.iter().position(|alias| alias == &name) {
-                    entry.aliases.remove(index);
-                    removed = true;
-                }
-                if collection.as_ref() == Some(&entry.id) {
-                    entry.aliases.push(name.clone());
-                }
-            }
+            let removed = rosec_core::config_edit::assign_collection_alias(
+                &mut collections,
+                &mut all_aliases,
+                &name,
+                collection.as_deref(),
+            )?;
             ensure!(
                 collection.is_some() || removed || matches!(name.as_str(), "default" | "login"),
                 "no configured alias '{name}'"

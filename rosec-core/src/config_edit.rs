@@ -8,6 +8,65 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Table, value};
 
+/// Move or clear an alias in the effective collection configuration.
+pub fn assign_collection_alias(
+    collections: &mut [crate::config::CollectionConfig],
+    all_aliases: &mut Vec<String>,
+    name: &str,
+    target: Option<&str>,
+) -> Result<bool> {
+    use crate::config::{ALL_COLLECTION_ID, valid_collection_component};
+    anyhow::ensure!(
+        name != ALL_COLLECTION_ID && valid_collection_component(name),
+        "invalid or reserved collection alias '{name}'"
+    );
+    if let Some(id) = target {
+        anyhow::ensure!(
+            id == ALL_COLLECTION_ID || collections.iter().any(|entry| entry.id == id),
+            "unknown collection '{id}'"
+        );
+    }
+    let mut removed = all_aliases.iter().any(|alias| alias == name);
+    all_aliases.retain(|alias| alias != name);
+    if target == Some(ALL_COLLECTION_ID) {
+        all_aliases.push(name.into());
+    }
+    for entry in collections {
+        removed |= entry.aliases.iter().any(|alias| alias == name);
+        entry.aliases.retain(|alias| alias != name);
+        if target == Some(entry.id.as_str()) {
+            entry.aliases.push(name.into());
+        }
+    }
+    Ok(removed)
+}
+
+/// Hold across a collection read, edit and write to serialize CLI and D-Bus writers.
+pub fn lock_collection_config(config_path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = collection_edit_path(config_path)?;
+    let parent = path.parent().context("config path has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path.with_extension("collection.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn collection_edit_path(config_path: &Path) -> Result<std::path::PathBuf> {
+    let path = std::path::absolute(config_path)?;
+    if path.exists() {
+        Ok(path.canonicalize()?)
+    } else {
+        Ok(path)
+    }
+}
+
 /// Write the effective collection list as a root-level override of included lists.
 pub fn set_collections(
     config_path: &Path,
@@ -45,12 +104,7 @@ pub fn set_collections(
 
     doc["all_collection_aliases"] = value(strings(all_aliases));
 
-    let path = std::path::absolute(config_path)?;
-    let path = if path.exists() {
-        path.canonicalize()?
-    } else {
-        path
-    };
+    let path = collection_edit_path(config_path)?;
     let parent = path.parent().context("config path has no parent")?;
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
