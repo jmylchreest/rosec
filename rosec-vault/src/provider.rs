@@ -11,7 +11,7 @@ use rosec_core::{
     UnlockInput, attributes_match,
 };
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -20,6 +20,44 @@ use crate::{
     format,
     storage::{self, write_secret_file},
 };
+
+const MAX_WRAPPING_ENTRIES: usize = 32;
+const MAX_ENTRY_KDF_ITERATIONS: u32 = 2_000_000;
+const MAX_TOTAL_KDF_ITERATIONS: u64 = 8_000_000;
+static VAULT_LOADS: Semaphore = Semaphore::const_new(4);
+
+type LoadedVault = (VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]);
+
+async fn read_vault_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || storage::read_vault(&path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+fn validate_wrapping_work(entries: &[WrappingEntry]) -> Result<(), ProviderError> {
+    if entries.is_empty() || entries.len() > MAX_WRAPPING_ENTRIES {
+        return Err(ProviderError::InvalidInput(
+            "vault wrapping entry count is outside supported limits".into(),
+        ));
+    }
+    let mut total = 0;
+    for entry in entries {
+        let iterations = entry.kdf.iterations;
+        if !(1..=MAX_ENTRY_KDF_ITERATIONS).contains(&iterations) {
+            return Err(ProviderError::InvalidInput(
+                "vault entry KDF iterations are outside supported limits".into(),
+            ));
+        }
+        total += u64::from(iterations);
+    }
+    if total > MAX_TOTAL_KDF_ITERATIONS {
+        return Err(ProviderError::InvalidInput(
+            "vault cumulative KDF iterations exceed the supported limit".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn metadata_path_for(vault_path: &Path) -> PathBuf {
     let mut name = vault_path
@@ -127,18 +165,27 @@ impl LocalVault {
     /// Tries each wrapping entry to unwrap the vault key. The first entry whose
     /// HMAC verifies is used to recover the vault key, which then decrypts the
     /// vault data.
-    async fn load_vault(
-        &self,
-        password: &[u8],
-    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
+    async fn load_vault(&self, password: &[u8]) -> Result<LoadedVault, ProviderError> {
         Self::load_from(&self.path, password).await
     }
 
-    async fn load_from(
-        path: &Path,
-        password: &[u8],
-    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
-        let content = fs::read(path).await.map_err(|e| {
+    async fn load_from(path: &Path, password: &[u8]) -> Result<LoadedVault, ProviderError> {
+        let permit = VAULT_LOADS
+            .acquire()
+            .await
+            .map_err(|error| ProviderError::Other(error.into()))?;
+        let path = path.to_path_buf();
+        let password = Zeroizing::new(password.to_vec());
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            Self::load_blocking(&path, &password)
+        })
+        .await
+        .map_err(|error| ProviderError::Other(error.into()))?
+    }
+
+    fn load_blocking(path: &Path, password: &[u8]) -> Result<LoadedVault, ProviderError> {
+        let content = storage::read_vault(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ProviderError::Unavailable("vault file not found".into())
             } else {
@@ -152,11 +199,7 @@ impl LocalVault {
         let version =
             format::VaultVersion::try_from(vault_file.version).map_err(ProviderError::Other)?;
 
-        if vault_file.wrapping_entries.is_empty() {
-            return Err(ProviderError::Other(anyhow::anyhow!(
-                "vault has no wrapping entries"
-            )));
-        }
+        validate_wrapping_work(&vault_file.wrapping_entries)?;
 
         let mut vault_key = None;
         for entry in &vault_file.wrapping_entries {
@@ -203,7 +246,7 @@ impl LocalVault {
         &self,
         password: &[u8],
         lease: &storage::Lease,
-    ) -> Result<(VaultData, Zeroizing<[u8; 32]>, Vec<WrappingEntry>, [u8; 32]), ProviderError> {
+    ) -> Result<LoadedVault, ProviderError> {
         let vault_key = crypto::generate_vault_key();
         let mac_key =
             crypto::derive_mac_key(&*vault_key).map_err(|e| ProviderError::Other(e.into()))?;
@@ -274,6 +317,7 @@ impl LocalVault {
         let hmac = crypto::compute_hmac(&*state.mac_key, &format::mac_input(version, &encrypted))
             .map_err(|e| ProviderError::Other(e.into()))?;
 
+        validate_wrapping_work(&state.wrapping_entries)?;
         let mut vault_file = VaultFile::new(state.wrapping_entries.clone(), &encrypted, &hmac);
         vault_file.version = version.number();
         let content = serde_json::to_string_pretty(&vault_file)
@@ -314,7 +358,7 @@ impl LocalVault {
         }
         let lease = storage::acquire(&self.path).map_err(ProviderError::Other)?;
         let (data, _, _, verified_revision) = Self::load_from(snapshot, password).await?;
-        let bytes = fs::read(snapshot)
+        let bytes = read_vault_file(snapshot)
             .await
             .map_err(|e| ProviderError::Other(e.into()))?;
         if storage::revision(&bytes) != verified_revision {
@@ -322,7 +366,7 @@ impl LocalVault {
                 "snapshot changed while being verified".into(),
             ));
         }
-        let current = fs::read(&self.path)
+        let current = read_vault_file(&self.path)
             .await
             .map_err(|e| ProviderError::Other(e.into()))?;
         storage::replace(&lease, &bytes, Some(storage::revision(&current)), true)
@@ -597,7 +641,7 @@ impl Provider for LocalVault {
             self.write_sidecar(&data.items);
         }
 
-        let committed_file = fs::read(&self.path)
+        let committed_file = read_vault_file(&self.path)
             .await
             .map_err(|e| ProviderError::Other(e.into()))?;
         if storage::revision(&committed_file) != disk_revision {
@@ -1095,6 +1139,12 @@ impl Provider for LocalVault {
         {
             return Err(ProviderError::InvalidInput(
                 format!("a password with label '{label}' already exists").into(),
+            ));
+        }
+
+        if state.wrapping_entries.len() >= MAX_WRAPPING_ENTRIES {
+            return Err(ProviderError::InvalidInput(
+                "vault already has the maximum number of wrapping entries".into(),
             ));
         }
 

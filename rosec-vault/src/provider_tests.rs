@@ -1306,3 +1306,32 @@ async fn failed_save_does_not_publish_mutation_in_memory() {
     assert_eq!(std::fs::read(&path).unwrap(), b"external replacement");
     std::fs::write(&path, original).unwrap();
 }
+
+#[test]
+fn wrapping_limits_reject_invalid_counts_and_work() {
+    let mut entry = crypto::wrap_vault_key(&[0; 32], b"fixture", None).unwrap();
+    assert!(validate_wrapping_work(std::slice::from_ref(&entry)).is_ok());
+    assert!(validate_wrapping_work(&vec![entry.clone(); MAX_WRAPPING_ENTRIES + 1]).is_err());
+    entry.kdf.iterations = MAX_ENTRY_KDF_ITERATIONS;
+    assert!(validate_wrapping_work(&vec![entry.clone(); 5]).is_err());
+    entry.kdf.iterations += 1;
+    assert!(validate_wrapping_work(std::slice::from_ref(&entry)).is_err());
+    entry.kdf.iterations = 0;
+    assert!(validate_wrapping_work(&[entry]).is_err());
+}
+
+#[tokio::test]
+async fn unlock_rejects_oversized_file_without_replacing_it() {
+    let (provider, temp) = create_test_provider();
+    let oversized = storage::MAX_VAULT_BYTES + 1;
+    std::fs::File::create(temp.path())
+        .unwrap()
+        .set_len(oversized)
+        .unwrap();
+    let error = provider
+        .unlock(UnlockInput::Password(Zeroizing::new("fixture".into())))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeds 64 MiB"));
+    assert_eq!(std::fs::metadata(temp.path()).unwrap().len(), oversized);
+}
