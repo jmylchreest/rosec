@@ -8,7 +8,7 @@ on:
     - cron: 17 4 * * *
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,8 +31,9 @@ jobs:
       should_skip: ${{ steps.version.outputs.should_skip }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Determine version
@@ -158,7 +159,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         if: matrix.cross == false && runner.environment == 'github-hosted'
@@ -170,12 +173,12 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -229,7 +232,7 @@ jobs:
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rosec-${{ matrix.target }}
           retention-days: 1
@@ -259,15 +262,17 @@ jobs:
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: wasm32-wasip1
 
       - name: Cache Cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: wasm-providers
           workspaces: |
@@ -346,6 +351,39 @@ jobs:
           cd "dist/protonpass-rebuild/rosec-protonpass-source-${VERSION}/rosec-protonpass"
           cargo build --offline --locked --release --target wasm32-wasip1 --lib
 
+      - name: Upload unsigned WASM inputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-wasm-inputs
+          retention-days: 1
+          path: |
+            dist/providers/*.wasm
+            dist/providers/*.wasm.policy.toml
+            dist/protonpass/*.source.tar.gz
+            dist/protonpass/notices/
+          if-no-files-found: error
+
+  sign-wasm:
+    name: Sign WASM Providers
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build-wasm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+
+      - name: Download unsigned WASM inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: unsigned-wasm-inputs
+          path: dist
+
       # rosec-package-wasm validates each policy schema before signing and
       # reads the key from the WASM_SIGNING_KEY env var in-process (the key
       # never touches disk). The .minisig covers (wasm_bytes || policy_bytes)
@@ -354,7 +392,7 @@ jobs:
       # Dev profile on purpose: signing needs no optimisation and the dev
       # build of the workspace compiles much faster in CI.
       - name: Build packaging tool
-        run: cargo build -p rosec-tools
+        run: cargo build --locked -p rosec-tools
 
       - name: Sign WASM providers (combined wasm || policy)
         env:
@@ -393,7 +431,7 @@ jobs:
           sha256sum rosec-provider-protonpass-*.source.tar.gz > protonpass-source.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rosec-wasm-providers
           retention-days: 1
@@ -416,7 +454,9 @@ jobs:
     if: needs.prepare.outputs.should_skip != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         if: runner.environment == 'github-hosted'
@@ -427,9 +467,9 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: sbom-tools
       - name: Install cargo-cyclonedx
@@ -444,7 +484,7 @@ jobs:
           mv rosec/rosec.cdx.json "rosec-${VERSION}.sbom.cdx.json"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rosec-sbom
           retention-days: 1
@@ -456,11 +496,13 @@ jobs:
   # ---------------------------------------------------------------------------
   snapshot:
     name: Snapshot Release
+    permissions:
+      contents: write
     runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - build
-      - build-wasm
+      - sign-wasm
       - build-sbom
     if: |
       needs.prepare.outputs.should_skip != 'true' &&
@@ -469,11 +511,14 @@ jobs:
       github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
+          pattern: rosec-*
           path: artifacts
 
       - name: Collect release assets
@@ -488,12 +533,12 @@ jobs:
       - name: Delete existing snapshot release and tag
         run: |
           gh release delete snapshot --yes 2>/dev/null || true
-          git push origin :refs/tags/snapshot 2>/dev/null || true
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/snapshot" 2>/dev/null || true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create snapshot release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           name: "Development Snapshot"
           tag_name: snapshot
@@ -517,22 +562,27 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Release
+    permissions:
+      contents: write
     runs-on: ${{ github.event_name != 'pull_request' && 'rosec-linux' || 'ubuntu-latest' }}
     needs:
       - prepare
       - build
-      - build-wasm
+      - sign-wasm
       - build-sbom
     if: |
       needs.prepare.outputs.is_release == 'true' ||
       needs.prepare.outputs.is_prerelease == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
+          pattern: rosec-*
           path: artifacts
 
       - name: Collect release assets
@@ -545,7 +595,7 @@ jobs:
           ls -lh release/
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           name: "rosec ${{ needs.prepare.outputs.version_tag }}"
           tag_name: ${{ needs.prepare.outputs.version_tag }}
@@ -572,10 +622,12 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download x86_64 artifact (for PKGBUILD checksum)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rosec-x86_64-unknown-linux-gnu
           path: artifacts
@@ -595,7 +647,7 @@ jobs:
             contrib/aur/PKGBUILD-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: rosec-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -622,10 +674,12 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download x86_64 artifact (for PKGBUILD checksum)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rosec-x86_64-unknown-linux-gnu
           path: artifacts
@@ -645,7 +699,7 @@ jobs:
             contrib/aur/PKGBUILD-uhid-bin > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: rosec-uhid-bin
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -690,10 +744,12 @@ jobs:
             aur_name: rosec-provider-keepassxc-file-bin
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download WASM provider artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rosec-wasm-providers
           path: artifacts
@@ -715,7 +771,7 @@ jobs:
             ${{ matrix.pkgbuild }} > "$GITHUB_WORKSPACE/PKGBUILD-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: ${{ matrix.aur_name }}
           pkgbuild: ${{ github.workspace }}/PKGBUILD-rendered
@@ -742,7 +798,9 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Render PKGBUILD from template
         run: |
@@ -752,7 +810,7 @@ jobs:
             contrib/aur/PKGBUILD-git > "$GITHUB_WORKSPACE/PKGBUILD-git-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: rosec-git
           pkgbuild: ${{ github.workspace }}/PKGBUILD-git-rendered
@@ -777,7 +835,9 @@ jobs:
     if: needs.prepare.outputs.is_release == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Render PKGBUILD from template
         run: |
@@ -787,7 +847,7 @@ jobs:
             contrib/aur/PKGBUILD-uhid-git > "$GITHUB_WORKSPACE/PKGBUILD-uhid-git-rendered"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: rosec-uhid-git
           pkgbuild: ${{ github.workspace }}/PKGBUILD-uhid-git-rendered
