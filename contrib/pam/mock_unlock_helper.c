@@ -14,6 +14,8 @@
  *   cc -O2 -Wall -o mock_unlock_helper mock_unlock_helper.c
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,11 @@
 
 int main(void)
 {
+    const char *closed_fd = getenv("MOCK_CLOSED_FD");
+    if (closed_fd &&
+        (fcntl(atoi(closed_fd), F_GETFD) != -1 || errno != EBADF))
+        return 1;
+
     char buf[4096];
     ssize_t total = 0;
     ssize_t n;
