@@ -1,7 +1,7 @@
 //! `rosec item import` — import an item from TOML on stdin.
 //!
 //! Reads the same `[item]`/`[attributes]`/`[secrets]` TOML format produced
-//! by `rosec item export`.  Creates the item via `CreateItemExtended` on
+//! by `rosec item export`.  Creates the item via `CreateItemInProvider` on
 //! the specified (or default write-capable) provider.
 
 use std::io::{self, Read};
@@ -67,8 +67,9 @@ pub async fn run(args: ItemImportArgs) -> Result<()> {
 
     let res: zbus::Result<String> = items_proxy
         .call(
-            "CreateItemExtended",
+            "CreateItemInProvider",
             &(
+                &provider_id,
                 &parsed.label,
                 &parsed.item_type,
                 &parsed.attributes,

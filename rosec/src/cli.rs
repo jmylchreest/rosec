@@ -764,7 +764,7 @@ pub struct ItemImportArgs {
     pub provider: Option<String>,
 
     /// Overwrite an existing item with matching attributes (passes
-    /// `replace=true` to CreateItemExtended).  Without this flag, import
+    /// `replace=true` to CreateItemInProvider).  Without this flag, import
     /// fails with `already exists` if a match is found.
     #[arg(long)]
     pub force: bool,
