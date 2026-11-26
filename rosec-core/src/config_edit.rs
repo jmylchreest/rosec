@@ -107,8 +107,13 @@ pub fn set_collections(
     let path = collection_edit_path(config_path)?;
     let parent = path.parent().context("config path has no parent")?;
     std::fs::create_dir_all(parent)?;
+    let updated = doc.to_string();
+    anyhow::ensure!(
+        updated.len() as u64 <= crate::config_load::MAX_FILE_BYTES,
+        "updated configuration exceeds 1 MiB"
+    );
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(doc.to_string().as_bytes())?;
+    temp.write_all(updated.as_bytes())?;
     temp.as_file().sync_all()?;
     temp.persist(&path)
         .with_context(|| format!("failed to update {}", path.display()))?;

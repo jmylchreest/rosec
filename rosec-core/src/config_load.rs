@@ -11,7 +11,7 @@ use crate::config::Config;
 
 const MAX_DEPTH: usize = 16;
 const MAX_FILES: usize = 128;
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Effective configuration and directories to watch for edits or symlink changes.
 #[derive(Debug)]
