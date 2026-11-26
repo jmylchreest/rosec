@@ -129,19 +129,25 @@ aliases = ["default", "login"]
 ```
 
 Collection IDs and aliases accept ASCII letters, digits and underscores. The
-`login` alias follows `default` unless assigned explicitly. An alias can be
-moved with `rosec collection alias <name> <collection>` and cleared with
-`rosec collection alias <name>`. Use `rosec collection remove <id>` to remove a
-view and its aliases. Removing the last configured collection restores the
-default setup. When collections come from config includes, the CLI writes the
-effective collection list into the main config file.
+built-in `all` collection includes every provider, including providers added
+later. Its fallback writer is the existing `[service].write_provider`.
+Run `rosec collection alias default all` or `rosec collection alias login all`
+to point an alias there while keeping your named collections. Clearing an alias
+with `rosec collection alias <name>` resets it to its usual behavior.
+`default` points to `all`, and `login` follows `default`.
+To assign aliases to `all` in TOML, use a `[[collection]]` entry with
+`id = "all"` and an `aliases` list.
+Use `rosec collection remove <id>` to remove a named view and its aliases. When
+collections come from config includes, the CLI writes the effective collection
+list into the main config file.
 
 Providers can belong to multiple collections. Those views share the same item
 and provider lock state. Changing the first collection that contains a provider
 can change the D-Bus paths of its items after restart. With configured
-collections, Secret Service searches return items from member providers and
-keep copies from different providers visible. The existing
-`[[provider]].collection` setting still adds an item attribute for filtering.
+collections, collection searches return items from their members. Service-wide
+searches include every provider and keep copies from different providers visible.
+The existing `[[provider]].collection` setting still adds an item attribute for
+filtering.
 
 ## Cryptography
 

@@ -118,11 +118,7 @@ impl SecretService {
         // that MUST never error when providers are locked.  Items from locked
         // providers are returned in the `locked` list.  Read from the persistent
         // metadata_cache which survives lock/unlock cycles.
-        let (unlocked, locked) = self
-            .state
-            .search_items_partition_where(&attributes, |meta| {
-                self.state.collections.includes(&meta.provider_id)
-            })?;
+        let (unlocked, locked) = self.state.search_items_partition(&attributes)?;
         Ok((
             unlocked.into_iter().map(|s| to_object_path(&s)).collect(),
             locked.into_iter().map(|s| to_object_path(&s)).collect(),

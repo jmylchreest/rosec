@@ -24,10 +24,13 @@ pub struct Config {
     pub collection: Vec<CollectionConfig>,
 }
 
+pub const ALL_COLLECTION_ID: &str = "all";
+
 /// A Secret Service view over one or more providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
     pub id: String,
+    #[serde(default)]
     pub providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_provider: Option<String>,
@@ -62,6 +65,13 @@ pub fn resolve_collections(
                     valid_collection_component(alias) && aliases.insert(alias),
                     "invalid or duplicate collection alias '{alias}'"
                 );
+            }
+            if id == ALL_COLLECTION_ID {
+                anyhow::ensure!(
+                    collection.providers.is_empty() && collection.write_provider.is_none(),
+                    "'all' uses every provider and the service write preference"
+                );
+                return Ok(None);
             }
             anyhow::ensure!(
                 !collection.providers.is_empty(),

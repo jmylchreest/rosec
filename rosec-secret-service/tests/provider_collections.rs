@@ -65,10 +65,10 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     .await
     .unwrap();
     let collections: Vec<OwnedObjectPath> = service.get_property("Collections").await.unwrap();
-    assert_eq!(collections.len(), 3);
+    assert_eq!(collections.len(), 4);
     for (alias, expected) in [
         ("default", "work"),
-        ("login", "archive"),
+        ("login", "all"),
         ("shared", "external_only"),
     ] {
         let path: OwnedObjectPath = service.call("ReadAlias", &(alias,)).await.unwrap();
@@ -162,8 +162,8 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     assert!(locked.is_empty());
     assert_eq!(
         items.len(),
-        2,
-        "exclude the unassigned item and retain both duplicates"
+        3,
+        "the built-in collection includes unassigned providers"
     );
 
     use futures_util::StreamExt as _;
@@ -244,6 +244,30 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         "{error}"
     );
 
+    let all = Proxy::new(
+        &client,
+        dest,
+        format!("{SERVICE_PATH}/aliases/login"),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    let mut props = properties("service-selected destination");
+    props.insert(
+        "org.freedesktop.Secret.Item.Attributes",
+        Variant::from(HashMap::from([("account", "a new account")])),
+    );
+    let (path, prompt): (OwnedObjectPath, OwnedObjectPath) = all
+        .call("CreateItem", &(props, &secret, false))
+        .await
+        .unwrap();
+    assert_eq!(prompt.as_str(), "/");
+    assert!(path.as_str().contains("/all/unassigned_"), "{path}");
+    assert_eq!(
+        unassigned.items.lock().unwrap()[0].label,
+        "service-selected destination"
+    );
+
     // Locking one collection acts on its own members, including any shared provider.
     let archive_path = collections
         .iter()
@@ -274,6 +298,10 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
 
 fn collection_config() -> Config {
     Config {
+        service: rosec_core::config::ServiceConfig {
+            write_provider: Some("unassigned".into()),
+            ..Default::default()
+        },
         collection: [
             (
                 "work",
@@ -281,7 +309,8 @@ fn collection_config() -> Config {
                 Some("primary"),
                 vec!["default"],
             ),
-            ("archive", vec!["secondary"], None, vec!["login"]),
+            ("archive", vec!["secondary"], None, vec![]),
+            ("all", vec![], None, vec!["login"]),
             ("external_only", vec!["external"], None, vec!["shared"]),
         ]
         .into_iter()

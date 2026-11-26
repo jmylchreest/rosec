@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rosec_core::config::{CollectionConfig, resolve_collections};
+use rosec_core::config::{ALL_COLLECTION_ID, CollectionConfig, resolve_collections};
 use rosec_core::{Capability, Provider};
 
 use crate::server::DEFAULT_COLLECTION_PATH;
@@ -34,6 +34,7 @@ impl CollectionView {
 pub(crate) struct CollectionLayout {
     pub canonical: BTreeMap<String, Arc<CollectionView>>,
     aliases: BTreeMap<String, String>,
+    all_path: String,
     item_parents: BTreeMap<String, String>,
     pub legacy: bool,
 }
@@ -43,17 +44,20 @@ impl CollectionLayout {
         config: &[CollectionConfig],
         providers: &[Arc<dyn Provider>],
     ) -> anyhow::Result<Self> {
-        let legacy = config.is_empty();
+        let legacy = config.iter().all(|entry| entry.id == ALL_COLLECTION_ID);
+        let all_path = if legacy {
+            DEFAULT_COLLECTION_PATH.to_owned()
+        } else {
+            format!("{COLLECTION_ROOT}/{ALL_COLLECTION_ID}")
+        };
         let mut canonical = BTreeMap::new();
         let mut aliases = BTreeMap::new();
         let mut item_parents = BTreeMap::new();
-        if legacy {
-            canonical.insert(
-                DEFAULT_COLLECTION_PATH.to_owned(),
-                Arc::new(CollectionView::legacy()),
-            );
-            aliases.insert("default".to_owned(), DEFAULT_COLLECTION_PATH.to_owned());
+        let mut all = CollectionView::legacy();
+        if !legacy {
+            all.label = ALL_COLLECTION_ID.into();
         }
+        canonical.insert(all_path.clone(), Arc::new(all));
         let writers = resolve_collections(config, |id| {
             providers
                 .iter()
@@ -61,6 +65,12 @@ impl CollectionLayout {
                 .map(|p| p.capabilities().contains(&Capability::Write))
         })?;
         for (entry, writer) in config.iter().zip(writers) {
+            if entry.id == ALL_COLLECTION_ID {
+                for alias in &entry.aliases {
+                    aliases.insert(alias.clone(), all_path.clone());
+                }
+                continue;
+            }
             let path = format!("{COLLECTION_ROOT}/{}", entry.id);
             for provider in &entry.providers {
                 item_parents
@@ -76,16 +86,19 @@ impl CollectionLayout {
                     label: entry.id.clone(),
                     providers: entry.providers.clone(),
                     writer,
-                    legacy,
+                    legacy: false,
                 }),
             );
         }
-        if let Some(default) = aliases.get("default").cloned() {
-            aliases.entry("login".into()).or_insert(default);
-        }
+        let default = aliases
+            .entry("default".into())
+            .or_insert_with(|| all_path.clone())
+            .clone();
+        aliases.entry("login".into()).or_insert(default);
         Ok(Self {
             canonical,
             aliases,
+            all_path,
             item_parents,
             legacy,
         })
@@ -119,10 +132,6 @@ impl CollectionLayout {
     pub fn item_parent(&self, provider: &str) -> &str {
         self.item_parents
             .get(provider)
-            .map_or(DEFAULT_COLLECTION_PATH, String::as_str)
-    }
-
-    pub fn includes(&self, provider: &str) -> bool {
-        self.legacy || self.item_parents.contains_key(provider)
+            .map_or(self.all_path.as_str(), String::as_str)
     }
 }

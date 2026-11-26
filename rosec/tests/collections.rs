@@ -136,6 +136,18 @@ async fn configure_collection_and_alias_through_cli() {
         String::from_utf8_lossy(&output.stdout)
             .contains("work: work, personal (write: work; aliases: default)")
     );
+    assert!(run(&main, &["alias", "login", "all"]).status.success());
+    let config = rosec_core::config_load::load(&main).unwrap().config;
+    assert_eq!(
+        config
+            .collection
+            .iter()
+            .find(|entry| entry.id == "all")
+            .unwrap()
+            .aliases,
+        ["login"]
+    );
+    assert!(run(&main, &["alias", "login"]).status.success());
     assert!(run(&main, &["remove", "work"]).status.success());
     assert!(
         rosec_core::config_load::load(&main)

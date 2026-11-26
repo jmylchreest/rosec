@@ -1572,14 +1572,6 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
-        self.search_items_partition_where(attrs, |_| true)
-    }
-
-    pub(crate) fn search_items_partition_where(
-        &self,
-        attrs: &HashMap<String, String>,
-        include: impl Fn(&ItemMeta) -> bool,
-    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         let cache = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "items lock poisoned".to_string(),
@@ -1590,7 +1582,7 @@ impl ServiceState {
         let mut locked = Vec::new();
 
         for (path, meta) in cache.iter() {
-            if !include(meta) || !meta_matches_query(meta, attrs) {
+            if !meta_matches_query(meta, attrs) {
                 continue;
             }
             if meta.locked {
