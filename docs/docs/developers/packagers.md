@@ -5,40 +5,32 @@ sidebar_label: Packagers
 
 # Packagers
 
-Use the same rosec source revision for the daemon, CLI, optional helpers, and WASM providers. The provider ABI is tied to the host release. Check the workspace's `rust-version` and build from the committed lockfiles. The [installation guide](../installation.md) covers build prerequisites and runtime dependencies.
+Most distributions start with `rosec` and `rosecd`, then decide which providers and desktop integrations to offer. `rosec-prompt` adds graphical prompts. PAM auto-unlock and the FIDO2 broker are optional and have their own system integration. The native components and WASM providers are built from the same source revision because the provider ABI follows the host release. The workspace's `rust-version` and committed lockfiles are the starting point for a reproducible build. [Build prerequisites and runtime dependencies](../installation.md)
 
-## Native binaries and integration
+The CLI's `rosec enable` command can generate the user service, D-Bus activation files, and portal registration. A package can ship its own versions of those files with the installed daemon path filled in. The AUR recipes are working examples of how the binaries, activation files, shell completions, and licenses fit together. The optional UHID package ships its own system socket and service. It shares a protocol with `rosecd`, so a package upgrade needs to restart both together. [Activation templates](https://github.com/jmylchreest/rosec/tree/main/rosec/src/enable/templates) · [AUR recipes](https://github.com/jmylchreest/rosec/tree/main/contrib/aur) · [FIDO2 setup](../fido2-passkeys.md)
 
-- Ship `rosec` and `rosecd` together. Ship `rosec-prompt` for graphical credential prompts and confirmations.
-- For desktop activation, use the installed daemon path in the user service and D-Bus activation files. Keep the Secret Service and portal names aligned with their service definitions. [Activation templates](https://github.com/jmylchreest/rosec/tree/main/rosec/src/enable/templates)
-- For PAM, build `contrib/pam/pam_rosec.so` with the target system's PAM headers. Set the Makefile's `ROSEC_PAM_UNLOCK_PATH` to the **final installed** path of `rosec-pam-unlock`. Install the PAM module and an optional PAM configuration snippet according to your distro's conventions. [PAM installation and configuration](../pam.md)
-- The optional UHID broker is a separate system component. Package its socket and service together and keep its version aligned with `rosecd`. Upgrade and restart both together because they share a broker protocol. [FIDO2 setup](../fido2-passkeys.md)
-- Install shell completions and license files in your distro's standard directories. The AUR recipes show source, Git, and prebuilt layouts. [AUR recipes](https://github.com/jmylchreest/rosec/tree/main/contrib/aur)
+## PAM and custom install paths
 
-### PAM upgrade compatibility
+For a conventional package, the PAM module is built against the distro's PAM headers and installed in its PAM module directory. The module starts the helper at the path configured by its Makefile's `ROSEC_PAM_UNLOCK_PATH`. The helper in turn verifies that the running daemon matches an executable from a trusted system installation. `rosecd` still runs as the signed-in user. [PAM setup](../pam.md)
 
-**Potentially breaking for split or custom packages.** PAM verifies the running daemon against a root-owned executable in a trusted installation. The helper checks `/usr/bin/rosecd` and `bin/rosecd` under its own installation prefix when the helper is itself in `bin`, `lib/rosec`, or `libexec/rosec`. This supports the AUR layout and a shared output such as `/nix/store/<output>/libexec/rosec/rosec-pam-unlock` with `/nix/store/<output>/bin/rosecd`.
+**An upgrade can affect packages that split the helper and daemon across prefixes.** The helper looks for `/usr/bin/rosecd` and for `bin/rosecd` in its own installation prefix. For example, the community Nix package puts the helper in `libexec/rosec` and the daemon in `bin` under the same store output. Both paths resolve without a packaging override. Helpers under `bin` or `lib/rosec` are also supported.
 
-When the helper and daemon live in separate prefixes, set `ROSEC_PAM_DAEMON_PATH` while building the helper. It replaces the defaults and accepts one absolute path or a comma-separated list of absolute paths. Use final paths in the installed system and keep the executable and its installation path protected from user modification.
+If your layout puts the daemon elsewhere, `ROSEC_PAM_DAEMON_PATH` is the build-time override for the Rust helper. It replaces the default list. For example, a package that supports two daemon locations can build the helper with:
 
 ```sh
 ROSEC_PAM_DAEMON_PATH=/opt/rosec/bin/rosecd,/usr/bin/rosecd \
   cargo build --release --locked -p rosec-pam
 ```
 
-`ROSEC_PAM_UNLOCK_PATH` selects the helper that the native PAM module launches. `ROSEC_PAM_DAEMON_PATH` selects which daemon executables the Rust helper trusts. If the running daemon cannot be verified, login proceeds and automatic vault unlock or password synchronization may require manual recovery.
+These are absolute paths on the installed system, outside the staging directory. Only a root-owned daemon in a trusted installation qualifies. If the helper cannot verify it, OS login continues. The user can unlock the vault manually and may need to update its unlock password separately.
 
-## WASM provider packages
+## How provider packages establish trust
 
-Build each selected provider from its crate directory with `cargo build --release --locked --target wasm32-wasip1`. Keep production builds free of fixture features such as Proton Pass's `test-http`. Keep native compiler and linker flags out of WASM builds. Install each provider's `.wasm` and matching `.wasm.policy.toml` side by side. The conventional system directory is `/usr/lib/rosec/providers`. A store-based package should declare the exact provider paths when building the host with [packaged provider trust](#source-built-providers).
+A provider ships as a WASM file and its matching policy sidecar. The usual system location is `/usr/lib/rosec/providers`. If you build providers yourself, each has its own locked Cargo build for `wasm32-wasip1`. For example, the Git AUR recipe clears native compiler and linker flags for those builds and leaves fixture features such as Proton Pass's `test-http` off. [WASM policy format](./wasm-policy-sidecar.md)
 
-### Repackaging upstream releases
+**Repackaging an upstream release.** The release bundles already contain a Minisign signature covering the exact WASM and policy bytes. The archive checksums help verify downloads, and `rosec-package-wasm verify` checks the bundles against rosec's embedded release keys. The three bundle files travel together into the package.
 
-Ship the released WASM, policy, and `.wasm.minisig` together. The signature covers the exact WASM and policy bytes. Verify the bundles with `rosec-package-wasm verify` against the embedded release keys before installation. Verify published archive checksums as part of package intake.
-
-### Source-built providers
-
-The **`rosec-git` AUR recipe uses embedded package hashes**. It builds the WASM providers first, generates a manifest from the final WASM and policy bytes and their final install paths, and builds the native host with `ROSEC_PACKAGED_PROVIDERS` pointing to that manifest.
+**Building the host and providers together.** This is how `rosec-git` works. It builds the providers first, then records the SHA-256 hashes of each WASM file and policy alongside the final install path. `ROSEC_PACKAGED_PROVIDERS` tells the host build where to find that manifest. The host can then trust those exact packages without a distributor signing key. A package store can use its output paths in the same way.
 
 ```sh
 python3 contrib/packaged-providers.py \
@@ -48,14 +40,12 @@ ROSEC_PACKAGED_PROVIDERS="$PWD/packaged-providers.json" \
   cargo build --release --locked --bin rosecd --bin rosec
 ```
 
-A match requires both hashes and the exact installed path. Preserve the matched bytes through packaging and rebuild the host when a provider, policy, or installation path changes. A package store can supply its exact output paths in the manifest. Keep the manifest under the packager's control. [Manifest format and source packaging examples](https://github.com/jmylchreest/rosec/blob/main/contrib/packaged-providers.md)
+The manifest describes the final bytes after any packaging transformations. A provider rebuilt with different bytes, or moved to a different path, needs a corresponding host rebuild to use this trust mechanism. [Manifest format and more examples](https://github.com/jmylchreest/rosec/blob/main/contrib/packaged-providers.md)
 
-### Distributor-managed signing
+**Shipping independently updated provider packages.** A distributor-managed Minisign key lets you sign each provider release separately. The `rosec-package-wasm` tool generates keys and signs and verifies bundles. The private key stays in the signing environment. The public key goes in a config fragment that the user explicitly includes under `[[service.wasm_trusted_key]]`, optionally scoped to the provider kinds it signs. [Signing commands and trust configuration](./wasm-provider-guide.md#packaging-signing-and-distribution)
 
-If your host and providers need independent updates, sign your bundles with a distributor-controlled Minisign key. Build `rosec-package-wasm` from `rosec-tools` and use it to generate a keypair, sign the final bundle, and verify it with the public key. Distribute the public key through a trusted config fragment and explicitly include it in the user's configuration as `[[service.wasm_trusted_key]]`. Scope the key to the provider kinds it should sign. Protect the private key in the signing environment and keep it out of packages and derivations. [Signing commands and trust configuration](./wasm-provider-guide.md#packaging-signing-and-distribution)
+Provider licenses can differ from the host's. For Proton Pass, the release workflow uses `contrib/package-protonpass.py` to prepare notices and corresponding source for binary distribution and checks that the source rebuilds offline. [Release workflow](https://github.com/jmylchreest/rosec/blob/main/.github/workflows/release.yml)
 
-For Proton Pass, include the license notices and make corresponding source available when distributing binaries. The release workflow and `contrib/package-protonpass.py` show how rosec prepares and verifies these materials. Review each provider's separate license before selecting your package set. [Release workflow](https://github.com/jmylchreest/rosec/blob/main/.github/workflows/release.yml)
+## Trying the finished package
 
-## Package verification
-
-Test a clean install with the actual packaged paths. Check that the intended daemon owns the Secret Service name, that each selected provider appears in `rosec provider list`, and that the journal identifies the expected trust source. If shipping PAM, test login unlock and password-change sync with a disposable local vault. If shipping UHID, confirm the broker and daemon start together and expose the expected per-user authenticator.
+A clean install catches the issues that a build tree can hide. Once the desktop session starts, `rosec provider list` should show the providers you shipped, and the journal should identify the expected trust source. A disposable vault lets you try both PAM login unlock and password-change sync using the package's actual paths. If you ship UHID, start the packaged broker and daemon together and check that the per-user authenticator appears.
