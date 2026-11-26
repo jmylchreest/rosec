@@ -146,10 +146,14 @@ impl KeyStore {
 
     /// Look up a key by its SHA-256 fingerprint string.
     ///
-    /// Returns the first entry for that fingerprint — all entries sharing a
-    /// fingerprint have identical key material, so any one suffices for signing.
+    /// Prefer an entry that requires confirmation so any active copy's
+    /// policy applies to the shared signing key.
     pub fn get_by_fingerprint(&self, fingerprint: &str) -> Option<&KeyEntry> {
-        self.entries.get(fingerprint).and_then(|v| v.first())
+        let group = self.entries.get(fingerprint)?;
+        group
+            .iter()
+            .find(|entry| entry.require_confirm)
+            .or_else(|| group.first())
     }
 
     /// Iterate **all** entries (including multiple vault items that share the

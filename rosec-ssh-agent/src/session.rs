@@ -264,7 +264,7 @@ mod tests {
     use ssh_key::{PrivateKey, private::Ed25519Keypair};
 
     #[tokio::test]
-    async fn advertised_credential_signs_and_respects_confirmation() {
+    async fn duplicate_key_respects_confirmation_on_either_copy() {
         let key = PrivateKey::from(Ed25519Keypair::from_seed(&[42; 32]));
         let public_key = key.public_key().clone();
         let entry = build_entry(
@@ -280,7 +280,13 @@ mod tests {
         )
         .unwrap();
         let store = KeyStore::new();
-        store.write().unwrap().insert(entry);
+        let mut unconfirmed_copy = entry.clone();
+        unconfirmed_copy.item_id = "another-item".into();
+        unconfirmed_copy.require_confirm = false;
+        let mut keys = store.write().unwrap();
+        keys.insert(unconfirmed_copy);
+        keys.insert(entry);
+        drop(keys);
         let mut agent = SshAgent::new(store, PathBuf::new())
             .with_confirm(Arc::new(|_, _| Box::pin(async { false })));
         let mut identities = agent.request_identities().await.unwrap();
