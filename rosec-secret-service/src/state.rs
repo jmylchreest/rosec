@@ -188,6 +188,7 @@ impl ServiceState {
     ) -> anyhow::Result<Self> {
         let collections = Arc::new(crate::collection_layout::CollectionLayout::new(
             &initial_config.collection,
+            &initial_config.all_collection_aliases,
             &providers,
         )?);
         let event_collections = Arc::clone(&collections);

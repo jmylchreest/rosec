@@ -302,6 +302,7 @@ fn collection_config() -> Config {
             write_provider: Some("unassigned".into()),
             ..Default::default()
         },
+        all_collection_aliases: vec!["login".into()],
         collection: [
             (
                 "work",
@@ -310,7 +311,6 @@ fn collection_config() -> Config {
                 vec!["default"],
             ),
             ("archive", vec!["secondary"], None, vec![]),
-            ("all", vec![], None, vec!["login"]),
             ("external_only", vec!["external"], None, vec!["shared"]),
         ]
         .into_iter()

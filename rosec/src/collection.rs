@@ -11,13 +11,10 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
     let path = crate::config_path();
     let config = rosec_core::config_load::load(&path)?.config;
     let mut collections = config.collection;
+    let mut all_aliases = config.all_collection_aliases;
 
     match action {
         CollectionCommands::List => {
-            let all_aliases = collections
-                .iter()
-                .find(|entry| entry.id == ALL_COLLECTION_ID)
-                .map_or(&[][..], |entry| entry.aliases.as_slice());
             println!(
                 "all: all providers (write preference: {}; configured aliases: {})",
                 config
@@ -27,10 +24,7 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
                     .unwrap_or("automatic"),
                 all_aliases.join(", ")
             );
-            for collection in collections
-                .iter()
-                .filter(|entry| entry.id != ALL_COLLECTION_ID)
-            {
+            for collection in &collections {
                 println!(
                     "{}: {} (write: {}; aliases: {})",
                     collection.id,
@@ -44,6 +38,12 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
                     .iter()
                     .find(|entry| entry.aliases.iter().any(|alias| alias == name))
                     .map(|entry| entry.id.as_str())
+                    .or_else(|| {
+                        all_aliases
+                            .iter()
+                            .any(|alias| alias == name)
+                            .then_some(ALL_COLLECTION_ID)
+                    })
             };
             let default = target("default").unwrap_or(ALL_COLLECTION_ID);
             println!("default -> {default}");
@@ -83,7 +83,9 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
                     aliases: vec![],
                 });
             }
-            resolve_collections(&collections, |id| capabilities.get(id).copied())?;
+            resolve_collections(&collections, &all_aliases, |id| {
+                capabilities.get(id).copied()
+            })?;
         }
         CollectionCommands::Remove { id } => {
             ensure!(id != ALL_COLLECTION_ID, "'all' is a built-in collection");
@@ -95,28 +97,20 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
         }
         CollectionCommands::Alias { name, collection } => {
             ensure!(
-                valid_collection_component(&name),
-                "invalid collection alias '{name}'"
+                name != ALL_COLLECTION_ID && valid_collection_component(&name),
+                "invalid or reserved collection alias '{name}'"
             );
-            if collection.as_deref() == Some(ALL_COLLECTION_ID)
-                && !collections
-                    .iter()
-                    .any(|entry| entry.id == ALL_COLLECTION_ID)
-            {
-                collections.push(CollectionConfig {
-                    id: ALL_COLLECTION_ID.into(),
-                    providers: vec![],
-                    write_provider: None,
-                    aliases: vec![],
-                });
-            }
             if let Some(id) = &collection {
                 ensure!(
-                    collections.iter().any(|entry| &entry.id == id),
+                    id == ALL_COLLECTION_ID || collections.iter().any(|entry| &entry.id == id),
                     "unknown collection '{id}'"
                 );
             }
-            let mut removed = false;
+            let mut removed = all_aliases.contains(&name);
+            all_aliases.retain(|alias| alias != &name);
+            if collection.as_deref() == Some(ALL_COLLECTION_ID) {
+                all_aliases.push(name.clone());
+            }
             for entry in &mut collections {
                 if let Some(index) = entry.aliases.iter().position(|alias| alias == &name) {
                     entry.aliases.remove(index);
@@ -133,8 +127,7 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
         }
     }
 
-    collections.retain(|entry| entry.id != ALL_COLLECTION_ID || !entry.aliases.is_empty());
-    rosec_core::config_edit::set_collections(&path, &collections)?;
+    rosec_core::config_edit::set_collections(&path, &collections, &all_aliases)?;
     println!(
         "Updated {}. Restart rosecd to apply collection changes.",
         path.display()

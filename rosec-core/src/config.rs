@@ -22,6 +22,8 @@ pub struct Config {
     pub provider: Vec<ProviderEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collection: Vec<CollectionConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub all_collection_aliases: Vec<String>,
 }
 
 pub const ALL_COLLECTION_ID: &str = "all";
@@ -30,7 +32,6 @@ pub const ALL_COLLECTION_ID: &str = "all";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
     pub id: String,
-    #[serde(default)]
     pub providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_provider: Option<String>,
@@ -46,32 +47,36 @@ pub fn valid_collection_component(name: &str) -> bool {
 /// Resolve the write destination for each collection against provider capabilities.
 pub fn resolve_collections(
     collections: &[CollectionConfig],
+    all_aliases: &[String],
     mut writable: impl FnMut(&str) -> Option<bool>,
 ) -> anyhow::Result<Vec<Option<String>>> {
     use std::collections::HashSet;
 
     let mut ids = HashSet::new();
     let mut aliases = HashSet::new();
+    for alias in all_aliases {
+        anyhow::ensure!(
+            alias != ALL_COLLECTION_ID
+                && valid_collection_component(alias)
+                && aliases.insert(alias),
+            "invalid, reserved or duplicate collection alias '{alias}'"
+        );
+    }
     collections
         .iter()
         .map(|collection| {
             let id = &collection.id;
             anyhow::ensure!(
-                valid_collection_component(id) && ids.insert(id),
-                "invalid or duplicate collection ID '{id}'"
+                id != ALL_COLLECTION_ID && valid_collection_component(id) && ids.insert(id),
+                "invalid, reserved or duplicate collection ID '{id}'"
             );
             for alias in &collection.aliases {
                 anyhow::ensure!(
-                    valid_collection_component(alias) && aliases.insert(alias),
-                    "invalid or duplicate collection alias '{alias}'"
+                    alias != ALL_COLLECTION_ID
+                        && valid_collection_component(alias)
+                        && aliases.insert(alias),
+                    "invalid, reserved or duplicate collection alias '{alias}'"
                 );
-            }
-            if id == ALL_COLLECTION_ID {
-                anyhow::ensure!(
-                    collection.providers.is_empty() && collection.write_provider.is_none(),
-                    "'all' uses every provider and the service write preference"
-                );
-                return Ok(None);
             }
             anyhow::ensure!(
                 !collection.providers.is_empty(),
@@ -757,6 +762,25 @@ fn default_input_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_is_reserved_for_the_builtin_collection() {
+        for (id, aliases, all_aliases) in [
+            ("all", vec![], vec![]),
+            ("work", vec!["all".to_owned()], vec![]),
+            ("work", vec![], vec!["all".to_owned()]),
+        ] {
+            let collection = CollectionConfig {
+                id: id.into(),
+                providers: vec!["vault".into()],
+                write_provider: None,
+                aliases,
+            };
+            let error =
+                resolve_collections(&[collection], &all_aliases, |_| Some(true)).unwrap_err();
+            assert!(error.to_string().contains("reserved"));
+        }
+    }
 
     #[test]
     fn empty_toml_gives_defaults() {

@@ -12,6 +12,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 pub fn set_collections(
     config_path: &Path,
     collections: &[crate::config::CollectionConfig],
+    all_aliases: &[String],
 ) -> Result<()> {
     use std::io::Write;
 
@@ -41,6 +42,8 @@ pub fn set_collections(
     } else {
         Item::ArrayOfTables(tables)
     };
+
+    doc["all_collection_aliases"] = value(strings(all_aliases));
 
     let path = std::path::absolute(config_path)?;
     let path = if path.exists() {

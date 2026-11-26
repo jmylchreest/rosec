@@ -42,35 +42,33 @@ pub(crate) struct CollectionLayout {
 impl CollectionLayout {
     pub fn new(
         config: &[CollectionConfig],
+        all_aliases: &[String],
         providers: &[Arc<dyn Provider>],
     ) -> anyhow::Result<Self> {
-        let legacy = config.iter().all(|entry| entry.id == ALL_COLLECTION_ID);
+        let legacy = config.is_empty();
         let all_path = if legacy {
             DEFAULT_COLLECTION_PATH.to_owned()
         } else {
             format!("{COLLECTION_ROOT}/{ALL_COLLECTION_ID}")
         };
         let mut canonical = BTreeMap::new();
-        let mut aliases = BTreeMap::new();
+        let mut aliases: BTreeMap<_, _> = all_aliases
+            .iter()
+            .map(|alias| (alias.clone(), all_path.clone()))
+            .collect();
         let mut item_parents = BTreeMap::new();
         let mut all = CollectionView::legacy();
         if !legacy {
             all.label = ALL_COLLECTION_ID.into();
         }
         canonical.insert(all_path.clone(), Arc::new(all));
-        let writers = resolve_collections(config, |id| {
+        let writers = resolve_collections(config, all_aliases, |id| {
             providers
                 .iter()
                 .find(|p| p.id() == id)
                 .map(|p| p.capabilities().contains(&Capability::Write))
         })?;
         for (entry, writer) in config.iter().zip(writers) {
-            if entry.id == ALL_COLLECTION_ID {
-                for alias in &entry.aliases {
-                    aliases.insert(alias.clone(), all_path.clone());
-                }
-                continue;
-            }
             let path = format!("{COLLECTION_ROOT}/{}", entry.id);
             for provider in &entry.providers {
                 item_parents

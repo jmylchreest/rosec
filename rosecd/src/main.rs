@@ -1539,7 +1539,9 @@ async fn config_watcher(
         if let Err(error) = update_config_watches(&mut watcher, &mut watched_dirs, &config_path) {
             tracing::warn!(%error, "could not update config fragment watches");
         }
-        if new_config.collection != initial_config.collection {
+        if new_config.collection != initial_config.collection
+            || new_config.all_collection_aliases != initial_config.all_collection_aliases
+        {
             tracing::warn!(
                 "Secret Service collections changed; restart rosecd to apply the new configuration"
             );

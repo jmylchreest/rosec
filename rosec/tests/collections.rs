@@ -138,16 +138,20 @@ async fn configure_collection_and_alias_through_cli() {
     );
     assert!(run(&main, &["alias", "login", "all"]).status.success());
     let config = rosec_core::config_load::load(&main).unwrap().config;
-    assert_eq!(
-        config
-            .collection
-            .iter()
-            .find(|entry| entry.id == "all")
-            .unwrap()
-            .aliases,
-        ["login"]
-    );
+    assert_eq!(config.all_collection_aliases, ["login"]);
+    for args in [
+        &["set", "all", "--provider", "work"][..],
+        &["alias", "all", "work"][..],
+    ] {
+        let output = run(&main, args);
+        assert!(!output.status.success());
+    }
     assert!(run(&main, &["alias", "login"]).status.success());
+    let output = run(&main, &["list"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("login -> work"));
+    assert!(run(&main, &["alias", "default"]).status.success());
+    let output = run(&main, &["list"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("default -> all\nlogin -> all"));
     assert!(run(&main, &["remove", "work"]).status.success());
     assert!(
         rosec_core::config_load::load(&main)
