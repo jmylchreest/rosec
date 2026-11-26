@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use std::collections::HashMap;
 
 use crate::service::to_object_path;
-use crate::state::{CallerInfo, ServiceState, make_item_path};
+use crate::state::{CallerInfo, ServiceState};
 
 /// A deferred operation to execute after a successful unlock prompt.
 ///
@@ -654,7 +654,7 @@ async fn execute_deferred_create(
     tracing::info!(item_id = %id, provider = %provider_id,
         "created item via deferred Prompt");
 
-    let item_path = make_item_path(provider_id, &id);
+    let item_path = state.item_path(provider_id, &id);
 
     let meta = ItemMeta::from_new_item(id, provider_id.to_string(), &item);
 

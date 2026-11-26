@@ -20,12 +20,12 @@ struct DomainState {
 pub struct EventCoordinator<K> {
     domain: Mutex<DomainState>,
     items: Arc<Mutex<HashMap<K, ItemMeta>>>,
-    key: fn(&ItemMeta) -> K,
+    key: Box<dyn Fn(&ItemMeta) -> K + Send + Sync>,
     revision: tokio::sync::watch::Sender<u64>,
     refresh: tokio::sync::Mutex<()>,
 }
 impl<K: Eq + Hash> EventCoordinator<K> {
-    pub fn new(key: fn(&ItemMeta) -> K) -> Self {
+    pub fn new(key: impl Fn(&ItemMeta) -> K + Send + Sync + 'static) -> Self {
         Self {
             domain: Mutex::new(DomainState {
                 inventory: Inventory::default(),
@@ -34,7 +34,7 @@ impl<K: Eq + Hash> EventCoordinator<K> {
                 dirty: HashSet::new(),
             }),
             items: Arc::new(Mutex::new(HashMap::new())),
-            key,
+            key: Box::new(key),
             revision: tokio::sync::watch::channel(0).0,
             refresh: tokio::sync::Mutex::new(()),
         }

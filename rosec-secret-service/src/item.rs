@@ -163,6 +163,16 @@ impl SecretItem {
     }
 
     fn set_secret(&self, _secret: SecretStruct) -> Result<(), SecretServiceError> {
+        if !self
+            .state
+            .provider
+            .capabilities()
+            .contains(&Capability::Write)
+        {
+            return Err(SecretServiceError::NotSupported(
+                "provider is read-only".into(),
+            ));
+        }
         if self.is_locked() {
             return Err(SecretServiceError::IsLocked("item is locked".to_string()));
         }

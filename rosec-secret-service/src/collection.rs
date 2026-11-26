@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rosec_core::{ItemMeta, NewItem, SecretBytes, meta_matches_query};
+use rosec_core::{Capability, ItemMeta, NewItem, Provider, SecretBytes, meta_matches_query};
 use tracing::{debug, info};
 use zbus::OwnedObjectPath;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
 
+use crate::collection_layout::CollectionView;
 use crate::crypto::aes128_cbc_decrypt;
 use crate::error::SecretServiceError;
 use crate::prompt::PendingOperation;
 use crate::service::to_object_path;
 use crate::session::SessionManager;
-use crate::state::{ServiceState, make_item_path, map_provider_error, map_provider_error_ss};
+use crate::state::{ServiceState, map_provider_error, map_provider_error_ss};
 
 #[derive(Clone)]
 pub struct CollectionState {
@@ -25,11 +26,72 @@ pub struct CollectionState {
 
 pub struct SecretCollection {
     state: CollectionState,
+    view: Arc<CollectionView>,
 }
 
 impl SecretCollection {
     pub fn new(state: CollectionState) -> Self {
-        Self { state }
+        Self::for_view(state, Arc::new(CollectionView::legacy()))
+    }
+
+    pub(crate) fn for_view(state: CollectionState, view: Arc<CollectionView>) -> Self {
+        Self { state, view }
+    }
+
+    fn scoped_writer(
+        &self,
+        item: &NewItem,
+        replace: bool,
+    ) -> Result<Arc<dyn Provider>, SecretServiceError> {
+        let state = &self.state.service_state;
+        let owner = if replace {
+            let order = state.registry.order_snapshot();
+            let items = self
+                .state
+                .items
+                .lock()
+                .map_err(|_| SecretServiceError::Failed("items lock poisoned".into()))?;
+            items
+                .values()
+                .filter(|meta| {
+                    self.view.includes(&meta.provider_id)
+                        && if item.attributes.is_empty() {
+                            meta.label == item.label
+                        } else {
+                            meta_matches_query(meta, &item.attributes)
+                        }
+                })
+                .min_by(|a, b| {
+                    let rank = |m: &ItemMeta| {
+                        order
+                            .iter()
+                            .position(|id| id == &m.provider_id)
+                            .unwrap_or(usize::MAX)
+                    };
+                    rank(a)
+                        .cmp(&rank(b))
+                        .then_with(|| b.modified.cmp(&a.modified))
+                        .then_with(|| a.id.cmp(&b.id))
+                })
+                .map(|meta| meta.provider_id.clone())
+        } else {
+            None
+        };
+        let id = owner
+            .as_ref()
+            .or(self.view.writer.as_ref())
+            .ok_or_else(|| {
+                SecretServiceError::NotSupported("collection has no write-capable provider".into())
+            })?;
+        let provider = state.provider_by_id(id).ok_or_else(|| {
+            SecretServiceError::Failed(format!("collection provider '{id}' is unavailable"))
+        })?;
+        if !provider.capabilities().contains(&Capability::Write) {
+            return Err(SecretServiceError::NotSupported(format!(
+                "provider '{id}' is read-only"
+            )));
+        }
+        Ok(provider)
     }
 }
 
@@ -58,13 +120,13 @@ impl SecretCollection {
 
     #[zbus(property(emits_changed_signal = "invalidates"))]
     async fn locked(&self) -> bool {
-        for provider in self.state.service_state.providers_ordered() {
-            match provider.status().await {
-                Ok(s) if !s.locked => return false,
-                _ => {}
-            }
-        }
-        true
+        let state = Arc::clone(&self.state.service_state);
+        let view = Arc::clone(&self.view);
+        self.state
+            .tokio_handle
+            .spawn(async move { state.collection_is_locked(&view).await })
+            .await
+            .unwrap_or(true)
     }
 
     #[zbus(property(emits_changed_signal = "invalidates"))]
@@ -72,7 +134,13 @@ impl SecretCollection {
         self.state
             .items
             .lock()
-            .map(|items| items.keys().map(|s| to_object_path(s)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|(_, meta)| self.view.includes(&meta.provider_id))
+                    .map(|(path, _)| to_object_path(path))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -90,7 +158,9 @@ impl SecretCollection {
         // attributes_match reads plaintext attrs which are empty pre-unlock.
         let matched: Vec<OwnedObjectPath> = items
             .iter()
-            .filter(|(_, item)| meta_matches_query(item, &attributes))
+            .filter(|(_, item)| {
+                self.view.includes(&item.provider_id) && meta_matches_query(item, &attributes)
+            })
             .map(|(path, _)| to_object_path(path))
             .collect();
 
@@ -153,16 +223,22 @@ impl SecretCollection {
         // A read-only provider that owns a matching item does not block the
         // write — we shadow it with a new item in a writable provider.  The
         // dedup layer surfaces the priority winner to clients.
-        let write_provider = match self
-            .state
-            .service_state
-            .find_writable_match(&item.attributes)
-            .map_err(|e| SecretServiceError::Failed(format!("match lookup failed: {e}")))?
-        {
-            Some(provider) => provider,
-            None => self.state.service_state.write_provider().ok_or_else(|| {
-                SecretServiceError::NotSupported("no write-capable provider available".to_string())
-            })?,
+        let write_provider = if !self.view.legacy {
+            self.scoped_writer(&item, replace)?
+        } else {
+            match self
+                .state
+                .service_state
+                .find_writable_match(&item.attributes)
+                .map_err(|e| SecretServiceError::Failed(format!("match lookup failed: {e}")))?
+            {
+                Some(provider) => provider,
+                None => self.state.service_state.write_provider().ok_or_else(|| {
+                    SecretServiceError::NotSupported(
+                        "no write-capable provider available".to_string(),
+                    )
+                })?,
+            }
         };
 
         // Check if the chosen provider is locked — if so, defer the operation
@@ -209,7 +285,7 @@ impl SecretCollection {
 
         info!(item_id = %id, provider = %provider_id, "created item via D-Bus");
 
-        let item_path = make_item_path(&provider_id, &id);
+        let item_path = self.state.service_state.item_path(&provider_id, &id);
 
         let meta = ItemMeta::from_new_item(id.clone(), provider_id.clone(), &item);
 
@@ -224,7 +300,7 @@ impl SecretCollection {
 
     fn delete(&self) -> Result<OwnedObjectPath, FdoError> {
         Err(FdoError::NotSupported(
-            "cannot delete default collection".to_string(),
+            "collections are managed through rosec collection".to_string(),
         ))
     }
 

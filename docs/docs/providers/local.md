@@ -93,6 +93,56 @@ write_provider = "local"
 
 If a provider with id `"local"` exists and `write_provider` is not set, it is used automatically.
 
+### Secret Service collections
+
+The default setup presents one collection across all providers. To show separate
+collections in desktop applications, pick the provider IDs for each view and map
+the `default` alias to the collection where applications should save secrets:
+
+```bash
+rosec collection set work --provider work_vault --provider company_passwords
+rosec collection set personal --provider personal_vault
+rosec collection alias default personal
+rosec collection alias login personal
+rosec collection list
+```
+
+`rosec collection set` checks capabilities against the running daemon. A
+collection with one writable member uses it for new items. With several writable
+members, pass `--write-provider <id>` to choose the destination. A collection with
+only read-only members rejects new items. Replacing or deleting an existing item
+uses the provider that owns it, so a read-only item stays read-only even in a
+collection that accepts new items.
+
+The commands edit your user config. Restart `rosecd` to apply the changes.
+You can also set them directly:
+
+```toml
+[[collection]]
+id = "work"
+providers = ["work_vault", "company_passwords"]
+
+[[collection]]
+id = "personal"
+providers = ["personal_vault"]
+aliases = ["default", "login"]
+```
+
+Collection IDs and aliases accept ASCII letters, digits and underscores. The
+`login` alias follows `default` unless assigned explicitly. An alias can be
+moved with `rosec collection alias <name> <collection>` and cleared with
+`rosec collection alias <name>`. Use `rosec collection remove <id>` to remove a
+view and its aliases. Removing the last configured collection restores the
+default setup. When collections come from config includes, the CLI writes the
+effective collection list into the main config file.
+
+Providers can belong to multiple collections. Those views share the same item
+and provider lock state. Changing the first collection that contains a provider
+can change the D-Bus paths of its items after restart. With configured
+collections, Secret Service searches return items from member providers and
+keep copies from different providers visible. The existing
+`[[provider]].collection` setting still adds an item attribute for filtering.
+
 ## Cryptography
 
 | Parameter | Value |

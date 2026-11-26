@@ -84,6 +84,7 @@ pub struct ServiceState {
     /// Registered providers, ordering, and per-provider config (return-attr
     /// patterns and optional collection label).  See [`ProviderRegistry`].
     pub registry: ProviderRegistry,
+    pub(crate) collections: Arc<crate::collection_layout::CollectionLayout>,
     pub router: Arc<Router>,
     pub sessions: Arc<SessionManager>,
     /// Item registry (mounted items, registered D-Bus paths, last-sync
@@ -142,6 +143,7 @@ impl ServiceState {
             PromptConfig::default(),
             Config::default(),
         )
+        .expect("implicit collection layout is valid")
     }
 
     /// Like `new`, but accepts per-provider `return_attr` patterns from config.
@@ -167,6 +169,7 @@ impl ServiceState {
             PromptConfig::default(),
             Config::default(),
         )
+        .expect("implicit collection layout is valid")
     }
 
     /// Full constructor: accepts `return_attr` patterns, collection map, `PromptConfig`,
@@ -182,14 +185,25 @@ impl ServiceState {
         collection_map: HashMap<String, String>,
         prompt_config: PromptConfig,
         initial_config: Config,
-    ) -> Self {
-        let events =
-            rosec_events::EventCoordinator::new(|meta| make_item_path(&meta.provider_id, &meta.id));
+    ) -> anyhow::Result<Self> {
+        let collections = Arc::new(crate::collection_layout::CollectionLayout::new(
+            &initial_config.collection,
+            &providers,
+        )?);
+        let event_collections = Arc::clone(&collections);
+        let events = rosec_events::EventCoordinator::new(move |meta| {
+            make_item_path(
+                event_collections.item_parent(&meta.provider_id),
+                &meta.provider_id,
+                &meta.id,
+            )
+        });
         let cache = ItemCache {
             items: events.projection(),
             ..ItemCache::new()
         };
-        Self {
+        Ok(Self {
+            collections,
             registry: ProviderRegistry::new(providers, return_attr_map, collection_map),
             router,
             sessions,
@@ -202,7 +216,25 @@ impl ServiceState {
             live_config: Arc::new(RwLock::new(initial_config)),
             events,
             object_lock: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    pub(crate) fn item_path(&self, provider: &str, item_id: &str) -> String {
+        make_item_path(self.collections.item_parent(provider), provider, item_id)
+    }
+
+    pub(crate) async fn collection_is_locked(
+        &self,
+        view: &crate::collection_layout::CollectionView,
+    ) -> bool {
+        for provider in self.providers_ordered() {
+            if view.includes(provider.id())
+                && provider.status().await.is_ok_and(|status| !status.locked)
+            {
+                return false;
+            }
         }
+        true
     }
 
     /// Subscribe to revision wakeups. Read `changes_since` after each wakeup;
@@ -1540,6 +1572,14 @@ impl ServiceState {
         &self,
         attrs: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), FdoError> {
+        self.search_items_partition_where(attrs, |_| true)
+    }
+
+    pub(crate) fn search_items_partition_where(
+        &self,
+        attrs: &HashMap<String, String>,
+        include: impl Fn(&ItemMeta) -> bool,
+    ) -> Result<(Vec<String>, Vec<String>), FdoError> {
         let cache = self.cache.items.lock().map_err(|_| {
             map_provider_error(ProviderError::Unavailable(
                 "items lock poisoned".to_string(),
@@ -1550,7 +1590,7 @@ impl ServiceState {
         let mut locked = Vec::new();
 
         for (path, meta) in cache.iter() {
-            if !meta_matches_query(meta, attrs) {
+            if !include(meta) || !meta_matches_query(meta, attrs) {
                 continue;
             }
             if meta.locked {
@@ -2077,8 +2117,13 @@ impl ServiceState {
         let epoch = self.events.begin_refresh();
         let outcomes = self.fetch_entries().await?;
         self.events.commit_refresh(epoch, outcomes, |inventory| {
-            self.router
-                .dedup(inventory.items(), &self.registry.order_snapshot())
+            if self.collections.legacy {
+                self.router
+                    .dedup(inventory.items(), &self.registry.order_snapshot())
+            } else {
+                // Global deduplication could hide the only copy visible in another collection.
+                inventory.items()
+            }
         });
         self.register_current_items().await?;
         self.update_cache_time()?;
@@ -2251,7 +2296,7 @@ impl ServiceState {
     ) -> Result<(), FdoError> {
         let server = conn.object_server();
         for item in entries {
-            let path = make_item_path(&item.provider_id, &item.id);
+            let path = self.item_path(&item.provider_id, &item.id);
             let Some(provider) = self.provider_by_id(&item.provider_id) else {
                 continue;
             };
@@ -2318,7 +2363,7 @@ impl ServiceState {
         self.register_items_inner(&conn, &snapshot).await?;
         let current: HashSet<_> = snapshot
             .iter()
-            .map(|meta| make_item_path(&meta.provider_id, &meta.id))
+            .map(|meta| self.item_path(&meta.provider_id, &meta.id))
             .collect();
         let removed: Vec<_> = self
             .cache
@@ -2617,11 +2662,11 @@ fn partition_by_glob<'a>(
     (unlocked, locked)
 }
 
-pub(crate) fn make_item_path(provider: &str, item_id: &str) -> String {
+fn make_item_path(parent: &str, provider: &str, item_id: &str) -> String {
     let provider_part = sanitize_component(provider);
     let item_part = sanitize_component(item_id);
     let hash = hash_id(&format!("{provider}:{item_id}"));
-    format!("/org/freedesktop/secrets/collection/default/{provider_part}_{item_part}_{hash:016x}")
+    format!("{parent}/{provider_part}_{item_part}_{hash:016x}")
 }
 
 fn sanitize_component(raw: &str) -> String {
@@ -3160,7 +3205,7 @@ mod tests {
         let mut receiver = state.subscribe_changes();
         let before = *receiver.borrow_and_update();
         state.patch_cached_item(
-            &make_item_path("mock", "item-1"),
+            &state.item_path("mock", "item-1"),
             Some("renamed"),
             None,
             None,

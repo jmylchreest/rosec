@@ -8,6 +8,56 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Table, value};
 
+/// Write the effective collection list as a root-level override of included lists.
+pub fn set_collections(
+    config_path: &Path,
+    collections: &[crate::config::CollectionConfig],
+) -> Result<()> {
+    use std::io::Write;
+
+    fn strings(values: &[String]) -> toml_edit::Array {
+        values.iter().map(String::as_str).collect()
+    }
+
+    let raw = read_or_empty(config_path)?;
+    let mut doc: DocumentMut = raw
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid config TOML (values omitted)"))?;
+    let mut tables = toml_edit::ArrayOfTables::new();
+    for collection in collections {
+        let mut table = Table::new();
+        table["id"] = value(&collection.id);
+        table["providers"] = value(strings(&collection.providers));
+        if let Some(writer) = &collection.write_provider {
+            table["write_provider"] = value(writer);
+        }
+        if !collection.aliases.is_empty() {
+            table["aliases"] = value(strings(&collection.aliases));
+        }
+        tables.push(table);
+    }
+    doc["collection"] = if collections.is_empty() {
+        value(toml_edit::Array::new())
+    } else {
+        Item::ArrayOfTables(tables)
+    };
+
+    let path = std::path::absolute(config_path)?;
+    let path = if path.exists() {
+        path.canonicalize()?
+    } else {
+        path
+    };
+    let parent = path.parent().context("config path has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(doc.to_string().as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&path)
+        .with_context(|| format!("failed to update {}", path.display()))?;
+    Ok(())
+}
+
 /// Add a new `[[provider]]` entry to the config file.
 ///
 /// `id` must be unique within the file; returns an error if it is already

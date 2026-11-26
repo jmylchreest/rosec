@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 use rosec_core::config::Config;
 
 mod cli;
+mod collection;
 mod config;
 mod enable;
 mod get;
@@ -70,6 +71,7 @@ async fn main() -> Result<()> {
         Commands::Vault { action } => vault::dispatch(action).await,
         Commands::Provider { action, .. } => provider::dispatch(action).await,
         Commands::Config { action } => config::dispatch(action),
+        Commands::Collection { action } => collection::dispatch(action).await,
         Commands::Status => status::run().await,
         Commands::Sync => sync::run().await,
         Commands::Search(args) => search::run(args).await,

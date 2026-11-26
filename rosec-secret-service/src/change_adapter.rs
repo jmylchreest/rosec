@@ -1,10 +1,6 @@
 //! D-Bus projection of committed domain changes. Failed delivery retries from
 //! a current snapshot; notifications are invalidations, not an audit log.
-use crate::{
-    collection::SecretCollection,
-    service::to_object_path,
-    state::{ServiceState, make_item_path},
-};
+use crate::{collection::SecretCollection, service::to_object_path, state::ServiceState};
 use rosec_core::{
     ItemMeta,
     changes::{ChangesSince, ItemIdentity},
@@ -16,12 +12,6 @@ use std::{
 };
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, Variant};
-
-const COLLECTIONS: [&str; 3] = [
-    "/org/freedesktop/secrets/collection/default",
-    "/org/freedesktop/secrets/aliases/default",
-    "/org/freedesktop/secrets/aliases/login",
-];
 
 pub(crate) fn start(state: &Arc<ServiceState>) {
     let mut wake = state.subscribe_changes();
@@ -58,7 +48,7 @@ struct View {
     revision: u64,
     bus: Option<(String, String)>,
     items: BTreeMap<ItemIdentity, ItemMeta>,
-    collection_locked: Option<bool>,
+    collection_locked: HashMap<String, bool>,
 }
 impl View {
     async fn reconcile(&mut self, state: &Arc<ServiceState>) -> zbus::Result<()> {
@@ -71,7 +61,7 @@ impl View {
         );
         if self.bus.as_ref() != Some(&bus) {
             self.items.clear();
-            self.collection_locked = None;
+            self.collection_locked.clear();
             self.revision = 0;
             self.bus = Some(bus);
         }
@@ -112,53 +102,63 @@ impl View {
         for key in &changed {
             invalidate(
                 &conn,
-                &make_item_path(&key.provider_id, &key.item_id),
+                &state.item_path(&key.provider_id, &key.item_id),
                 "org.freedesktop.Secret.Item",
                 &["Label", "Attributes", "Locked", "Created", "Modified"],
             )
             .await?;
         }
-        let mut locked = true;
+        let mut locks = HashMap::new();
         for provider in state.providers_ordered() {
-            if provider.status().await.is_ok_and(|status| !status.locked) {
-                locked = false;
-                break;
-            }
+            locks.insert(
+                provider.id().to_owned(),
+                provider.status().await.is_ok_and(|s| !s.locked),
+            );
         }
-        for path in COLLECTIONS {
-            let emitter = SignalEmitter::new(&conn, path)?;
-            for key in &removed {
+        let mut collection_locked = HashMap::new();
+        for (path, view) in state.collections.objects() {
+            let locked = !locks
+                .iter()
+                .any(|(id, unlocked)| *unlocked && view.includes(id));
+            collection_locked.insert(path.clone(), locked);
+            let includes = |key: &&ItemIdentity| view.includes(&key.provider_id);
+            let emitter = SignalEmitter::new(&conn, path.as_str())?;
+            for key in removed.iter().copied().filter(includes) {
                 SecretCollection::item_deleted(
                     &emitter,
-                    to_object_path(&make_item_path(&key.provider_id, &key.item_id)),
+                    to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
                 )
                 .await?;
             }
-            for key in &added {
+            for key in added.iter().copied().filter(includes) {
                 SecretCollection::item_created(
                     &emitter,
-                    to_object_path(&make_item_path(&key.provider_id, &key.item_id)),
+                    to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
                 )
                 .await?;
             }
-            for key in &changed {
+            for key in changed.iter().copied().filter(includes) {
                 SecretCollection::item_changed(
                     &emitter,
-                    to_object_path(&make_item_path(&key.provider_id, &key.item_id)),
+                    to_object_path(&state.item_path(&key.provider_id, &key.item_id)),
                 )
                 .await?;
             }
             let mut properties = Vec::new();
-            if !added.is_empty() || !removed.is_empty() {
+            if added.iter().chain(&removed).any(includes) {
                 properties.push("Items");
             }
-            if self.collection_locked.is_some_and(|old| old != locked) {
+            if self
+                .collection_locked
+                .get(&path)
+                .is_some_and(|old| *old != locked)
+            {
                 properties.push("Locked");
             }
             if !properties.is_empty() {
                 invalidate(
                     &conn,
-                    path,
+                    &path,
                     "org.freedesktop.Secret.Collection",
                     &properties,
                 )
@@ -167,7 +167,7 @@ impl View {
         }
         self.items = current;
         self.revision = revision;
-        self.collection_locked = Some(locked);
+        self.collection_locked = collection_locked;
         Ok(())
     }
 }

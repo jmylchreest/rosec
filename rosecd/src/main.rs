@@ -1539,6 +1539,13 @@ async fn config_watcher(
         if let Err(error) = update_config_watches(&mut watcher, &mut watched_dirs, &config_path) {
             tracing::warn!(%error, "could not update config fragment watches");
         }
+        if new_config.collection != initial_config.collection {
+            tracing::warn!(
+                "Secret Service collections changed; restart rosecd to apply the new configuration"
+            );
+            continue;
+        }
+
         if new_config.service.wasm_trusted_key != initial_config.service.wasm_trusted_key
             || new_config.service.wasm_verify != initial_config.service.wasm_verify
             || new_config.service.wasm_prefer != initial_config.service.wasm_prefer

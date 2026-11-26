@@ -29,16 +29,6 @@ pub(crate) fn to_object_path(s: &str) -> OwnedObjectPath {
     })
 }
 
-const DEFAULT_COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/default";
-
-/// The login alias is provided for GNOME Keyring compatibility.
-fn collection_path_for_alias(alias: &str) -> &'static str {
-    match alias {
-        "default" | "login" => DEFAULT_COLLECTION_PATH,
-        _ => "/",
-    }
-}
-
 pub struct SecretService {
     state: Arc<ServiceState>,
 }
@@ -53,9 +43,12 @@ impl SecretService {
 impl SecretService {
     #[zbus(property)]
     fn collections(&self) -> Vec<OwnedObjectPath> {
-        vec![to_object_path(
-            "/org/freedesktop/secrets/collection/default",
-        )]
+        self.state
+            .collections
+            .canonical
+            .keys()
+            .map(|path| to_object_path(path))
+            .collect()
     }
 
     async fn open_session(
@@ -125,7 +118,11 @@ impl SecretService {
         // that MUST never error when providers are locked.  Items from locked
         // providers are returned in the `locked` list.  Read from the persistent
         // metadata_cache which survives lock/unlock cycles.
-        let (unlocked, locked) = self.state.search_items_partition(&attributes)?;
+        let (unlocked, locked) = self
+            .state
+            .search_items_partition_where(&attributes, |meta| {
+                self.state.collections.includes(&meta.provider_id)
+            })?;
         Ok((
             unlocked.into_iter().map(|s| to_object_path(&s)).collect(),
             locked.into_iter().map(|s| to_object_path(&s)).collect(),
@@ -212,20 +209,24 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<OwnedObjectPath, FdoError> {
         log_dbus_caller("service", "ReadAlias", &header);
-        Ok(to_object_path(collection_path_for_alias(name)))
+        Ok(to_object_path(self.state.collections.alias(name)))
     }
 
     fn set_alias(
         &self,
-        _name: &str,
-        _collection: zbus::ObjectPath<'_>,
+        name: &str,
+        collection: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("service", "SetAlias", &header);
-        // No-op: we always serve a single default collection and do not support
-        // mutable aliases.  Returning NotSupported breaks clients (e.g. GNOME
-        // apps) that call SetAlias as part of normal startup — silently succeed.
-        Ok(())
+        if self.state.collections.legacy
+            || self.state.collections.alias(name) == collection.as_str()
+        {
+            return Ok(());
+        }
+        Err(FdoError::NotSupported(
+            "manage aliases with rosec collection".into(),
+        ))
     }
 
     async fn lock(
@@ -234,17 +235,36 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "Lock", &header);
+        let targets = (!self.state.collections.legacy).then(|| {
+            crate::unlock_plan::targets(&self.state, objects.iter().map(|path| path.as_str()))
+        });
         for provider in self.state.providers_ordered() {
+            if targets.as_ref().is_some_and(|targets| {
+                !targets
+                    .iter()
+                    .any(|(_, ids)| ids.iter().any(|id| id == provider.id()))
+            }) {
+                continue;
+            }
             let pid = provider.id().to_string();
             self.state
                 .run_on_tokio(async move { provider.lock().await })
                 .await?
                 .map_err(map_provider_error)?;
             self.state.mark_provider_locked_in_cache(&pid);
+            self.state.clear_provider_unlocked(&pid);
         }
-        self.state.mark_locked();
-        // Return the requested objects as "locked" and no prompt needed
-        Ok((objects, to_object_path("/")))
+        let locked = match targets {
+            None => {
+                self.state.mark_locked();
+                objects
+            }
+            Some(targets) => targets
+                .into_iter()
+                .map(|(path, _)| to_object_path(&path))
+                .collect(),
+        };
+        Ok((locked, to_object_path("/")))
     }
 
     async fn unlock(
@@ -292,11 +312,13 @@ impl SecretService {
         log_dbus_caller("service", "CreateCollection", &header);
         // Preserve the empty-alias shortcut used by clients at startup.
         // For an existing alias the spec returns its collection without a prompt.
-        let path = if alias.is_empty() {
-            DEFAULT_COLLECTION_PATH
-        } else {
-            collection_path_for_alias(&alias)
-        };
+        let name = if alias.is_empty() { "default" } else { &alias };
+        let path = self.state.collections.alias(name);
+        if path == "/" && !self.state.collections.legacy {
+            return Err(FdoError::NotSupported(
+                "manage collections with rosec collection".into(),
+            ));
+        }
         let collection = to_object_path(path);
         Ok((collection, to_object_path("/")))
     }

@@ -9,6 +9,7 @@ use std::sync::{
 
 pub struct MutableProvider {
     pub id: String,
+    writable: bool,
     pub items: Mutex<Vec<ItemMeta>>,
     pub fail: AtomicBool,
     pub locked: AtomicBool,
@@ -22,8 +23,13 @@ pub struct MutableProvider {
 }
 impl MutableProvider {
     pub fn new(id: &str) -> Arc<Self> {
+        Self::with_write(id, true)
+    }
+
+    pub fn with_write(id: &str, writable: bool) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
+            writable,
             items: Mutex::new(vec![]),
             fail: AtomicBool::new(false),
             locked: AtomicBool::new(false),
@@ -56,7 +62,11 @@ impl Provider for MutableProvider {
         "fixture"
     }
     fn capabilities(&self) -> &'static [rosec_core::Capability] {
-        &[rosec_core::Capability::Write]
+        if self.writable {
+            &[rosec_core::Capability::Write]
+        } else {
+            &[]
+        }
     }
     async fn create_item(
         &self,

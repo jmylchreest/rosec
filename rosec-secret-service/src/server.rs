@@ -66,17 +66,20 @@ pub async fn register_objects_with_full_config(
     initial_config: Config,
 ) -> zbus::Result<Arc<ServiceState>> {
     let tokio_handle = tokio::runtime::Handle::current();
-    let state = Arc::new(ServiceState::new_with_config(
-        providers,
-        router,
-        sessions,
-        conn.clone(),
-        tokio_handle,
-        return_attr_map,
-        collection_map,
-        prompt_config,
-        initial_config,
-    ));
+    let state = Arc::new(
+        ServiceState::new_with_config(
+            providers,
+            router,
+            sessions,
+            conn.clone(),
+            tokio_handle,
+            return_attr_map,
+            collection_map,
+            prompt_config,
+            initial_config,
+        )
+        .map_err(|error| zbus::Error::Failure(error.to_string()))?,
+    );
 
     register_all_objects(conn, &state).await?;
     crate::change_adapter::start(&state);
@@ -128,31 +131,18 @@ async fn register_all_objects(conn: &Connection, state: &Arc<ServiceState>) -> z
         )
         .await?;
 
-    let collection_state = CollectionState {
-        label: "default".to_string(),
-        items: Arc::clone(&state.cache.items),
-        service_state: Arc::clone(state),
-        sessions: Arc::clone(&state.sessions),
-        tokio_handle: tokio::runtime::Handle::current(),
-    };
-    server
-        .at(
-            DEFAULT_COLLECTION_PATH,
-            SecretCollection::new(collection_state.clone()),
-        )
-        .await?;
-
-    // Per the Secret Service spec, /org/freedesktop/secrets/aliases/default
-    // must resolve to the default collection.  Most clients (including
-    // secret-tool from libsecret) access the default collection via this
-    // alias path rather than calling ReadAlias first.
-    // ReadAlias also advertises "login". Both aliases must expose the same
-    // virtual collection, including its shared item cache and provider state.
-    for alias in ["default", "login"] {
+    for (path, view) in state.collections.objects() {
+        let collection_state = CollectionState {
+            label: view.label.clone(),
+            items: Arc::clone(&state.cache.items),
+            service_state: Arc::clone(state),
+            sessions: Arc::clone(&state.sessions),
+            tokio_handle: tokio::runtime::Handle::current(),
+        };
         server
             .at(
-                format!("/org/freedesktop/secrets/aliases/{alias}"),
-                SecretCollection::new(collection_state.clone()),
+                path,
+                SecretCollection::for_view(collection_state, Arc::clone(view)),
             )
             .await?;
     }

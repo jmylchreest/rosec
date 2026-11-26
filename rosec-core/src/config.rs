@@ -20,6 +20,82 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub provider: Vec<ProviderEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collection: Vec<CollectionConfig>,
+}
+
+/// A Secret Service view over one or more providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionConfig {
+    pub id: String,
+    pub providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+/// Collection IDs and aliases form individual D-Bus path components.
+pub fn valid_collection_component(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// Resolve the write destination for each collection against provider capabilities.
+pub fn resolve_collections(
+    collections: &[CollectionConfig],
+    mut writable: impl FnMut(&str) -> Option<bool>,
+) -> anyhow::Result<Vec<Option<String>>> {
+    use std::collections::HashSet;
+
+    let mut ids = HashSet::new();
+    let mut aliases = HashSet::new();
+    collections
+        .iter()
+        .map(|collection| {
+            let id = &collection.id;
+            anyhow::ensure!(
+                valid_collection_component(id) && ids.insert(id),
+                "invalid or duplicate collection ID '{id}'"
+            );
+            for alias in &collection.aliases {
+                anyhow::ensure!(
+                    valid_collection_component(alias) && aliases.insert(alias),
+                    "invalid or duplicate collection alias '{alias}'"
+                );
+            }
+            anyhow::ensure!(
+                !collection.providers.is_empty(),
+                "collection '{id}' needs at least one provider"
+            );
+            let mut members = HashSet::new();
+            let mut writers = Vec::new();
+            for provider in &collection.providers {
+                anyhow::ensure!(
+                    members.insert(provider),
+                    "collection '{id}' repeats provider '{provider}'"
+                );
+                match writable(provider) {
+                    Some(true) => writers.push(provider),
+                    Some(false) => {}
+                    None => anyhow::bail!(
+                        "collection '{id}' references unavailable provider '{provider}'"
+                    ),
+                }
+            }
+            if let Some(writer) = &collection.write_provider {
+                anyhow::ensure!(
+                    writers.contains(&writer),
+                    "collection '{id}' write provider '{writer}' must be a write-capable member"
+                );
+                return Ok(Some(writer.clone()));
+            }
+            anyhow::ensure!(
+                writers.len() <= 1,
+                "collection '{id}' has multiple writable providers; select a write_provider"
+            );
+            Ok(writers.first().map(|id| (*id).clone()))
+        })
+        .collect()
 }
 
 /// Daemon-side controls for kernel-level sandboxing (Landlock). Read at
