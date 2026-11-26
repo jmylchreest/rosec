@@ -29,6 +29,16 @@ pub(crate) fn to_object_path(s: &str) -> OwnedObjectPath {
     })
 }
 
+const DEFAULT_COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/default";
+
+/// The login alias is provided for GNOME Keyring compatibility.
+fn collection_path_for_alias(alias: &str) -> &'static str {
+    match alias {
+        "default" | "login" => DEFAULT_COLLECTION_PATH,
+        _ => "/",
+    }
+}
+
 pub struct SecretService {
     state: Arc<ServiceState>,
 }
@@ -202,17 +212,7 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<OwnedObjectPath, FdoError> {
         log_dbus_caller("service", "ReadAlias", &header);
-        // Map "login" to "default" for gnome-keyring compatibility.
-        // Many applications (e.g. Chrome, NetworkManager) request the
-        // "login" alias which gnome-keyring uses for its auto-unlock
-        // keyring.
-        if name == "default" || name == "login" {
-            Ok(to_object_path(
-                "/org/freedesktop/secrets/collection/default",
-            ))
-        } else {
-            Ok(to_object_path("/"))
-        }
+        Ok(to_object_path(collection_path_for_alias(name)))
     }
 
     fn set_alias(
@@ -290,17 +290,14 @@ impl SecretService {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), FdoError> {
         log_dbus_caller("service", "CreateCollection", &header);
-        // We don't support creating new collections, but returning NotSupported
-        // breaks clients that call CreateCollection("", "default") at startup.
-        // Return the existing default collection with no prompt needed, which
-        // is spec-compliant behaviour for when the requested alias already exists.
-        let collection = if alias == "default" || alias.is_empty() {
-            to_object_path("/org/freedesktop/secrets/collection/default")
+        // Preserve the empty-alias shortcut used by clients at startup.
+        // For an existing alias the spec returns its collection without a prompt.
+        let path = if alias.is_empty() {
+            DEFAULT_COLLECTION_PATH
         } else {
-            // For named aliases we don't support, return "/" + no prompt —
-            // the client can inspect the returned "/" path to know it failed.
-            to_object_path("/")
+            collection_path_for_alias(&alias)
         };
+        let collection = to_object_path(path);
         Ok((collection, to_object_path("/")))
     }
 }

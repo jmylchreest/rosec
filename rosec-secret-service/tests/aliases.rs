@@ -62,12 +62,11 @@ async fn advertised_aliases_expose_the_same_virtual_collection() {
             .await
             .unwrap();
     }
-    // Preserve established startup shims: this fix only supplies the missing
-    // object for the already-advertised login alias.
+    // Existing aliases resolve to the same collection during creation.
     for (alias, expected) in [
         ("default", canonical),
         ("", canonical),
-        ("login", "/"),
+        ("login", canonical),
         ("custom", "/"),
     ] {
         let (collection, prompt): (OwnedObjectPath, OwnedObjectPath) = service

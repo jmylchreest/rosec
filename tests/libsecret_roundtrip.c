@@ -6,6 +6,13 @@ static const SecretSchema schema = {
 };
 int main(void) {
  GError *error = NULL;
+ SecretCollection *login = secret_collection_create_sync(
+     NULL, "Interop fixture", "login", SECRET_COLLECTION_CREATE_NONE, NULL, &error);
+ if (!login) goto fail;
+ gboolean existing = !strcmp(g_dbus_proxy_get_object_path(G_DBUS_PROXY(login)),
+                             "/org/freedesktop/secrets/collection/default");
+ g_object_unref(login);
+ if (!existing) goto fail;
  const char *values[] = {"first-fixture-secret", "replacement-fixture-secret"};
  for (unsigned i = 0; i < 2; i++) {
   if (!secret_password_store_sync(&schema, SECRET_COLLECTION_DEFAULT, "Interop fixture", values[i], NULL, &error, "test-id", "isolated-roundtrip", NULL)) goto fail;
