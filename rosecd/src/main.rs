@@ -136,6 +136,8 @@ async fn run() -> Result<()> {
     )
     .await?;
 
+    state.set_config_path(config_path.clone());
+
     // Populate the cache before claiming the bus name so the first
     // SearchItems sees sidecar entries — otherwise Chromium-based clients
     // race in, read empty, and overwrite their libsecret entries.
@@ -1524,6 +1526,7 @@ async fn config_watcher(
             continue;
         }
 
+        let _reload = state.config_reload.lock().await;
         let new_config = match load_config(&config_path) {
             Ok(c) => c,
             Err(e) => {

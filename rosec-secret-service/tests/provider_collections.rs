@@ -295,6 +295,108 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     assert_ne!(prompt.as_str(), "/");
     assert_eq!(primary.items.lock().unwrap()[0].label, "new");
 
+    // D-Bus alias changes persist to the same config consumed at startup,
+    // and affect clients on the existing connection before SetAlias returns.
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    let initial = collection_config();
+    rosec_core::config_edit::set_collections(
+        &config_path,
+        &initial.collection,
+        &initial.all_collection_aliases,
+    )
+    .unwrap();
+    state.set_config_path(config_path.clone());
+    let root = OwnedObjectPath::try_from("/").unwrap();
+    let all = OwnedObjectPath::try_from(format!("{SERVICE_PATH}/collection/all")).unwrap();
+    service
+        .call::<_, _, ()>("SetAlias", &("login", &root))
+        .await
+        .unwrap();
+    let alias: OwnedObjectPath = service.call("ReadAlias", &("login",)).await.unwrap();
+    assert_eq!(&alias, work_path);
+    service
+        .call::<_, _, ()>("SetAlias", &("login", &all))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .call::<_, _, OwnedObjectPath>("ReadAlias", &("login",))
+            .await
+            .unwrap(),
+        all
+    );
+    service
+        .call::<_, _, ()>("SetAlias", &("default", &root))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .call::<_, _, OwnedObjectPath>("ReadAlias", &("default",))
+            .await
+            .unwrap(),
+        all
+    );
+    service
+        .call::<_, _, ()>("SetAlias", &("custom", work_path))
+        .await
+        .unwrap();
+    let custom = Proxy::new(
+        &client,
+        dest,
+        format!("{SERVICE_PATH}/aliases/custom"),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        custom.get_property::<String>("Label").await.unwrap(),
+        "work"
+    );
+
+    let persisted = rosec_core::config_load::load(&config_path).unwrap().config;
+    assert_eq!(persisted.all_collection_aliases, ["login"]);
+    assert_eq!(persisted.collection[0].aliases, ["custom"]);
+    let restarted = zbus::Connection::session().await.unwrap();
+    let restart_providers: Vec<Arc<dyn Provider>> = vec![
+        primary.clone(),
+        secondary.clone(),
+        external.clone(),
+        unassigned.clone(),
+    ];
+    let _restarted_state = register_objects_with_full_config(
+        &restarted,
+        restart_providers,
+        Arc::clone(&state.router),
+        Arc::new(SessionManager::new()),
+        HashMap::new(),
+        HashMap::new(),
+        PromptConfig::default(),
+        persisted,
+    )
+    .await
+    .unwrap();
+    let fresh_service = Proxy::new(
+        &client,
+        restarted.unique_name().unwrap().as_str(),
+        SERVICE_PATH,
+        "org.freedesktop.Secret.Service",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fresh_service
+            .call::<_, _, OwnedObjectPath>("ReadAlias", &("custom",))
+            .await
+            .unwrap(),
+        *work_path
+    );
+
+    state
+        .reload_collections(&collection_config())
+        .await
+        .unwrap();
+
     // Reuse the same bus and alias proxy while applying new membership and writers.
     let mut next = collection_config();
     next.collection.remove(1);

@@ -138,7 +138,8 @@ with `rosec collection alias <name>` resets it to its usual behavior.
 To assign aliases to `all` in TOML, set a top-level list such as
 `all_collection_aliases = ["login"]`. The name `all` is reserved for the
 built-in collection.
-Use `rosec collection remove <id>` to remove a named view and its aliases. When
+Desktop clients can also move or clear aliases through Secret Service. Use
+`rosec collection remove <id>` to remove a named view and its aliases. When
 collections come from config includes, the CLI writes the effective collection
 list into the main config file.
 

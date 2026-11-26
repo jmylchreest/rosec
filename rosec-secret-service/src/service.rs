@@ -208,21 +208,19 @@ impl SecretService {
         Ok(to_object_path(self.state.collections().alias(name)))
     }
 
-    fn set_alias(
+    async fn set_alias(
         &self,
         name: &str,
         collection: zbus::ObjectPath<'_>,
         #[zbus(header)] header: Header<'_>,
     ) -> Result<(), FdoError> {
         log_dbus_caller("service", "SetAlias", &header);
-        if self.state.collections().legacy
-            || self.state.collections().alias(name) == collection.as_str()
-        {
-            return Ok(());
-        }
-        Err(FdoError::NotSupported(
-            "manage aliases with rosec collection".into(),
-        ))
+        let state = Arc::clone(&self.state);
+        let name = name.to_owned();
+        let path = collection.as_str().to_owned();
+        self.state
+            .run_on_tokio(async move { state.persist_collection_alias(&name, &path).await })
+            .await?
     }
 
     async fn lock(
@@ -312,7 +310,7 @@ impl SecretService {
         let name = if alias.is_empty() { "default" } else { &alias };
         let layout = self.state.collections();
         let path = layout.alias(name);
-        if path == "/" && !layout.legacy {
+        if path == "/" {
             return Err(FdoError::NotSupported(
                 "manage collections with rosec collection".into(),
             ));
