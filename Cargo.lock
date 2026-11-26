@@ -4797,6 +4797,7 @@ dependencies = [
  "hkdf",
  "hmac 0.13.0",
  "http",
+ "libc",
  "minisign",
  "minisign-verify",
  "notify",

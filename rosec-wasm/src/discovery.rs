@@ -41,6 +41,8 @@ struct VerifiedPlugin {
 
 /// Maximum `.wasm` file size accepted during probing (10 MiB).
 const MAX_WASM_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_POLICY_SIZE_BYTES: u64 = 1024 * 1024;
+const MAX_SIGNATURE_SIZE_BYTES: u64 = 64 * 1024;
 
 /// Fuel limit for the `plugin_manifest` call during probing (per plugin instance).
 /// 250K instructions — ~6× headroom over the most complex observed provider
@@ -446,24 +448,25 @@ impl PluginBundle {
     /// parsing (and schema-validating) the policy. The `Err` variant
     /// carries the rejection reason as a single human-readable string.
     pub fn load(wasm_path: &Path) -> Result<Self, String> {
-        let wasm_bytes = std::fs::read(wasm_path)
+        let wasm_bytes = crate::bounded_file::read(wasm_path, MAX_WASM_SIZE_BYTES)
             .map_err(|e| format!("failed to read WASM file '{}': {e}", wasm_path.display()))?;
 
         let policy_path = policy_path_for(wasm_path);
-        let policy_bytes = std::fs::read(&policy_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "policy file '{}' not found (required for all wasm_verify modes; \
+        let policy_bytes =
+            crate::bounded_file::read(&policy_path, MAX_POLICY_SIZE_BYTES).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "policy file '{}' not found (required for all wasm_verify modes; \
                      disabled mode skips the signature check, not the policy)",
-                    policy_path.display()
-                )
-            } else {
-                format!(
-                    "failed to read policy file '{}': {e}",
-                    policy_path.display()
-                )
-            }
-        })?;
+                        policy_path.display()
+                    )
+                } else {
+                    format!(
+                        "failed to read policy file '{}': {e}",
+                        policy_path.display()
+                    )
+                }
+            })?;
 
         let policy = PluginPolicy::from_toml_bytes(&policy_bytes)
             .map_err(|e| format!("policy file '{}' parse failed: {e}", policy_path.display()))?;
@@ -549,22 +552,21 @@ impl PluginBundle {
     /// line of a `.pub` file). Used by author tooling to check bundles
     /// signed with a non-release key.
     pub fn verify_signature_with(&self, pubkey_base64: &str) -> Result<(), String> {
-        if !self.signature_path.exists() {
-            return Err(format!(
-                "signature file '{}' not found (set wasm_verify = \"disabled\" \
-                 to load unsigned plugins for local development)",
-                self.signature_path.display(),
-            ));
-        }
-
+        let signature_bytes =
+            crate::bounded_file::read(&self.signature_path, MAX_SIGNATURE_SIZE_BYTES).map_err(
+                |e| {
+                    format!(
+                        "failed to read signature file '{}': {e}",
+                        self.signature_path.display()
+                    )
+                },
+            )?;
+        let signature_text = std::str::from_utf8(&signature_bytes)
+            .map_err(|e| format!("invalid signature encoding: {e}"))?;
+        let signature =
+            Signature::decode(signature_text).map_err(|e| format!("invalid signature: {e}"))?;
         let pk = PublicKey::from_base64(pubkey_base64)
             .map_err(|e| format!("invalid public key: {e}"))?;
-        let signature = Signature::from_file(&self.signature_path).map_err(|e| {
-            format!(
-                "failed to read signature file '{}': {e}",
-                self.signature_path.display()
-            )
-        })?;
 
         let combined = policy::signature_input(&self.wasm_bytes, &self.policy_bytes);
         pk.verify(&combined, &signature, false).map_err(|e| {
