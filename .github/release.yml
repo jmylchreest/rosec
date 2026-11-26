@@ -1,0 +1,22 @@
+# Used by GitHub when the tagged release workflow generates its release notes.
+# Use breaking-change for PRs that require action when upgrading.
+changelog:
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Enhancements
+      labels:
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - '*'
