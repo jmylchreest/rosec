@@ -59,6 +59,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +68,7 @@
 #include <syslog.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <grp.h>
 #include <pwd.h>
@@ -178,6 +181,56 @@ write_password_to_pipe(int write_fd, const char *password)
     return (written == 1) ? 0 : -1;
 }
 
+/* The forked child has a private fd table. Use kernel interfaces here
+ * so a multithreaded PAM caller cannot leave a libc directory lock held. */
+static int
+close_inherited_fds(void)
+{
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, (unsigned int)STDERR_FILENO + 1, UINT_MAX, 0) == 0)
+        return 0;
+#endif
+
+#ifdef SYS_getdents64
+    /* Older kernels or filters can reject close_range. Enumerate the actual
+     * descriptors, including ones above a subsequently lowered RLIMIT_NOFILE. */
+    struct fd_dirent {
+        uint64_t inode;
+        int64_t offset;
+        unsigned short reclen;
+        unsigned char type;
+        char name[];
+    };
+    _Alignas(struct fd_dirent) char buf[4096];
+    int dir = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir < 0)
+        return -1;
+
+    long count;
+    do {
+        count = syscall(SYS_getdents64, dir, buf, sizeof(buf));
+        for (long pos = 0; pos < count;) {
+            const struct fd_dirent *entry = (const void *)(buf + pos);
+            int fd = 0;
+            const char *digit = entry->name;
+            for (; *digit >= '0' && *digit <= '9'; digit++) {
+                if (fd > (INT_MAX - (*digit - '0')) / 10)
+                    break;
+                fd = fd * 10 + (*digit - '0');
+            }
+            if (*digit == '\0' && fd > STDERR_FILENO && fd != dir)
+                close(fd);
+            pos += entry->reclen;
+        }
+    } while (count > 0 || (count < 0 && errno == EINTR));
+
+    close(dir);
+    return count == 0 ? 0 : -1;
+#else
+    return -1;
+#endif
+}
+
 /* ── Fork/exec the unlock helper (fire-and-forget) ────────────────── */
 
 /*
@@ -249,8 +302,8 @@ run_unlock_helper(const char *password, const char *username)
 
         /* Close all fds above stderr.  This prevents leaking parent
          * fds (D-Bus sockets, log files, etc.) into the helper. */
-        for (int fd = STDERR_FILENO + 1; fd < 1024; fd++)
-            close(fd);
+        if (close_inherited_fds() < 0)
+            _exit(1);
 
         /* Redirect stdout/stderr to /dev/null.  The helper should
          * never produce visible output — all communication is via
@@ -557,8 +610,8 @@ run_chauthtok_helper(const char *old_password, const char *new_password,
         if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
             _exit(1);
 
-        for (int fd = STDERR_FILENO + 1; fd < 1024; fd++)
-            close(fd);
+        if (close_inherited_fds() < 0)
+            _exit(1);
 
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {

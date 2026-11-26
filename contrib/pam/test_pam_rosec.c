@@ -28,6 +28,7 @@
 #define _GNU_SOURCE
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -253,8 +254,26 @@ test_session_sends_password(void)
     /* Remove old output file */
     unlink(g_mock_output);
 
+    int initial = open("/dev/null", O_RDONLY);
+    if (initial < 0)
+        return 0;
+    int high_fd = fcntl(initial, F_DUPFD, 1024);
+    close(initial);
+    if (high_fd < 0)
+        return 0;
+
+    char fd_text[32];
+    snprintf(fd_text, sizeof(fd_text), "%d", high_fd);
+    if (setenv("MOCK_CLOSED_FD", fd_text, 1) < 0) {
+        close(high_fd);
+        return 0;
+    }
+
     pam_result_t r = run_pam_transaction(
         "rosec-test", "nobody", g_test_password, 1, 1);
+
+    unsetenv("MOCK_CLOSED_FD");
+    close(high_fd);
 
     if (r.auth_ret != PAM_SUCCESS || r.session_ret != PAM_SUCCESS)
         return 0;
