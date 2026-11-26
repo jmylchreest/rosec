@@ -34,6 +34,7 @@
 //! | `parse_notification`     | `NotificationFrame`      | `NotificationAction`         |
 
 pub mod auth_cache;
+mod bounded_file;
 pub mod cache;
 pub mod discovery;
 pub(crate) mod host_file;

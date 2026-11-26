@@ -118,6 +118,8 @@ fn check_allowed(state: &FileState, path: &Path) -> Result<PathBuf, extism::Erro
     Ok(canon)
 }
 
+const MAX_PROVIDER_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// `file_read(path: string) -> bytes`
 fn file_read_impl(
     data: &mut CurrentPlugin,
@@ -136,7 +138,7 @@ fn file_read_impl(
     let canon = check_allowed(&state, Path::new(&raw_path))?;
     drop(state);
 
-    let bytes = std::fs::read(&canon)
+    let bytes = crate::bounded_file::read(&canon, MAX_PROVIDER_FILE_BYTES)
         .map_err(|e| extism::Error::msg(format!("file_read: '{}': {e}", canon.display())))?;
 
     let out = write_output_bytes(data, &bytes)?;

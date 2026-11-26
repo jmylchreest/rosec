@@ -326,7 +326,7 @@ Two host imports give per-file scoping instead, registered in the
 
 | Import           | Args                | Returns                        | Purpose |
 |------------------|---------------------|--------------------------------|---------|
-| `file_read`      | `path: string`      | `bytes`                        | Read the entire file. Path must be in the per-provider allow-list. |
+| `file_read`      | `path: string`      | `bytes`                        | Read an allowlisted regular file up to 64 MiB. |
 | `file_stat`      | `path: string`      | `{ mtime_secs, size }` JSON    | Stat without reading. Used for cheap mtime-poll cache invalidation. |
 | `register_watch` | `path: string`      | `()`                           | Subscribe to inotify-style change events. Path must be in the same allow-list. |
 
