@@ -412,12 +412,29 @@ fn packaged_daemon_path(helper: &std::path::Path) -> Option<std::path::PathBuf> 
     }
 }
 
-fn daemon_executable() -> Result<std::path::PathBuf> {
-    if let Some(path) = option_env!("ROSEC_PAM_DAEMON_PATH") {
-        return Ok(path.into());
+fn daemon_executables(
+    configured: Option<&str>,
+    helper: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    if let Some(configured) = configured {
+        let paths: Vec<_> = configured
+            .split(',')
+            .map(str::trim)
+            .map(std::path::PathBuf::from)
+            .collect();
+        anyhow::ensure!(
+            paths.iter().all(|path| path.is_absolute()),
+            "ROSEC_PAM_DAEMON_PATH must list absolute executable paths"
+        );
+        return Ok(paths);
     }
-    let helper = std::env::current_exe().context("locate installed PAM helper")?;
-    Ok(packaged_daemon_path(&helper).unwrap_or_else(|| "/usr/bin/rosecd".into()))
+    let system = std::path::PathBuf::from("/usr/bin/rosecd");
+    let mut paths: Vec<_> = packaged_daemon_path(helper)
+        .filter(|path| path != &system)
+        .into_iter()
+        .collect();
+    paths.push(system);
+    Ok(paths)
 }
 
 fn check_daemon_executable(executable: &std::path::Path, peer: &std::path::Path) -> Result<()> {
@@ -469,10 +486,15 @@ async fn daemon_proxy(conn: zbus::Connection) -> Result<zbus::Proxy<'static>> {
     let pid = bus
         .get_connection_unix_process_id(destination.clone())
         .await?;
-    check_daemon_executable(
-        &daemon_executable()?,
-        std::path::Path::new(&format!("/proc/{pid}/exe")),
-    )?;
+    let helper = std::env::current_exe().context("locate installed PAM helper")?;
+    let candidates = daemon_executables(option_env!("ROSEC_PAM_DAEMON_PATH"), &helper)?;
+    let peer = std::path::PathBuf::from(format!("/proc/{pid}/exe"));
+    anyhow::ensure!(
+        candidates
+            .iter()
+            .any(|path| check_daemon_executable(path, &peer).is_ok()),
+        "D-Bus peer does not match a trusted rosecd executable"
+    );
     drop(bus);
     // Bind every subsequent request, including credential transfer, to the
     // verified unique connection. A new well-known name owner cannot take over.
@@ -727,6 +749,27 @@ mod daemon_identity_tests {
                 std::path::Path::new(daemon)
             );
         }
+    }
+
+    #[test]
+    fn accepts_configured_path_lists_and_defaults() {
+        use std::path::{Path, PathBuf};
+        let helper = Path::new("/nix/store/example-rosec/libexec/rosec/rosec-pam-unlock");
+        assert_eq!(
+            daemon_executables(None, helper).unwrap(),
+            [
+                PathBuf::from("/nix/store/example-rosec/bin/rosecd"),
+                PathBuf::from("/usr/bin/rosecd")
+            ]
+        );
+        assert_eq!(
+            daemon_executables(Some("/opt/bin/rosecd, /usr/bin/rosecd"), helper).unwrap(),
+            [
+                PathBuf::from("/opt/bin/rosecd"),
+                PathBuf::from("/usr/bin/rosecd")
+            ]
+        );
+        assert!(daemon_executables(Some("/usr/bin/rosecd,rosecd"), helper).is_err());
     }
 
     #[test]
