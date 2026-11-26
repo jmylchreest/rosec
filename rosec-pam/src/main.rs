@@ -401,7 +401,7 @@ async fn connect_and_wait_for_daemon() -> Result<zbus::Proxy<'static>> {
     }
 }
 
-const DEFAULT_DAEMON_PATHS: &str = "/usr/bin/rosecd,$ORIGIN/rosecd,$ORIGIN/../../bin/rosecd";
+const DEFAULT_DAEMON_PATHS: &str = "/usr/bin/rosecd,@ORIGIN@/rosecd,@ORIGIN@/../../bin/rosecd";
 
 fn daemon_executables(
     configured: Option<&str>,
@@ -410,7 +410,7 @@ fn daemon_executables(
     let mut paths = Vec::new();
     for entry in configured.unwrap_or(DEFAULT_DAEMON_PATHS).split(',') {
         let entry = entry.trim();
-        let path = if let Some(mut relative) = entry.strip_prefix("$ORIGIN/") {
+        let path = if let Some(mut relative) = entry.strip_prefix("@ORIGIN@/") {
             let mut directory = helper.parent().context("locate PAM helper directory")?;
             while let Some(rest) = relative.strip_prefix("../") {
                 directory = directory
@@ -432,7 +432,7 @@ fn daemon_executables(
         };
         anyhow::ensure!(
             path.is_absolute(),
-            "ROSEC_PAM_DAEMON_PATH entries must be absolute or start with $ORIGIN/"
+            "ROSEC_PAM_DAEMON_PATH entries must be absolute or start with @ORIGIN@/"
         );
         if !paths.contains(&path) {
             paths.push(path);
@@ -765,7 +765,7 @@ mod daemon_identity_tests {
             daemon_executables(Some(DEFAULT_DAEMON_PATHS), helper).unwrap()
         );
         assert_eq!(
-            daemon_executables(Some("$ORIGIN/../../bin/rosecd"), helper).unwrap(),
+            daemon_executables(Some("@ORIGIN@/../../bin/rosecd"), helper).unwrap(),
             [PathBuf::from("/nix/store/example-rosec/bin/rosecd")]
         );
         assert_eq!(
