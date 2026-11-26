@@ -9,7 +9,7 @@ use fuser::{
 };
 
 /// Newtype that lets us hand an `Arc<T>` to fuser, which expects a value
-/// implementing `Filesystem`.  Forwards every call to the inner `T`.
+/// implementing `Filesystem` for the read-only SSH and TOTP mounts.
 pub(crate) struct ArcFs<T>(pub Arc<T>);
 
 impl<T> Filesystem for ArcFs<T>
@@ -57,6 +57,18 @@ where
     ) {
         self.0
             .read(req, ino, fh, offset, size, flags, lock_owner, reply);
+    }
+
+    fn flush(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        // These mounts neither buffer writes nor manage file locks.
+        reply.ok();
     }
 
     fn readdir(
