@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const VAULT_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_PBKDF2_ITERATIONS: u32 = 200_000;
@@ -79,7 +80,8 @@ pub struct VaultItemData {
     pub id: String,
     pub label: String,
     pub attributes: HashMap<String, String>,
-    pub secrets: HashMap<String, String>,
+    /// Base64-encoded values, scrubbed when replaced or dropped.
+    pub secrets: HashMap<String, Zeroizing<String>>,
     pub created: i64,
     pub modified: i64,
 }

@@ -106,11 +106,13 @@ pub(crate) fn item_ssh_private_key(
         .ok_or(ProviderError::NotFound)?;
 
     let raw = BASE64_STANDARD
-        .decode(encoded)
+        .decode(encoded.as_str())
         .map_err(|e| ProviderError::Other(anyhow::anyhow!("base64 decode failed: {e}")))?;
 
-    let pem = String::from_utf8(raw).map_err(|e| {
-        ProviderError::Other(anyhow::anyhow!("private key is not valid UTF-8: {e}"))
+    let pem = String::from_utf8(raw).map_err(|error| {
+        let reason = error.utf8_error();
+        drop(Zeroizing::new(error.into_bytes()));
+        ProviderError::Other(anyhow::anyhow!("private key is not valid UTF-8: {reason}"))
     })?;
 
     Ok(SshPrivateKeyMaterial {

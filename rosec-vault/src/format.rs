@@ -37,7 +37,7 @@ struct V2ItemRef<'a> {
     id: &'a str,
     label: &'a str,
     attributes: &'a HashMap<String, String>,
-    secrets: &'a HashMap<String, String>,
+    secrets: &'a HashMap<String, Zeroizing<String>>,
     created: i64,
     modified: i64,
 }
@@ -52,7 +52,7 @@ struct V2Item {
     id: String,
     label: String,
     attributes: HashMap<String, String>,
-    secrets: HashMap<String, String>,
+    secrets: HashMap<String, Zeroizing<String>>,
     created: i64,
     modified: i64,
 }
@@ -78,7 +78,7 @@ struct V3Item {
     id: String,
     label: String,
     attributes: HashMap<String, String>,
-    secrets: HashMap<String, String>,
+    secrets: HashMap<String, Zeroizing<String>>,
     created: i64,
     modified: i64,
     content_types: HashMap<String, String>,
