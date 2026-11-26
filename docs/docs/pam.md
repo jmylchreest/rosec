@@ -108,7 +108,7 @@ It also checks `/usr/bin/rosecd`.
 A user profile can point into a system-managed package store.
 
 For split packages or custom layouts, set `ROSEC_PAM_DAEMON_PATH` at build
-time to a comma-separated list of absolute daemon paths. This replaces the
+time to a comma-separated list of absolute or helper-relative daemon paths. This replaces the
 default list. If the helper cannot
 verify the daemon, or the installation is user-writable, OS login proceeds
 and the vault can be unlocked manually.

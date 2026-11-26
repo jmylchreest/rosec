@@ -401,39 +401,43 @@ async fn connect_and_wait_for_daemon() -> Result<zbus::Proxy<'static>> {
     }
 }
 
-fn packaged_daemon_path(helper: &std::path::Path) -> Option<std::path::PathBuf> {
-    let directory = helper.parent()?;
-    if directory.ends_with("lib/rosec") || directory.ends_with("libexec/rosec") {
-        Some(directory.parent()?.parent()?.join("bin/rosecd"))
-    } else if directory.ends_with("bin") {
-        Some(directory.join("rosecd"))
-    } else {
-        None
-    }
-}
+const DEFAULT_DAEMON_PATHS: &str = "/usr/bin/rosecd,$ORIGIN/rosecd,$ORIGIN/../../bin/rosecd";
 
 fn daemon_executables(
     configured: Option<&str>,
     helper: &std::path::Path,
 ) -> Result<Vec<std::path::PathBuf>> {
-    if let Some(configured) = configured {
-        let paths: Vec<_> = configured
-            .split(',')
-            .map(str::trim)
-            .map(std::path::PathBuf::from)
-            .collect();
+    let mut paths = Vec::new();
+    for entry in configured.unwrap_or(DEFAULT_DAEMON_PATHS).split(',') {
+        let entry = entry.trim();
+        let path = if let Some(mut relative) = entry.strip_prefix("$ORIGIN/") {
+            let mut directory = helper.parent().context("locate PAM helper directory")?;
+            while let Some(rest) = relative.strip_prefix("../") {
+                directory = directory
+                    .parent()
+                    .context("daemon path goes above filesystem root")?;
+                relative = rest;
+            }
+            let relative = std::path::Path::new(relative);
+            anyhow::ensure!(
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "invalid helper-relative PAM daemon path"
+            );
+            directory.join(relative)
+        } else {
+            entry.into()
+        };
         anyhow::ensure!(
-            paths.iter().all(|path| path.is_absolute()),
-            "ROSEC_PAM_DAEMON_PATH must list absolute executable paths"
+            path.is_absolute(),
+            "ROSEC_PAM_DAEMON_PATH entries must be absolute or start with $ORIGIN/"
         );
-        return Ok(paths);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
     }
-    let system = std::path::PathBuf::from("/usr/bin/rosecd");
-    let mut paths: Vec<_> = packaged_daemon_path(helper)
-        .filter(|path| path != &system)
-        .into_iter()
-        .collect();
-    paths.push(system);
     Ok(paths)
 }
 
@@ -744,9 +748,10 @@ mod daemon_identity_tests {
                 "/nix/store/example-rosec/bin/rosecd",
             ),
         ] {
-            assert_eq!(
-                packaged_daemon_path(std::path::Path::new(helper)).unwrap(),
-                std::path::Path::new(daemon)
+            assert!(
+                daemon_executables(None, std::path::Path::new(helper))
+                    .unwrap()
+                    .contains(&std::path::PathBuf::from(daemon))
             );
         }
     }
@@ -757,10 +762,11 @@ mod daemon_identity_tests {
         let helper = Path::new("/nix/store/example-rosec/libexec/rosec/rosec-pam-unlock");
         assert_eq!(
             daemon_executables(None, helper).unwrap(),
-            [
-                PathBuf::from("/nix/store/example-rosec/bin/rosecd"),
-                PathBuf::from("/usr/bin/rosecd")
-            ]
+            daemon_executables(Some(DEFAULT_DAEMON_PATHS), helper).unwrap()
+        );
+        assert_eq!(
+            daemon_executables(Some("$ORIGIN/../../bin/rosecd"), helper).unwrap(),
+            [PathBuf::from("/nix/store/example-rosec/bin/rosecd")]
         );
         assert_eq!(
             daemon_executables(Some("/opt/bin/rosecd, /usr/bin/rosecd"), helper).unwrap(),

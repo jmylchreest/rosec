@@ -22,7 +22,7 @@ ROSEC_PAM_DAEMON_PATH=/opt/rosec/bin/rosecd,/usr/bin/rosecd \
   cargo build --release --locked -p rosec-pam
 ```
 
-These are absolute paths on the installed system, outside the staging directory. Only a root-owned daemon in a trusted installation qualifies. If the helper cannot verify it, OS login continues. The user can unlock the vault manually and may need to update its unlock password separately.
+These paths refer to the installed system, outside the staging directory. An entry beginning with `$ORIGIN/` is resolved from the directory containing the installed PAM helper. Quote the list when using `$ORIGIN` in a shell. Only a root-owned daemon in a trusted installation qualifies. If the helper cannot verify it, OS login continues. The user can unlock the vault manually and may need to update its unlock password separately.
 
 ## How provider packages establish trust
 
