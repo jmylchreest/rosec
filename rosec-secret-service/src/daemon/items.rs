@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rosec_core::{ItemMeta, ItemType, ItemUpdate, NewItem, Provider, SecretBytes};
+use rosec_core::{Capability, ItemMeta, ItemType, ItemUpdate, NewItem, Provider, SecretBytes};
 use tracing::info;
 use zbus::fdo::Error as FdoError;
 use zbus::interface;
@@ -37,34 +37,16 @@ impl RosecItems {
                 .ok_or_else(|| FdoError::Failed(format!("provider not found: {provider_id}")))
         }
     }
-}
 
-#[interface(name = "org.rosec.Items")]
-impl RosecItems {
-    /// Create an item with full control over type and multiple secrets.
-    ///
-    /// Unlike the standard `CreateItem` (which only supports a single `"secret"`
-    /// key), this method accepts:
-    ///
-    /// - `label`: human-readable item name
-    /// - `item_type`: canonical rosec type string (`"generic"`, `"login"`,
-    ///   `"ssh-key"`, `"note"`, `"card"`, `"identity"`)
-    /// - `attributes`: public attribute key-value pairs
-    /// - `secrets`: map of secret attribute name to raw bytes (e.g.
-    ///   `{"password": [...], "totp": [...]}`)
-    /// - `replace`: if `true`, overwrite an existing item with matching attributes
-    ///
-    /// Returns the D-Bus object path of the created item.
-    async fn create_item_extended(
+    async fn create_item(
         &self,
+        provider_id: Option<&str>,
         label: &str,
         item_type: &str,
         attributes: HashMap<String, String>,
         secrets: HashMap<String, Vec<u8>>,
         replace: bool,
-        #[zbus(header)] header: Header<'_>,
     ) -> Result<String, FdoError> {
-        log_dbus_caller("items-extension", "CreateItemExtended", &header);
         self.state.touch_activity();
 
         let parsed_type: ItemType = item_type
@@ -89,15 +71,22 @@ impl RosecItems {
         // writable provider.  Read-only matches do not block the write — they
         // are shadowed by the new item, and the dedup layer presents the
         // priority winner to clients.
-        let write_provider = match self
-            .state
-            .find_writable_match(&item.attributes)
-            .map_err(|e| FdoError::Failed(format!("match lookup failed: {e}")))?
-        {
-            Some(provider) => provider,
-            None => self.state.write_provider().ok_or_else(|| {
-                FdoError::NotSupported("no write-capable provider available".into())
-            })?,
+        let write_provider = if let Some(id) = provider_id {
+            let provider = self.resolve_provider(id)?;
+            rosec_core::require(provider.as_ref(), Capability::Write)
+                .map_err(map_provider_error)?;
+            provider
+        } else {
+            match self
+                .state
+                .find_writable_match(&item.attributes)
+                .map_err(|e| FdoError::Failed(format!("match lookup failed: {e}")))?
+            {
+                Some(provider) => provider,
+                None => self.state.write_provider().ok_or_else(|| {
+                    FdoError::NotSupported("no write-capable provider available".into())
+                })?,
+            }
         };
 
         let supported = write_provider.supported_item_types();
@@ -128,6 +117,61 @@ impl RosecItems {
             .map_err(|e| FdoError::Failed(format!("cache update failed: {e}")))?;
 
         Ok(item_path)
+    }
+}
+
+#[interface(name = "org.rosec.Items")]
+impl RosecItems {
+    /// Create an item with full control over type and multiple secrets.
+    ///
+    /// Unlike the standard `CreateItem` (which only supports a single `"secret"`
+    /// key), this method accepts:
+    ///
+    /// - `label`: human-readable item name
+    /// - `item_type`: canonical rosec type string (`"generic"`, `"login"`,
+    ///   `"ssh-key"`, `"note"`, `"card"`, `"identity"`)
+    /// - `attributes`: public attribute key-value pairs
+    /// - `secrets`: map of secret attribute name to raw bytes (e.g.
+    ///   `{"password": [...], "totp": [...]}`)
+    /// - `replace`: if `true`, overwrite an existing item with matching attributes
+    ///
+    /// Returns the D-Bus object path of the created item.
+    async fn create_item_extended(
+        &self,
+        label: &str,
+        item_type: &str,
+        attributes: HashMap<String, String>,
+        secrets: HashMap<String, Vec<u8>>,
+        replace: bool,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<String, FdoError> {
+        log_dbus_caller("items-extension", "CreateItemExtended", &header);
+        self.create_item(None, label, item_type, attributes, secrets, replace)
+            .await
+    }
+
+    /// Create an item in the specified provider. An empty ID uses automatic routing.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_item_in_provider(
+        &self,
+        provider_id: &str,
+        label: &str,
+        item_type: &str,
+        attributes: HashMap<String, String>,
+        secrets: HashMap<String, Vec<u8>>,
+        replace: bool,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<String, FdoError> {
+        log_dbus_caller("items-extension", "CreateItemInProvider", &header);
+        self.create_item(
+            (!provider_id.is_empty()).then_some(provider_id),
+            label,
+            item_type,
+            attributes,
+            secrets,
+            replace,
+        )
+        .await
     }
 
     /// Update an existing item's label, type, attributes, and/or secrets.

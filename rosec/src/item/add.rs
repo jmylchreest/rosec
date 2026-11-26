@@ -5,7 +5,7 @@
 //! 3. Generate a TOML template for the item type
 //! 4. Open `$EDITOR` for the user to fill in
 //! 5. Parse the edited TOML
-//! 6. Call `CreateItemExtended` on `org.rosec.Items`
+//! 6. Call `CreateItemInProvider` on `org.rosec.Items`
 //! 7. Print the created item path / ID
 
 use anyhow::{Result, bail};
@@ -126,8 +126,9 @@ pub async fn run(args: ItemAddArgs) -> Result<()> {
 
         let item_path: String = items_proxy
             .call(
-                "CreateItemExtended",
+                "CreateItemInProvider",
                 &(
+                    &provider_id,
                     &parsed.label,
                     &parsed.item_type,
                     &parsed.attributes,

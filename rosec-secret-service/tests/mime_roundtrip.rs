@@ -97,3 +97,85 @@ async fn plain_individual_and_bulk_reads_preserve_selected_mime() {
     vault.lock().await.unwrap();
     assert!(item.call_method("GetSecret", &(session,)).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_provider_write_stays_in_selected_vault_with_matching_items() {
+    use std::collections::HashMap;
+
+    let directory = tempfile::tempdir().unwrap();
+    let first = Arc::new(rosec_vault::LocalVault::new(
+        "first",
+        directory.path().join("first"),
+    ));
+    let second = Arc::new(rosec_vault::LocalVault::new(
+        "second",
+        directory.path().join("second"),
+    ));
+    for vault in [&first, &second] {
+        vault
+            .unlock(UnlockInput::Password(zeroize::Zeroizing::new(
+                "fixture".into(),
+            )))
+            .await
+            .unwrap();
+    }
+    let (server, _) = setup(vec![first.clone(), second.clone()]).await;
+    let client = zbus::Connection::session().await.unwrap();
+    let items = zbus::Proxy::new(
+        &client,
+        server.unique_name().unwrap().as_str(),
+        "/org/rosec/Items",
+        "org.rosec.Items",
+    )
+    .await
+    .unwrap();
+    let attributes = HashMap::from([("username", "shared")]);
+    let initial = HashMap::from([("password", vec![1u8])]);
+    let replacement = HashMap::from([("password", vec![2u8])]);
+
+    let _: String = items
+        .call(
+            "CreateItemInProvider",
+            &("first", "same", "login", &attributes, &initial, false),
+        )
+        .await
+        .unwrap();
+    let target: String = items
+        .call(
+            "CreateItemInProvider",
+            &("second", "same", "login", &attributes, &replacement, true),
+        )
+        .await
+        .unwrap();
+    let replaced: String = items
+        .call(
+            "CreateItemInProvider",
+            &(
+                "second",
+                "replacement",
+                "login",
+                &attributes,
+                &replacement,
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced, target);
+
+    let first_items = first.list_items().await.unwrap();
+    let second_items = second.list_items().await.unwrap();
+    assert_eq!(first_items.len(), 1);
+    assert_eq!(second_items.len(), 1);
+    assert_eq!(first_items[0].label, "same");
+    assert_eq!(second_items[0].label, "replacement");
+    assert!(
+        items
+            .call::<_, _, String>(
+                "CreateItemInProvider",
+                &("missing", "same", "login", &attributes, &replacement, true)
+            )
+            .await
+            .is_err()
+    );
+}
