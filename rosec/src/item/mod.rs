@@ -51,8 +51,16 @@ pub(super) struct ParsedItem {
 /// Expects sections `[item]` (with `label` and `type`), `[attributes]`, and
 /// `[secrets]`.  Empty string values in `[secrets]` are silently dropped.
 pub(super) fn parse_item_toml(content: &str) -> Result<ParsedItem> {
-    let doc: toml::Value = toml::from_str(content)
-        .map_err(|e: toml::de::Error| anyhow::anyhow!("failed to parse TOML: {e}"))?;
+    let doc: toml::Value = toml::from_str(content).map_err(|error: toml::de::Error| {
+        // The full parser diagnostic includes the original input line.
+        if let Some(prefix) = error.span().and_then(|span| content.get(..span.start)) {
+            let line = prefix.bytes().filter(|&byte| byte == b'\n').count() + 1;
+            let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+            anyhow::anyhow!("invalid item TOML at line {line}, column {column}")
+        } else {
+            anyhow::anyhow!("invalid item TOML")
+        }
+    })?;
 
     let item_table = doc
         .get("item")
@@ -455,5 +463,21 @@ pub(super) fn toml_key(k: &str) -> String {
         k.to_string()
     } else {
         toml_quote(k)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_item_toml;
+
+    #[test]
+    fn invalid_item_toml_reports_location_without_original_text() {
+        let input =
+            "[item]\nlabel = \"sample\"\n[secrets]\npassword = \"synthetic-secret\" invalid\n";
+        let error = parse_item_toml(input).err().expect("invalid TOML");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("line 4, column "));
+        assert!(!diagnostic.contains("synthetic-secret"));
+        assert!(!diagnostic.contains("invalid\n"));
     }
 }
