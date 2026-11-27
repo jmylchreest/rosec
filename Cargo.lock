@@ -4567,7 +4567,7 @@ dependencies = [
 
 [[package]]
 name = "rosec"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4591,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-core"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -4622,7 +4622,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-events"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "rosec-core",
  "tokio",
@@ -4630,7 +4630,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-fuse"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "fuser",
@@ -4643,7 +4643,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-pam"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "libc",
@@ -4655,7 +4655,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-prompt"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4676,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-secret-service"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-ssh-agent"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "libc",
@@ -4720,7 +4720,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-tools"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "clap",
@@ -4732,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-uhid"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4753,7 +4753,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-vault"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "rosec-wasm"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -4822,7 +4822,7 @@ dependencies = [
 
 [[package]]
 name = "rosecd"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "anyhow",
  "async-trait",
