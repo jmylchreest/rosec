@@ -461,6 +461,7 @@ impl ServiceState {
                 tracing::warn!(%path, %error, "could not remove retired collection object");
             }
         }
+        layout.log_changes_from(&old);
         self.events.wake();
         Ok(())
     }

@@ -53,7 +53,7 @@ impl SecretCollection {
         view: &CollectionView,
         item: &NewItem,
         replace: bool,
-    ) -> Result<Arc<dyn Provider>, SecretServiceError> {
+    ) -> Result<(Arc<dyn Provider>, &'static str, &'static str), SecretServiceError> {
         let state = &self.state.service_state;
         let owner = if replace {
             let order = state.registry.order_snapshot();
@@ -88,18 +88,31 @@ impl SecretCollection {
         } else {
             None
         };
+        let (operation, route) = if owner.is_some() {
+            ("replace", "existing_owner")
+        } else {
+            ("create", "collection_writer")
+        };
         let id = owner.as_ref().or(view.writer.as_ref()).ok_or_else(|| {
+            debug!(collection = %view.id, operation, reason = "no_writable_provider", "item write refused");
             SecretServiceError::NotSupported("collection has no write-capable provider".into())
         })?;
         let provider = state.provider_by_id(id).ok_or_else(|| {
+            debug!(collection = %view.id, provider = %id, operation, reason = "provider_unavailable", "item write refused");
             SecretServiceError::Failed(format!("collection provider '{id}' is unavailable"))
         })?;
         if !provider.capabilities().contains(&Capability::Write) {
+            let reason = if owner.is_some() {
+                "read_only_owner"
+            } else {
+                "read_only_writer"
+            };
+            debug!(collection = %view.id, provider = %id, operation, reason, "item write refused");
             return Err(SecretServiceError::NotSupported(format!(
                 "provider '{id}' is read-only"
             )));
         }
-        Ok(provider)
+        Ok((provider, operation, route))
     }
 }
 
@@ -208,8 +221,6 @@ impl SecretCollection {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretServiceError> {
-        debug!("CreateItem called (replace={replace})");
-
         let label = properties
             .get("org.freedesktop.Secret.Item.Label")
             .and_then(|v| v.downcast_ref::<String>().ok())
@@ -259,7 +270,7 @@ impl SecretCollection {
         let view = self
             .view()
             .ok_or_else(|| SecretServiceError::Failed("collection retired".into()))?;
-        let write_provider = if !view.legacy {
+        let (write_provider, operation, reason) = if !view.legacy {
             self.scoped_writer(&view, &item, replace)?
         } else {
             match self
@@ -268,7 +279,11 @@ impl SecretCollection {
                 .find_writable_match(&item.attributes)
                 .map_err(|e| SecretServiceError::Failed(format!("match lookup failed: {e}")))?
             {
-                Some(provider) => provider,
+                Some(provider) => (
+                    provider,
+                    if replace { "replace" } else { "create" },
+                    "matching_writable_provider",
+                ),
                 None => {
                     let writer = if self.path.is_some() {
                         view.writer
@@ -277,11 +292,13 @@ impl SecretCollection {
                     } else {
                         self.state.service_state.write_provider()
                     };
-                    writer.ok_or_else(|| {
+                    let writer = writer.ok_or_else(|| {
+                        debug!(collection = %view.id, operation = "create", reason = "no_writable_provider", "item write refused");
                         SecretServiceError::NotSupported(
                             "no write-capable provider available".to_string(),
                         )
-                    })?
+                    })?;
+                    (writer, "create", "collection_writer")
                 }
             }
         };
@@ -289,6 +306,7 @@ impl SecretCollection {
         // Check if the chosen provider is locked — if so, defer the operation
         // behind a prompt so the client can unlock first.
         let provider_id = write_provider.id().to_string();
+        debug!(collection = %view.id, provider = %provider_id, operation, reason, "item write routed");
         let is_locked = {
             let p = Arc::clone(&write_provider);
             self.state
@@ -301,7 +319,6 @@ impl SecretCollection {
         };
 
         if is_locked {
-            debug!(provider = %provider_id, "write provider is locked, deferring CreateItem behind prompt");
             let op = PendingOperation::CreateItem {
                 provider_id: provider_id.clone(),
                 item,
@@ -311,8 +328,9 @@ impl SecretCollection {
             let prompt_path = self
                 .state
                 .service_state
-                .register_prompt(conn, owner, provider_id, op)
+                .register_prompt(conn, owner, provider_id.clone(), op)
                 .await?;
+            debug!(collection = %view.id, provider = %provider_id, operation, reason = "provider_locked", "item write deferred");
             // Return "/" for item path and the prompt path — client must
             // complete the prompt before the item is created.
             return Ok((to_object_path("/"), to_object_path(&prompt_path)));
