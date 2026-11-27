@@ -86,6 +86,7 @@ pub struct ServiceState {
     pub registry: ProviderRegistry,
     collections: RwLock<Arc<crate::collection_layout::CollectionLayout>>,
     config_path: std::sync::OnceLock<std::path::PathBuf>,
+    collection_metadata_path: std::sync::OnceLock<std::path::PathBuf>,
     pub config_reload: tokio::sync::Mutex<()>,
     pub(crate) collection_reload: tokio::sync::Mutex<()>,
     pub router: Arc<Router>,
@@ -190,8 +191,7 @@ impl ServiceState {
         initial_config: Config,
     ) -> anyhow::Result<Self> {
         let collections = Arc::new(crate::collection_layout::CollectionLayout::new(
-            &initial_config.collection,
-            &initial_config.all_collection_aliases,
+            &initial_config,
             &providers,
         )?);
         let events = rosec_events::EventCoordinator::new(|meta| {
@@ -208,6 +208,7 @@ impl ServiceState {
         Ok(Self {
             collections: RwLock::new(collections),
             config_path: std::sync::OnceLock::new(),
+            collection_metadata_path: std::sync::OnceLock::new(),
             config_reload: tokio::sync::Mutex::new(()),
             collection_reload: tokio::sync::Mutex::new(()),
             registry: ProviderRegistry::new(providers, return_attr_map, collection_map),
@@ -233,30 +234,118 @@ impl ServiceState {
         let _ = self.config_path.set(path);
     }
 
+    pub fn collection_metadata_path(
+        state_dir: &std::path::Path,
+        config_path: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+        let absolute = std::path::absolute(config_path)?;
+        let key = Sha256::digest(absolute.as_os_str().as_encoded_bytes());
+        let mut name = String::with_capacity(69);
+        for byte in key {
+            write!(name, "{byte:02x}").expect("writing to a string");
+        }
+        name.push_str(".json");
+        Ok(state_dir.join("rosec/collections").join(name))
+    }
+
+    pub fn set_collection_metadata_path(&self, path: std::path::PathBuf) {
+        let _ = self.collection_metadata_path.set(path);
+    }
+
     pub(crate) async fn persist_collection_alias(
         self: &Arc<Self>,
         name: &str,
         path: &str,
     ) -> zbus::fdo::Result<()> {
-        use rosec_core::config::{
-            ALL_COLLECTION_ID, resolve_collections, valid_collection_component,
-        };
+        use rosec_core::config::{ALL_COLLECTION_ID, valid_collection_component};
         if name == ALL_COLLECTION_ID || !valid_collection_component(name) {
             return Err(FdoError::InvalidArgs(
                 "invalid or reserved collection alias".into(),
             ));
         }
+        if self.config_path.get().is_none() && self.collections().alias(name) == path {
+            return Ok(());
+        }
+        self.edit_collection_config(|config, layout| {
+            let target = if path == "/" {
+                None
+            } else {
+                let view = layout
+                    .canonical
+                    .get(path)
+                    .ok_or_else(|| FdoError::InvalidArgs("unknown collection".into()))?;
+                Some(view.id.as_str())
+            };
+            let old_target = if config
+                .all_collection_aliases
+                .iter()
+                .any(|alias| alias == name)
+            {
+                Some(ALL_COLLECTION_ID)
+            } else {
+                config
+                    .collection
+                    .iter()
+                    .find(|entry| entry.aliases.iter().any(|alias| alias == name))
+                    .map(|entry| entry.id.as_str())
+            };
+            if old_target == target {
+                return Ok(false);
+            }
+            rosec_core::config_edit::assign_collection_alias(
+                &mut config.collection,
+                &mut config.all_collection_aliases,
+                name,
+                target,
+            )
+            .map_err(|e| FdoError::InvalidArgs(e.to_string()))?;
+            Ok(true)
+        })
+        .await
+    }
+
+    pub(crate) async fn persist_collection_label(
+        self: &Arc<Self>,
+        path: &str,
+        label: String,
+    ) -> zbus::fdo::Result<()> {
+        self.edit_collection_config(|config, layout| {
+            let view = layout
+                .at(path)
+                .ok_or_else(|| FdoError::UnknownObject("collection retired".into()))?;
+            if view.label == label {
+                return Ok(false);
+            }
+            if view.legacy {
+                config.all_collection_label = Some(label);
+            } else if let Some(entry) = config
+                .collection
+                .iter_mut()
+                .find(|entry| entry.id == view.id)
+            {
+                entry.label = Some(label);
+            }
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn edit_collection_config(
+        self: &Arc<Self>,
+        edit: impl FnOnce(
+            &mut Config,
+            &crate::collection_layout::CollectionLayout,
+        ) -> zbus::fdo::Result<bool>,
+    ) -> zbus::fdo::Result<()> {
+        use rosec_core::config::resolve_collections;
         let _reload = self.config_reload.lock().await;
         let layout = self.collections();
-        let Some(config_path) = self.config_path.get() else {
-            return if layout.alias(name) == path {
-                Ok(())
-            } else {
-                Err(FdoError::NotSupported(
-                    "manage aliases with rosec collection".into(),
-                ))
-            };
-        };
+        let config_path = self
+            .config_path
+            .get()
+            .ok_or_else(|| FdoError::NotSupported("collection config is unavailable".into()))?;
         let lock_path = config_path.clone();
         let _edit_lock = tokio::task::spawn_blocking(move || {
             rosec_core::config_edit::lock_collection_config(&lock_path)
@@ -271,6 +360,7 @@ impl ServiceState {
         let live = self.live_config();
         if live.collection != config.collection
             || live.all_collection_aliases != config.all_collection_aliases
+            || live.all_collection_label != config.all_collection_label
             || live
                 .provider
                 .iter()
@@ -281,51 +371,19 @@ impl ServiceState {
                 "collection configuration is awaiting reload".into(),
             ));
         }
-        let target = if path == "/" {
-            None
-        } else {
-            let view = layout
-                .canonical
-                .get(path)
-                .ok_or_else(|| FdoError::InvalidArgs("unknown collection".into()))?;
-            Some(if view.legacy {
-                ALL_COLLECTION_ID
-            } else {
-                view.label.as_str()
-            })
-        };
-        let old_target = if config
-            .all_collection_aliases
-            .iter()
-            .any(|alias| alias == name)
-        {
-            Some(ALL_COLLECTION_ID)
-        } else {
-            config
-                .collection
-                .iter()
-                .find(|entry| entry.aliases.iter().any(|alias| alias == name))
-                .map(|entry| entry.id.as_str())
-        };
-        if old_target == target {
+        if !edit(&mut config, &layout)? {
             return Ok(());
         }
-        rosec_core::config_edit::assign_collection_alias(
-            &mut config.collection,
-            &mut config.all_collection_aliases,
-            name,
-            target,
-        )
-        .map_err(|e| FdoError::InvalidArgs(e.to_string()))?;
         resolve_collections(&config.collection, &config.all_collection_aliases, |id| {
             self.provider_by_id(id)
                 .map(|p| p.capabilities().contains(&Capability::Write))
         })
         .map_err(|e| FdoError::Failed(e.to_string()))?;
-        rosec_core::config_edit::set_collections(
+        rosec_core::config_edit::write_collections(
             config_path,
             &config.collection,
             &config.all_collection_aliases,
+            config.all_collection_label.as_deref(),
         )
         .map_err(|e| FdoError::Failed(e.to_string()))?;
         self.reload_collections(&config)
@@ -334,17 +392,30 @@ impl ServiceState {
         let mut live = self.live_config.write().unwrap_or_else(|e| e.into_inner());
         live.collection = config.collection;
         live.all_collection_aliases = config.all_collection_aliases;
+        live.all_collection_label = config.all_collection_label;
         Ok(())
     }
 
     pub async fn reload_collections(self: &Arc<Self>, config: &Config) -> anyhow::Result<()> {
         let _reload = self.collection_reload.lock().await;
-        let layout = Arc::new(crate::collection_layout::CollectionLayout::new(
-            &config.collection,
-            &config.all_collection_aliases,
-            &self.providers_ordered(),
-        )?);
         let old = self.collections();
+        let mut next =
+            crate::collection_layout::CollectionLayout::new(config, &self.providers_ordered())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        if let Err(error) = crate::collection_metadata::apply(
+            self.collection_metadata_path
+                .get()
+                .map(|path| path.as_path()),
+            &old,
+            &mut next,
+            now,
+        ) {
+            tracing::warn!(%error, "could not persist collection timestamps");
+            crate::collection_metadata::apply(None, &old, &mut next, now)?;
+        }
+        let layout = Arc::new(next);
         if *old == *layout {
             return Ok(());
         }
