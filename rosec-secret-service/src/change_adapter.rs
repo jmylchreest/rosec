@@ -185,6 +185,12 @@ impl View {
             if old_view.is_some_and(|old| old.label != view.label) {
                 properties.push("Label");
             }
+            if old_view.is_some_and(|old| old.times.created != view.times.created) {
+                properties.push("Created");
+            }
+            if old_view.is_some_and(|old| old.times.modified != view.times.modified) {
+                properties.push("Modified");
+            }
             if !properties.is_empty() {
                 invalidate(
                     &conn,

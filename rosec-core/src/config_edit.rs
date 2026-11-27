@@ -73,6 +73,15 @@ pub fn set_collections(
     collections: &[crate::config::CollectionConfig],
     all_aliases: &[String],
 ) -> Result<()> {
+    write_collections(config_path, collections, all_aliases, None)
+}
+
+pub fn write_collections(
+    config_path: &Path,
+    collections: &[crate::config::CollectionConfig],
+    all_aliases: &[String],
+    all_label: Option<&str>,
+) -> Result<()> {
     use std::io::Write;
 
     fn strings(values: &[String]) -> toml_edit::Array {
@@ -87,6 +96,9 @@ pub fn set_collections(
     for collection in collections {
         let mut table = Table::new();
         table["id"] = value(&collection.id);
+        if let Some(label) = &collection.label {
+            table["label"] = value(label);
+        }
         table["providers"] = value(strings(&collection.providers));
         if let Some(writer) = &collection.write_provider {
             table["write_provider"] = value(writer);
@@ -103,6 +115,9 @@ pub fn set_collections(
     };
 
     doc["all_collection_aliases"] = value(strings(all_aliases));
+    if let Some(label) = all_label {
+        doc["all_collection_label"] = value(label);
+    }
 
     let path = collection_edit_path(config_path)?;
     let parent = path.parent().context("config path has no parent")?;

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rosec_core::config::{ALL_COLLECTION_ID, CollectionConfig, resolve_collections};
+use rosec_core::config::{ALL_COLLECTION_ID, Config, resolve_collections};
 use rosec_core::{Capability, Provider};
 
 use crate::server::DEFAULT_COLLECTION_PATH;
@@ -11,7 +11,9 @@ const ALIAS_ROOT: &str = "/org/freedesktop/secrets/aliases";
 
 #[derive(PartialEq, Eq)]
 pub(crate) struct CollectionView {
+    pub id: String,
     pub label: String,
+    pub times: crate::collection_metadata::Times,
     pub providers: Vec<String>,
     pub writer: Option<String>,
     pub legacy: bool,
@@ -20,7 +22,9 @@ pub(crate) struct CollectionView {
 impl CollectionView {
     pub fn legacy() -> Self {
         Self {
+            id: ALL_COLLECTION_ID.into(),
             label: "default".into(),
+            times: Default::default(),
             providers: vec![],
             writer: None,
             legacy: true,
@@ -40,19 +44,16 @@ pub(crate) struct CollectionLayout {
 }
 
 impl CollectionLayout {
-    pub fn new(
-        config: &[CollectionConfig],
-        all_aliases: &[String],
-        providers: &[Arc<dyn Provider>],
-    ) -> anyhow::Result<Self> {
-        let legacy = config.is_empty();
+    pub fn new(config: &Config, providers: &[Arc<dyn Provider>]) -> anyhow::Result<Self> {
+        let legacy = config.collection.is_empty();
         let all_path = if legacy {
             DEFAULT_COLLECTION_PATH.to_owned()
         } else {
             format!("{COLLECTION_ROOT}/{ALL_COLLECTION_ID}")
         };
         let mut canonical = BTreeMap::new();
-        let mut aliases: BTreeMap<_, _> = all_aliases
+        let mut aliases: BTreeMap<_, _> = config
+            .all_collection_aliases
             .iter()
             .map(|alias| (alias.clone(), all_path.clone()))
             .collect();
@@ -60,14 +61,46 @@ impl CollectionLayout {
         if !legacy {
             all.label = ALL_COLLECTION_ID.into();
         }
-        canonical.insert(all_path.clone(), Arc::new(all));
-        let writers = resolve_collections(config, all_aliases, |id| {
+        if let Some(label) = &config.all_collection_label {
+            all.label = label.clone();
+        }
+        all.providers = providers
+            .iter()
+            .map(|provider| provider.id().to_owned())
+            .collect();
+        let writable = |id: &str| {
             providers
                 .iter()
-                .find(|p| p.id() == id)
-                .map(|p| p.capabilities().contains(&Capability::Write))
-        })?;
-        for (entry, writer) in config.iter().zip(writers) {
+                .any(|p| p.id() == id && p.capabilities().contains(&Capability::Write))
+        };
+        all.writer = config
+            .service
+            .write_provider
+            .as_deref()
+            .filter(|id| writable(id))
+            .or_else(|| {
+                config
+                    .provider
+                    .iter()
+                    .map(|entry| entry.id.as_str())
+                    .find(|id| writable(id))
+            })
+            .or_else(|| {
+                all.providers
+                    .iter()
+                    .map(String::as_str)
+                    .find(|id| writable(id))
+            })
+            .map(str::to_owned);
+        canonical.insert(all_path.clone(), Arc::new(all));
+        let writers =
+            resolve_collections(&config.collection, &config.all_collection_aliases, |id| {
+                providers
+                    .iter()
+                    .find(|p| p.id() == id)
+                    .map(|p| p.capabilities().contains(&Capability::Write))
+            })?;
+        for (entry, writer) in config.collection.iter().zip(writers) {
             let path = format!("{COLLECTION_ROOT}/{}", entry.id);
             for alias in &entry.aliases {
                 aliases.insert(alias.clone(), path.clone());
@@ -75,7 +108,9 @@ impl CollectionLayout {
             canonical.insert(
                 path,
                 Arc::new(CollectionView {
-                    label: entry.id.clone(),
+                    id: entry.id.clone(),
+                    label: entry.label.as_ref().unwrap_or(&entry.id).clone(),
+                    times: Default::default(),
                     providers: entry.providers.clone(),
                     writer,
                     legacy: false,

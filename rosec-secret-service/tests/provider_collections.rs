@@ -307,6 +307,10 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     )
     .unwrap();
     state.set_config_path(config_path.clone());
+    let metadata_path = directory.path().join("collection-metadata.json");
+    state.set_collection_metadata_path(metadata_path.clone());
+    state.reload_collections(&initial).await.unwrap();
+
     let root = OwnedObjectPath::try_from("/").unwrap();
     let all = OwnedObjectPath::try_from(format!("{SERVICE_PATH}/collection/all")).unwrap();
     service
@@ -354,9 +358,36 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         "work"
     );
 
+    let created = custom.get_property::<u64>("Created").await.unwrap();
+    assert!(created > 0);
+    custom
+        .set_property("Label", "Work passwords")
+        .await
+        .unwrap();
+    let direct = Proxy::new(
+        &client,
+        dest,
+        work_path.clone(),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        direct.get_property::<String>("Label").await.unwrap(),
+        "Work passwords"
+    );
+    assert_eq!(
+        direct.get_property::<u64>("Created").await.unwrap(),
+        created
+    );
+
     let persisted = rosec_core::config_load::load(&config_path).unwrap().config;
     assert_eq!(persisted.all_collection_aliases, ["login"]);
     assert_eq!(persisted.collection[0].aliases, ["custom"]);
+    assert_eq!(
+        persisted.collection[0].label.as_deref(),
+        Some("Work passwords")
+    );
     let restarted = zbus::Connection::session().await.unwrap();
     let restart_providers: Vec<Arc<dyn Provider>> = vec![
         primary.clone(),
@@ -364,7 +395,7 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         external.clone(),
         unassigned.clone(),
     ];
-    let _restarted_state = register_objects_with_full_config(
+    let restarted_state = register_objects_with_full_config(
         &restarted,
         restart_providers,
         Arc::clone(&state.router),
@@ -372,10 +403,15 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         HashMap::new(),
         HashMap::new(),
         PromptConfig::default(),
-        persisted,
+        persisted.clone(),
     )
     .await
     .unwrap();
+    restarted_state.set_collection_metadata_path(metadata_path);
+    restarted_state
+        .reload_collections(&persisted)
+        .await
+        .unwrap();
     let fresh_service = Proxy::new(
         &client,
         restarted.unique_name().unwrap().as_str(),
@@ -392,6 +428,45 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
         *work_path
     );
 
+    let restart_collection = Proxy::new(
+        &client,
+        restarted.unique_name().unwrap().as_str(),
+        work_path.clone(),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restart_collection
+            .get_property::<u64>("Created")
+            .await
+            .unwrap(),
+        created
+    );
+    let built_in = Proxy::new(
+        &client,
+        dest,
+        all.clone(),
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    let original_created = built_in.get_property::<u64>("Created").await.unwrap();
+    let original_modified = built_in.get_property::<u64>("Modified").await.unwrap();
+    // Secret Service exposes whole seconds, so make the change in a later second.
+    tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
+    let mut edited = persisted;
+    edited.service.write_provider = Some("secondary".into());
+    state.reload_collections(&edited).await.unwrap();
+    let fresh_builtin = Proxy::new(&client, dest, all, "org.freedesktop.Secret.Collection")
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_builtin.get_property::<u64>("Created").await.unwrap(),
+        original_created
+    );
+    assert!(fresh_builtin.get_property::<u64>("Modified").await.unwrap() > original_modified);
+
     state
         .reload_collections(&collection_config())
         .await
@@ -404,6 +479,7 @@ async fn collection_membership_aliases_and_write_ownership_over_dbus() {
     next.collection[0].write_provider = Some("secondary".into());
     next.collection[0].aliases.clear();
     next.collection.push(rosec_core::config::CollectionConfig {
+        label: None,
         id: "new_view".into(),
         providers: vec!["secondary".into()],
         write_provider: None,
@@ -478,6 +554,7 @@ fn collection_config() -> Config {
         .into_iter()
         .map(
             |(id, providers, writer, aliases)| rosec_core::config::CollectionConfig {
+                label: None,
                 id: id.into(),
                 providers: providers.into_iter().map(str::to_owned).collect(),
                 write_provider: writer.map(str::to_owned),

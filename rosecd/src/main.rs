@@ -137,6 +137,15 @@ async fn run() -> Result<()> {
     .await?;
 
     state.set_config_path(config_path.clone());
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")));
+    if let Some(state_dir) = state_dir {
+        state.set_collection_metadata_path(
+            rosec_secret_service::ServiceState::collection_metadata_path(&state_dir, &config_path)?,
+        );
+    }
+    state.reload_collections(&config).await?;
 
     // Populate the cache before claiming the bus name so the first
     // SearchItems sees sidecar entries — otherwise Chromium-based clients

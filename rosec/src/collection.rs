@@ -80,6 +80,7 @@ pub async fn dispatch(action: CollectionCommands) -> Result<()> {
                 entry.write_provider = write_provider;
             } else {
                 collections.push(CollectionConfig {
+                    label: None,
                     id,
                     providers,
                     write_provider,

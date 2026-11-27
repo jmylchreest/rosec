@@ -130,6 +130,19 @@ impl SecretCollection {
             .map_or_else(String::new, |view| view.label.clone())
     }
 
+    #[zbus(property)]
+    async fn set_label(&self, label: String) -> Result<(), FdoError> {
+        let path = self
+            .path
+            .clone()
+            .ok_or_else(|| FdoError::NotSupported("collection config is unavailable".into()))?;
+        let state = Arc::clone(&self.state.service_state);
+        self.state
+            .service_state
+            .run_on_tokio(async move { state.persist_collection_label(&path, label).await })
+            .await?
+    }
+
     #[zbus(property(emits_changed_signal = "invalidates"))]
     async fn locked(&self) -> bool {
         let state = Arc::clone(&self.state.service_state);
@@ -256,11 +269,20 @@ impl SecretCollection {
                 .map_err(|e| SecretServiceError::Failed(format!("match lookup failed: {e}")))?
             {
                 Some(provider) => provider,
-                None => self.state.service_state.write_provider().ok_or_else(|| {
-                    SecretServiceError::NotSupported(
-                        "no write-capable provider available".to_string(),
-                    )
-                })?,
+                None => {
+                    let writer = if self.path.is_some() {
+                        view.writer
+                            .as_deref()
+                            .and_then(|id| self.state.service_state.provider_by_id(id))
+                    } else {
+                        self.state.service_state.write_provider()
+                    };
+                    writer.ok_or_else(|| {
+                        SecretServiceError::NotSupported(
+                            "no write-capable provider available".to_string(),
+                        )
+                    })?
+                }
             }
         };
 
@@ -327,14 +349,14 @@ impl SecretCollection {
         ))
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn created(&self) -> u64 {
-        0
+        self.view().map_or(0, |view| view.times.created)
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "invalidates"))]
     fn modified(&self) -> u64 {
-        0
+        self.view().map_or(0, |view| view.times.modified)
     }
 }
 

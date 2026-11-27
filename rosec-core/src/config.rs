@@ -24,6 +24,8 @@ pub struct Config {
     pub collection: Vec<CollectionConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub all_collection_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_collection_label: Option<String>,
 }
 
 pub const ALL_COLLECTION_ID: &str = "all";
@@ -32,6 +34,8 @@ pub const ALL_COLLECTION_ID: &str = "all";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_provider: Option<String>,
@@ -771,6 +775,7 @@ mod tests {
             ("work", vec![], vec!["all".to_owned()]),
         ] {
             let collection = CollectionConfig {
+                label: None,
                 id: id.into(),
                 providers: vec!["vault".into()],
                 write_provider: None,

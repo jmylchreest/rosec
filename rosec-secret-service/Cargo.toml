@@ -29,7 +29,8 @@ libc = { workspace = true }
 wildmatch = { workspace = true }
 wait-timeout = { workspace = true }
 
+tempfile = { workspace = true }
+
 [dev-dependencies]
 num-bigint = { workspace = true }
 rosec-vault = { path = "../rosec-vault" }
-tempfile = { workspace = true }

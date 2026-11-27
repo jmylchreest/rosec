@@ -150,6 +150,13 @@ searches include every provider and keep copies from different providers visible
 The existing `[[provider]].collection` setting still adds an item attribute for
 filtering.
 
+Set an optional `label` on a named collection to change its display name
+without changing its ID. Use the top-level `all_collection_label` setting for
+the built-in collection. Secret Service clients can also rename collections.
+Rosec records collection creation and modification times in its state directory.
+The modification time tracks the label, provider membership and effective write
+destination. Item edits and alias changes have their own lifecycles.
+
 ## Cryptography
 
 | Parameter | Value |
