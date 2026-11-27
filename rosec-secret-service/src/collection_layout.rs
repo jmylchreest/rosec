@@ -129,6 +129,52 @@ impl CollectionLayout {
         })
     }
 
+    pub fn log_changes_from(&self, old: &Self) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let previous: BTreeMap<_, _> = old
+            .canonical
+            .values()
+            .map(|view| (&view.id, view))
+            .collect();
+        let current: BTreeMap<_, _> = self
+            .canonical
+            .values()
+            .map(|view| (&view.id, view))
+            .collect();
+        for (id, view) in &current {
+            if let Some(prior) = previous.get(id) {
+                let label_changed = view.label != prior.label;
+                let providers_changed = view.providers != prior.providers;
+                let writer_changed = view.writer != prior.writer;
+                if label_changed || providers_changed || writer_changed {
+                    tracing::debug!(collection = %id, label_changed, providers_changed, writer_changed,
+                        "collection updated");
+                }
+            } else {
+                tracing::debug!(collection = %id, "collection added");
+            }
+        }
+        for id in previous.keys().filter(|id| !current.contains_key(*id)) {
+            tracing::debug!(collection = %id, "collection removed");
+        }
+        for (alias, path) in &self.aliases {
+            let target = &self.canonical[path].id;
+            let previous_target = old.aliases.get(alias).map(|path| &old.canonical[path].id);
+            if previous_target != Some(target) {
+                tracing::debug!(%alias, collection = %target, "collection alias updated");
+            }
+        }
+        for alias in old
+            .aliases
+            .keys()
+            .filter(|alias| !self.aliases.contains_key(*alias))
+        {
+            tracing::debug!(%alias, "collection alias removed");
+        }
+    }
+
     pub fn alias(&self, name: &str) -> &str {
         self.aliases.get(name).map_or("/", String::as_str)
     }
